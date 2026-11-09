@@ -12,7 +12,8 @@
     "start": "node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
-    "test:review": "node --experimental-strip-types --test tests/catalogue.test.mjs tests/speaking-draft.test.mjs && node --import ./scripts/sites-env.mjs tests/recording-recovery.mjs && node tests/state-api.mjs && node tests/coach-audio.mjs && node --import ./scripts/sites-env.mjs tests/backup.mjs --miniflare"
+    "test:review": "node --experimental-strip-types --test tests/catalogue.test.mjs tests/speaking-draft.test.mjs tests/speaking-workflow.mjs && node --import ./scripts/sites-env.mjs tests/recording-recovery.mjs && node tests/state-api.mjs && node tests/coach-audio.mjs && node --import ./scripts/sites-env.mjs tests/backup.mjs --miniflare",
+    "test:browser-fixture": "node --import ./scripts/sites-env.mjs tests/browser-fixture.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
@@ -52,6 +53,8 @@
     "drizzle-kit": "0.31.10",
     "eslint": "9.39.4",
     "eslint-config-next": "16.3.4",
+    "fake-indexeddb": "6.2.7",
+    "jsdom": "30.1.3",
     "json-rpc-2.0": "1.7.1",
     "raw-body": "3.0.2",
     "react-server-dom-webpack": "19.2.6",

@@ -50,6 +50,8 @@ function Playback({answer}: {answer:Answer}) {
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     let valid = true, url = "";
+    // Reset playback status when the externally stored audio source changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setFailed(false);
     if (answer.audio) setSource(`/api/audio?id=${encodeURIComponent(answer.audio)}`);
     else if (answer.local) {
@@ -95,10 +97,11 @@ function PrepTimer() {
   </div>;
 }
 
-function Recorder({limit,clip,disabled,stopRequest,onClip,onActive}:{
-  limit:number;clip:Blob|null;disabled:boolean;stopRequest:{current:(()=>void)|null};onClip:(blob:Blob)=>void;onActive:(mode:"idle"|"waiting"|"recording")=>void;
+type MicMode="idle"|"waiting"|"recording"|"stopping";
+function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive}:{
+  limit:number;clip:Blob|null;disabled:boolean;stopRequestRef:{current:(()=>void)|null};onClip:(blob:Blob)=>void;onActive:(mode:MicMode)=>void;
 }) {
-  const [mode,setMode] = useState<"idle"|"waiting"|"recording">("idle");
+  const [mode,setMode] = useState<MicMode>("idle");
   const [duration,setDuration] = useState(0);
   const [notice,setNotice] = useState("");
   const [url,setUrl] = useState("");
@@ -106,17 +109,23 @@ function Recorder({limit,clip,disabled,stopRequest,onClip,onActive}:{
   const activeStream = useRef<MediaStream | null>(null);
   const mounted = useRef(true);
   const started = useRef(0);
-  const onFinalized=useRef(onClip);onFinalized.current=onClip;
+  const startPending=useRef(false);
+  const stopTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined);
+  const onFinalized=useRef(onClip);
+  useEffect(()=>{onFinalized.current=onClip},[onClip]);
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      stopRequest.current=null;
+      clearTimeout(stopTimer.current);
+      stopRequestRef.current=null;
       if (recorder.current?.state === "recording") recorder.current.stop();
       activeStream.current?.getTracks().forEach(t => t.stop());
     };
-  }, []);
+  }, [stopRequestRef]);
   useEffect(() => {
+    // Object URLs must be allocated and revoked in an effect, outside render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!clip) {setUrl(""); return;}
     const address = URL.createObjectURL(clip); setUrl(address);
     return () => URL.revokeObjectURL(address);
@@ -126,50 +135,72 @@ function Recorder({limit,clip,disabled,stopRequest,onClip,onActive}:{
     const id = setInterval(() => {
       const value = Math.floor((Date.now() - started.current) / 1000);
       setDuration(Math.min(value,limit));
-      if (value >= limit && recorder.current?.state === "recording") recorder.current.stop();
+      if (value >= limit) stopRequestRef.current?.();
     },200);
     return () => clearInterval(id);
-  },[limit,mode]);
+  },[limit,mode,stopRequestRef]);
   async function record() {
-    if (mode !== "idle" || disabled) return;
+    if (mode !== "idle" || disabled || startPending.current) return;
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
       setNotice("此浏览器无法录音。你可以在页面外开口练习并记录要点。"); return;
     }
-    setNotice(""); setMode("waiting"); onActive("waiting");
+    startPending.current=true;setNotice(""); setMode("waiting"); onActive("waiting");
     let stream:MediaStream | undefined;
+    let waiting=true,permissionTimer:ReturnType<typeof setTimeout>|undefined;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({audio:true});
+      stream = await Promise.race([navigator.mediaDevices.getUserMedia({audio:true}).then(value=>{
+        if(!waiting||!mounted.current)value.getTracks().forEach(t=>t.stop());
+        return value;
+      }),new Promise<never>((_,reject)=>{permissionTimer=setTimeout(()=>reject(Error('microphone_timeout')),30_000)})]);
+      waiting=false;clearTimeout(permissionTimer);
       if (!mounted.current) { stream.getTracks().forEach(t => t.stop()); return; }
       activeStream.current = stream;
       const preferred = ["audio/webm;codecs=opus","audio/mp4","audio/ogg;codecs=opus"].find(type => MediaRecorder.isTypeSupported(type));
       const rec = new MediaRecorder(stream, preferred ? {mimeType:preferred,audioBitsPerSecond:64000} : {audioBitsPerSecond:64000});
       recorder.current = rec;
       const parts:Blob[] = [];
+      let finalized=false;
       rec.ondataavailable = event => { if (event.data.size) parts.push(event.data); };
-      rec.onstop = () => {
-        stopRequest.current=null;
+      const finish = (incomplete=false) => {
+        if(finalized||recorder.current!==rec)return;finalized=true;clearTimeout(stopTimer.current);
+        stopRequestRef.current=null;
         stream?.getTracks().forEach(t => t.stop());
+        // The timeout/error path cancels stop-and-submit before exposing any
+        // partial bytes. They remain available for inspection and download.
+        if(incomplete&&mounted.current){onActive("idle");setNotice("录音整理超时或中断。已收到的音频可试听和下载；确认完整后再提交。");}
         if (parts.length) onFinalized.current(new Blob(parts,{type:rec.mimeType || preferred || "audio/webm"}));
         if (!mounted.current) return;
         if (!parts.length) setNotice("没有录到声音，请重试或记录口头练习。");
         setMode("idle"); onActive("idle");
       };
+      const waitForStop = () => {
+        clearTimeout(stopTimer.current);
+        stopTimer.current=setTimeout(()=>finish(true),10_000);
+      };
+      rec.onstop = () => finish();
       rec.onerror = () => {
         stream?.getTracks().forEach(t => t.stop());
-        if (mounted.current) {setNotice("录音中断，请检查麦克风。");setMode("idle");onActive("idle");}
+        // Cancel automatic submission; the subsequent stop event can still
+        // deliver recoverable audio for the learner to inspect.
+        if (mounted.current) {setNotice("录音中断，请试听并下载已录部分，确认完整后再提交。");onActive("idle");setMode("stopping");onActive("stopping");}
+        waitForStop();
       };
-      rec.start();stopRequest.current=()=>{if(rec.state==="recording")rec.stop()};onActive("recording"); started.current = Date.now(); setDuration(0); setMode("recording");
+      rec.start(1000);stopRequestRef.current=()=>{
+        if(rec.state!=="recording")return;
+        setMode("stopping");onActive("stopping");waitForStop();
+        try{rec.stop()}catch{finish(true)}
+      };onActive("recording"); started.current = Date.now(); setDuration(0); setMode("recording");
     } catch {
       stream?.getTracks().forEach(t => t.stop());
       if (mounted.current) { setNotice("麦克风未能开启。请检查浏览器权限，或改用页面外口头练习。");setMode("idle");onActive("idle"); }
-    }
+    } finally {waiting=false;clearTimeout(permissionTimer);startPending.current=false}
   }
   return <div className="sp-recorder">
     <div className="sp-rec-main"><button type="button" className={`sp-mic ${mode === "recording" ? "sp-recording" : ""}`}
-      disabled={mode==="waiting" || (disabled && mode!=="recording")} aria-label={mode==="recording"?"停止录音":"开始录音"}
-      onClick={() => mode === "recording" ? recorder.current?.stop() : void record()}>
+      disabled={mode==="waiting" || mode==="stopping" || (disabled && mode!=="recording")} aria-label={mode==="recording"?"停止录音":"开始录音"}
+      onClick={() => mode === "recording" ? stopRequestRef.current?.() : void record()}>
       {mode === "recording" ? <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg> : <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6"><rect x="8.5" y="2.5" width="7" height="13" rx="3.5"/><path d="M5.5 11v1.5a6.5 6.5 0 0 0 13 0V11M12 19v3m-3 0h6"/></svg>}
-    </button><div><strong>{mode==="recording"?"正在录音":mode==="waiting"?"正在请求麦克风":clip?"重新录制本次草稿":"录下你的回答"}</strong><small>{mode==="recording" ? `${clock(duration)} / ${clock(limit)} · 点击停止` : `最多 ${clock(limit)} · 手动开始`}</small></div>
+    </button><div><strong>{mode==="stopping"?"正在整理录音":mode==="recording"?"正在录音":mode==="waiting"?"正在请求麦克风":clip?"重新录制本次草稿":"录下你的回答"}</strong><small>{mode==="recording" ? `${clock(duration)} / ${clock(limit)} · 点击停止` : `最多 ${clock(limit)} · 手动开始`}</small></div>
     <Wave live={mode==="recording"}/></div>
     {url && <div className="sp-play"><audio controls src={url} aria-label="试听本次录音"/><a href={url} download={clip?.type.includes("mp4")?"speaking.m4a":clip?.type.includes("ogg")?"speaking.ogg":clip?.type.includes("wav")?"speaking.wav":"speaking.webm"}>下载本次录音</a></div>}
     {notice && <p role="status" className="sp-message">{notice}</p>}
@@ -190,12 +221,13 @@ function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Pro
   const key = phase === "part2" ? "speakingPart2" : "speakingFollowup";
   const items = answers(entry[key]), scope=recordingKey(account,day,phase);
   const draftKey = `${key}Draft`;
-  const [text,setText] = useState(entry[draftKey] || "");
+  const textKey=scope+'-text';
+  const [text,setText] = useState(()=>{try{return localStorage.getItem(textKey)??entry[draftKey]??''}catch{return entry[draftKey]||''}});
   const [voice,setVoice] = useState<RecordingDraft|null>(null);
   const [attest,setAttest] = useState(false);
-  const [mic,setMic]=useState<"idle"|"waiting"|"recording">("idle");
+  const [mic,setMic]=useState<MicMode>("idle");
   const recording=mic!=="idle";
-  const stopRequest=useRef<(()=>void)|null>(null), saveOnStop=useRef(false);
+  const stopRequestRef=useRef<(()=>void)|null>(null), saveOnStop=useRef(false);
   const [busy,setBusy] = useState(false),[preparing,setPreparing]=useState(true);
   const [message,setMessage] = useState("");
   const mounted=useRef(false), submitting=useRef(false);
@@ -246,6 +278,7 @@ function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Pro
         return;
       }
       if(readyVoice)void changeDraft(scope,discardIfMatch(readyVoice.id)).catch(()=>{});
+      try{if(localStorage.getItem(textKey)===text)localStorage.removeItem(textKey)}catch{/* keep in-memory draft */}
       go();
     } catch {if(mounted.current)setMessage("保存未完成。请保留录音，恢复连接后再次提交。");}
     finally {submitting.current=false;if(mounted.current)setBusy(false);}
@@ -257,7 +290,7 @@ function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Pro
     <p className="sp-question" lang="en">{day11Part3 ? "Why do some drivers ignore warning lights on their dashboards, even when they know it could be dangerous?" : isFollow ? followup : prompt}</p>
     {!isFollow ? <><p className="sp-help">可以记下三个关键词：情境、你的行动、结果。准备 1 分钟，再自然讲 1–2 分钟。</p><PrepTimer/></> : <p className="sp-help">{day11Part3 ? "用 3–4 句英语回答，给出一个实际原因和一种可能后果。建议 40–60 秒。" : "先直接回答，再用一个理由或例子展开。建议 30–60 秒。"}</p>}
     {isFollow&&day!==11&&<History items={answers(entry.speakingPart2)} title="已提交的 Part 2 回答 · 点击回听"/>}
-    <Recorder limit={isFollow ? 60 : 120} clip={voice?.blob??null} disabled={busy||preparing} stopRequest={stopRequest} onClip={blob=>{
+    <Recorder limit={isFollow ? 60 : 120} clip={voice?.blob??null} disabled={busy||preparing} stopRequestRef={stopRequestRef} onClip={blob=>{
       const draft={id:newRecordingId(),at:new Date().toISOString(),blob};
       const commit=saveOnStop.current;saveOnStop.current=false;
       void keep(draft).then(()=>{if(commit&&mounted.current)void submit(false,draft)});
@@ -278,16 +311,16 @@ function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Pro
     </details>}
     {!voice&&<SpeakingRecovery day={day} account={account} phase={phase} disabled={busy||preparing||recording} onChoose={({id,at})=>{void keep({id,at,audio:id})}}/>}
     <label className="sp-label">文字草稿或口述要点 <span>选填</span>
-      <textarea rows={3} value={text} onChange={e => setText(e.target.value)} disabled={busy} maxLength={3500} placeholder="Jot down a few ideas in English…"/>
+      <textarea rows={3} value={text} onChange={e => {const value=e.target.value;setText(value);try{localStorage.setItem(textKey,value)}catch{setMessage('本机文字草稿存储不可用，请复制保留要点。')}}} disabled={busy} maxLength={3500} placeholder="Jot down a few ideas in English…"/>
     </label>
     {!voice && <label className="sp-check"><input type="checkbox" checked={attest} onChange={e=>setAttest(e.target.checked)}/> 我已在页面外开口作答，按自报口练记录。</label>}
     <p className="sp-note">仅有文字或自报记录时，发音、停顿和流利度留待音频评估。</p>
     <History items={items}/>
     {message && <p className="sp-message" role="status">{message}</p>}
-    <div className="actions sp-actions"><button className="primary" type="button" disabled={busy || preparing || mic==="waiting" || (mic==="idle" && !voice && !attest)} onClick={()=>{
-        if(mic==="recording"){if(stopRequest.current){saveOnStop.current=true;stopRequest.current()} return;}
+    <div className="actions sp-actions"><button className="primary" type="button" disabled={busy || preparing || mic==="waiting" || mic==="stopping" || (mic==="idle" && !voice && !attest)} onClick={()=>{
+        if(mic==="recording"){if(stopRequestRef.current){saveOnStop.current=true;stopRequestRef.current()} return;}
         void submit(false);
-      }}>{busy ? "保存中…" : mic==="recording" ? "停止录音并保存回答" : !isFollow && !retake ? "保存回答，进入追问" : "保存回答，进入自评"}</button>
+      }}>{busy ? "保存中…" : mic==="stopping"?"正在整理录音…":mic==="recording" ? "停止录音并保存回答" : !isFollow && !retake ? "保存回答，进入追问" : "保存回答，进入自评"}</button>
       <button className="secondary" type="button" disabled={busy || preparing || recording || !text.trim()} onClick={()=>void submit(true)}>保存文字草稿</button>
       {retake && <button className="sp-link" type="button" disabled={busy||recording} onClick={go}>返回自评</button>}
     </div>
