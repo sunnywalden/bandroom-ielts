@@ -8,6 +8,7 @@ const require=createRequire(import.meta.url),wrangler=createRequire(require.reso
 const {Miniflare}=wrangler('miniflare'),esbuild=wrangler('esbuild');
 const client=await esbuild.build({stdin:{contents:`
 import React from 'react';import {createRoot} from 'react-dom/client';import Studio from './app/studio.tsx';import './app/globals.css';
+import Pronunciation from './app/pronunciation.tsx';import {pronunciations} from './app/pronunciations.ts';import './app/exercise.css';
 // Feed a synthetic tone through the browser's REAL MediaRecorder. This avoids
 // recording the operator's microphone or requiring microphone permissions.
 const contexts=[];
@@ -16,13 +17,26 @@ Object.defineProperty(navigator,'mediaDevices',{configurable:true,value:{getUser
  oscillator.connect(out);oscillator.start();await context.resume();contexts.push(context);return out.stream;
 }}});
 const actualFetch=window.fetch.bind(window);
+const actualPlay=HTMLMediaElement.prototype.play;
+HTMLMediaElement.prototype.play=function(){
+ const fault=document.querySelector('#fault').value;
+ if(fault==='pronunciationError')return Promise.reject(new DOMException('Fixture playback failure','NotSupportedError'));
+ if(fault==='pronunciationDelay')return new Promise(()=>{});
+ return actualPlay.call(this).catch(error=>{
+  document.querySelector('#evidence').textContent=JSON.stringify({mediaError:error.name,message:error.message});
+  throw error;
+ });
+};
 window.fetch=(url,init={})=>{const headers=new Headers(init.headers);headers.set('X-Fixture-Fault',document.querySelector('#fault').value);return actualFetch(url,{...init,headers})};
 document.querySelector('#inspect').onclick=async()=>{const response=await actualFetch('/__fixture/status');document.querySelector('#evidence').textContent=JSON.stringify(await response.json(),null,2)};
-createRoot(document.querySelector('#root')).render(<Studio/>);
+createRoot(document.querySelector('#root')).render(location.pathname==='/__fixture/pronunciations'
+ ? <main className="ex-card"><h1>真人美音独立验收</h1>{[...Object.keys(pronunciations),'unlisted fixture word'].map(word=><section key={word}><h2>{word}</h2><Pronunciation word={word}/></section>)}</main>
+ : <Studio/>);
 `,resolveDir:process.cwd(),loader:'tsx'},bundle:true,format:'esm',platform:'browser',write:false,outdir:'.sites-runtime/browser-fixture',loader:{'.css':'css'},define:{'process.env.NODE_ENV':'"production"'}});
 const html=`<!doctype html><html lang="zh"><meta charset="utf-8"><title>Bandroom isolated acceptance</title><link rel="stylesheet" href="/fixture.css"><body>
 <aside style="position:fixed;z-index:9999;bottom:0;right:0;max-width:520px;background:#fff3d5;padding:10px;border:2px solid #695322">
-<strong>独立测试账号 · 合成音频</strong><label>测试故障<select id="fault"><option value="none">正常</option><option value="upload503">上传失败 503</option><option value="state503">进度失败 503</option><option value="auth">登录过期</option><option value="delay">延迟保存</option></select></label>
+<strong>独立测试账号 · 虚构学习数据</strong><label>测试故障<select id="fault"><option value="none">正常</option><option value="upload503">上传失败 503</option><option value="state503">进度失败 503</option><option value="auth">登录过期</option><option value="delay">延迟保存</option></select></label>
+<script>document.querySelector('#fault').insertAdjacentHTML('beforeend','<option value="pronunciationError">词典播放失败</option><option value="pronunciationDelay">词典加载超时</option>')</script>
 <button id="inspect">刷新测试证据</button><pre id="evidence" style="max-height:180px;overflow:auto;font-size:10px"></pre></aside>
 <div id="root"></div><script type="module" src="/fixture.js"></script></body></html>`;
 const worker=await esbuild.build({stdin:{contents:`
@@ -33,7 +47,7 @@ import {GET as getCoach} from './app/api/coach/route.ts';
 import {GET as getRecovery} from './app/api/audio/recovery/route.ts';
 export default {async fetch(request){
  const url=new URL(request.url),fault=request.headers.get('X-Fixture-Fault');
- if(url.pathname==='/')return new Response(env.HTML,{headers:{'Content-Type':'text/html'}});
+ if(url.pathname==='/'||url.pathname==='/__fixture/pronunciations')return new Response(env.HTML,{headers:{'Content-Type':'text/html'}});
  if(url.pathname==='/fixture.js')return new Response(env.JS,{headers:{'Content-Type':'text/javascript'}});
  if(url.pathname==='/fixture.css')return new Response(env.CSS,{headers:{'Content-Type':'text/css'}});
  if(url.pathname==='/api/state'){

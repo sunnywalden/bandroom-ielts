@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { getExercises, sourceUrl, type Item, type Lesson } from "./curriculum";
 import ListeningPlayer from "./listening-player";
 import VocabularyReview, { learnedWords } from "./vocabulary-review";
+import Pronunciation from "./pronunciation";
 import "./exercise.css";
 
 type Stage = "vocab"|"listen"|"read"|"write";
@@ -79,9 +80,9 @@ function Vocabulary({lesson,entry,save,advance,day,account,busy,completedDays}:C
       <p className="ex-question" lang="en">{lesson.recall[0]}</p>
       <label className="ex-label">填写一个词<input lang="en" spellCheck={false} autoComplete="off" maxLength={100}
         value={result?entry.vocabRecall:recall} onChange={e=>setRecall(e.target.value)} readOnly={result}/></label>
-      {result?<div className="ex-feedback" role="status"><strong>{entry.vocabRecallCorrect==="1"?"回忆正确":"再记一次"} · {lesson.recall[1]}</strong><p>回顾这个词，再读今天的三个例句。</p></div>:
+      {result?<div className="ex-feedback"><div className="ex-word-heading"><strong role="status">{entry.vocabRecallCorrect==="1"?"回忆正确":"再记一次"} · {lesson.recall[1]}</strong><Pronunciation word={lesson.recall[1]}/></div><p>回顾这个词，再读今天的三个例句。</p></div>:
         <Submit disabled={busy||!recall.trim()} onClick={()=>void save({vocabRecall:recall.trim(),vocabRecallCorrect:normal(recall)===normal(lesson.recall[1])?"1":"0"})}>核对回忆</Submit>}
-      {result&&<><div className="ex-stack">{lesson.words.map(([term,meaning,example])=><div className="ex-word" key={term}><div><b lang="en">{term}</b><span>{meaning}</span></div><p lang="en">{example}</p></div>)}</div>
+      {result&&<><div className="ex-stack">{lesson.words.map(([term,meaning,example])=><div className="ex-word" key={term}><div className="ex-word-heading"><b lang="en">{term}</b><Pronunciation word={term}/><span className="ex-word-meaning">{meaning}</span></div><p lang="en">{example}</p></div>)}</div>
         <Submit disabled={busy} onClick={()=>void save({vocabBatch:"2"})}>继续练习短语与搭配 →</Submit></>}
     </>}
   </>;
