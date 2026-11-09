@@ -1,5 +1,6 @@
 import { getExercises } from "./curriculum";
 import { notes } from "./ledger";
+import Pronunciation from "./pronunciation";
 
 type ReviewWord = { term:string; meaning:string; example:string; day:number; relevant:boolean };
 
@@ -26,7 +27,7 @@ export default function VocabularyReview({words}:{words:ReviewWord[]}) {
     <p className="ex-review-count">学习记录中已收录的旧词 · {words.length} 个</p>
     {words.length?<div className="ex-review-grid">{words.map(word=><article className={"ex-review-word"+(word.relevant?" ex-review-relevant":"")} key={word.term}>
       <div className="ex-review-source"><span>Day {word.day}</span>{word.relevant&&<span>本次会用到</span>}</div>
-      <h3 lang="en">{word.term}</h3>
+      <div className="ex-word-heading"><h3 lang="en">{word.term}</h3><Pronunciation word={word.term}/></div>
       <p className="ex-review-meaning">{word.meaning}</p>
       <p className="ex-review-example" lang="en">{word.example}</p>
     </article>)}</div>:<p>暂时没有可展示的旧词记录。你可以开始练习，核对后查看释义。</p>}
