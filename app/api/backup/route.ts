@@ -1,10 +1,10 @@
-import { exportBackup,restoreBackup,sealDevice,verifyDevice,BackupError } from '@/lib/backup';
+import { prepareBackup,restoreBackup,sealDevice,verifyDevice,BackupError } from '@/lib/backup';
 import { metadataLimit, type Header } from '@/lib/backup-format';
 import { limitedBody } from '../shared';
 import { withBackup } from './handler';
 import { snapshotSchema } from '../state/transition';
 export const dynamic='force-dynamic';
-export function GET(request:Request){return withBackup(request,exportBackup);}
+export function GET(request:Request){return withBackup(request,prepareBackup);}
 export function POST(request:Request){
   return withBackup(request,async(db,bucket,uid,key)=>{
     if(request.headers.get('Content-Type')?.split(';')[0]!=='application/json')throw new BackupError(415,'备份清单格式无效。');

@@ -1,4 +1,4 @@
-import { archiveLimit,clipLimit,hash,metadataLimit,toHex,uuid, type Clip, type Data, type Manifest, type RemoteClip, type Signed, type Review, type Course,type Header } from './backup-format';
+import { archiveLimit,clipLimit,hash,headerBytes,metadataLimit,toHex,uuid, type Clip, type Data, type Manifest, type RemoteClip, type Signed, type Review, type Course,type Header } from './backup-format';
 
 export class BackupError extends Error {
   status:number;
@@ -56,7 +56,7 @@ async function inspect(bucket:R2Bucket,uid:string,id:string):Promise<Clip|null>{
   if(!/^audio\/[\w.+-]+$/.test(type)){await obj.body.cancel();return reject(422,'录音缺少可识别的音频类型。');}
   return {id,type,size:obj.size,hash:await hash(await obj.arrayBuffer())};
 }
-export async function exportBackup(db:D1Database,bucket:R2Bucket,uid:string,key:string):Promise<Signed>{
+export async function exportBackup(db:D1Database,bucket:R2Bucket,uid:string,key:string,created=new Date().toISOString()):Promise<Signed>{
   const data=await snapshot(db,uid),ids=refs(data.state),audio:RemoteClip[]=[];
   let bytes=0;
   for(const id of ids.cloud){
@@ -64,9 +64,41 @@ export async function exportBackup(db:D1Database,bucket:R2Bucket,uid:string,key:
     bytes+=c.size;if(bytes>archiveLimit)return reject(413,'云端录音超过单份备份的 512 MiB 上限。');
     audio.push({...c,ticket:await ticket(key,uid,c)});
   }
-  const manifest:Manifest={format:1,owner:await ownerTag(uid),created:new Date().toISOString(),...data,audio,local:ids.device};
+  const manifest:Manifest={format:1,owner:await ownerTag(uid),created,...data,audio,local:ids.device};
   if(utf8.encode(JSON.stringify(manifest)).length>metadataLimit-1024)return reject(413,'课程记录超出单份备份的 8 MiB 上限。');
   return {manifest,signature:await recordSignature(key,manifest)};
+}
+const receiptLifetime=15*60*1000;
+const downloadMac=(key:string,uid:string,stamp:string,digest:string)=>sign(key,JSON.stringify(['download',uid,stamp,digest]));
+export async function prepareBackup(db:D1Database,bucket:R2Bucket,uid:string,key:string){
+  const signed=await exportBackup(db,bucket,uid,key);
+  if(signed.manifest.local.length)return signed;
+  const stamp=String(Date.parse(signed.manifest.created));
+  return {...signed,downloadReceipt:[stamp,signed.signature,await downloadMac(key,uid,stamp,signed.signature)].join('.')};
+}
+export async function downloadBackup(db:D1Database,bucket:R2Bucket,uid:string,key:string,receipt:string,now=Date.now()){
+  const match=/^(\d{13})\.([a-f0-9]{64})\.([a-f0-9]{64})$/.exec(receipt);
+  if(!match||!equalSig(match[3],await downloadMac(key,uid,match[1],match[2])))return reject(403,'下载凭据无效或账号已变更。');
+  const stamp=Number(match[1]);
+  if(stamp>now||now-stamp>receiptLifetime)return reject(410,'下载链接已到期，请重新准备备份。');
+  const signed=await exportBackup(db,bucket,uid,key,new Date(stamp).toISOString());
+  if(signed.manifest.local.length||!equalSig(signed.signature,match[2]))return reject(409,'记录已变化，请重新准备备份。');
+  const prefix=headerBytes({signed,device:[]});
+  const total=prefix.reduce((n,b)=>n+b.length,0)+signed.manifest.audio.reduce((n,c)=>n+c.size,0);
+  if(total>archiveLimit)return reject(413,'备份超出 512 MiB 上限。');
+  let cursor=-1;
+  const body=new ReadableStream<Uint8Array>({async pull(controller){
+    if(cursor===-1){cursor=0;for(const bytes of prefix)controller.enqueue(bytes);return;}
+    if(cursor===signed.manifest.audio.length){controller.close();return;}
+    const c=signed.manifest.audio[cursor++],file=await bucket.get(path(uid,c.id));
+    if(!file||file.size!==c.size){if(file)await file.body.cancel();throw Error('Recording changed during download');}
+    const bytes=new Uint8Array(await file.arrayBuffer());
+    if(await hash(bytes)!==c.hash)throw Error('Recording changed during download');
+    controller.enqueue(bytes);
+  }});
+  return new Response(body,{headers:{'Content-Type':'application/octet-stream','X-Content-Type-Options':'nosniff',
+    'Cache-Control':'private, no-store','Referrer-Policy':'no-referrer','Content-Length':String(total),
+    'Content-Disposition':'attachment; filename="Bandroom-'+signed.manifest.created.slice(0,10)+'.bandroom"'}});
 }
 async function authentic(uid:string,key:string,signed:Signed){
   const m=signed?.manifest;

@@ -40,7 +40,7 @@ const req=(path,method,headers,body)=>new Request(url+path,{method,headers,body}
 const rpc=(method,params,origin=url)=>mcp.POST(req('/mcp','POST',{origin,'content-type':'application/json'},JSON.stringify({jsonrpc:'2.0',id:17,method,params})))
 const call=async(name,args={})=>(await (await rpc('tools/call',{name,arguments:args})).json()).result
 const result=r=>{assert.ok(!r.isError,r.content?.[0]?.text?.slice(0,300));return JSON.parse(r.content[0].text)}
-const up=(bytes,type,origin=url)=>audio.POST(req('/api/audio','POST',{origin,'content-type':type},bytes))
+const up=(bytes,type,origin=url,account=globalThis.user?.userId??'')=>audio.POST(req('/api/audio','POST',{origin,'content-type':type,'X-Bandroom-Account':account},bytes))
 const play=(id,range)=>audio.GET(req('/api/audio?id='+encodeURIComponent(id),'GET',range?{range}:{}))
 const readAudio=(id,details={},day=11)=>call('read_speaking_recording',{day,recordingId:id,...details})
 const clip=(codec,format,extra=[])=>execFileSync('ffmpeg',['-v','error','-f','lavfi','-i','sine=frequency=440:duration=1','-c:a',codec,...extra,'-f',format,'pipe:1'])
@@ -70,6 +70,7 @@ assert.equal((await call('publish_lesson',{...release,lesson:{...release.lesson,
 assert.deepEqual((await (await read.GET()).json()).extras['17'],lesson)
 assert.equal(result(await call('read_study_session')).nextTask,"Why do some drivers ignore warning lights on their dashboards, even when they know it could be dangerous?")
 assert.equal((await up(samples[0][1],samples[0][0],ctx)).status,403)
+assert.equal((await up(samples[0][1],samples[0][0],url,'another-user')).status,428); assert.equal(media.size,0)
 assert.equal((await up(samples[0][1],'text/html')).status,415)
 assert.equal((await up(Buffer.from([0x1a,0x45,0xdf,0xa3]),'audio/webm')).status,415)
 assert.equal((await up(samples[0][1],'audio/ogg')).status,415)

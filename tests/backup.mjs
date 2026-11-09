@@ -10,7 +10,7 @@ import http from 'node:http';
 const require=createRequire(import.meta.url),wrangler=createRequire(require.resolve('wrangler/package.json'));
 const esbuild=wrangler('esbuild'),tmp=await mkdtemp(join(tmpdir(),'bandroom-backup-'));
 async function bundled(file){const out=join(tmp,file.split('/').at(-1).replace('.ts','.mjs'));await esbuild.build({entryPoints:[file],outfile:out,bundle:true,format:'esm',platform:'node'});return import(out);}
-const {exportBackup,restoreBackup,restoreAudio,sealDevice,verifyDevice}=await bundled('lib/backup.ts');
+const {prepareBackup,downloadBackup,exportBackup,restoreBackup,restoreAudio,sealDevice,verifyDevice}=await bundled('lib/backup.ts');
 const {pack,unpack,hash}=await bundled('lib/backup-format.ts');
 let mf,sql;
 function sqliteD1(){
@@ -103,5 +103,30 @@ try{
  await run('UPDATE learner_states SET state=? WHERE user_id=?',JSON.stringify({...data,day:12}),uid);
  await denied(()=>restoreBackup(db,bucket,uid,secret,signed,true),409);
  ok((await exportBackup(db,bucket,other,secret)).manifest.state.other===true);
+ // Real HTTP route + account-gating middleware. Only hosted identity/env binding injection is replaced in this isolated test.
+ const routePath=join(tmp,'download-route.mjs');
+ await esbuild.build({entryPoints:['app/api/backup/download/route.ts'],outfile:routePath,bundle:true,format:'esm',platform:'node',
+   plugins:[{name:'test-identity',setup(build){
+     build.onResolve({filter:/^cloudflare:workers$|^@\/app\/chatgpt-auth$/},args=>({path:args.path,namespace:'fixture'}));
+     build.onLoad({filter:/.*/,namespace:'fixture'},args=>({contents:args.path==='cloudflare:workers'
+       ?'export const env=globalThis.__backupEnv;':'export async function getChatGPTUser(){return globalThis.__backupUser ? {userId:globalThis.__backupUser}:null}'}));
+   }}]});
+ globalThis.__backupEnv={DB:db,BUCKET:bucket,BANDROOM_BACKUP_KEY:secret};const {GET}=await import(routePath);
+ ok(!('downloadReceipt' in await prepareBackup(db,bucket,uid,secret))); // device-only copy must be assembled on its originating device
+ const cloudOnly=structuredClone(data);cloudOnly.entries[11].speakingFollowup=JSON.stringify(JSON.parse(data.entries[11].speakingFollowup).slice(0,1));
+ await run('UPDATE learner_states SET state=? WHERE user_id=?',JSON.stringify(cloudOnly),uid);
+ const prepared=await prepareBackup(db,bucket,uid,secret),receipt=prepared.downloadReceipt;
+ const attachment=(token=receipt,origin)=>GET(new Request('https://fixture.test/api/backup/download?receipt='+encodeURIComponent(token),{headers:origin?{Origin:origin}:{}}));
+ globalThis.__backupUser=null;ok((await attachment()).status===401);
+ globalThis.__backupUser=other;ok((await attachment()).status===403);
+ globalThis.__backupUser=uid;ok((await attachment(receipt,'https://wrong.test')).status===403);
+ ok((await attachment(receipt.slice(0,-1)+(receipt.endsWith('a')?'b':'a'))).status===403);
+ await denied(()=>downloadBackup(db,bucket,uid,secret,receipt,Date.parse(prepared.manifest.created)+900001),410);
+ const response=await attachment();ok(response.status===200&&response.headers.get('cache-control')==='private, no-store'&&response.headers.get('content-disposition').startsWith('attachment; filename="Bandroom-'));
+ const actual=await response.blob();ok(actual.size===Number(response.headers.get('content-length')));const delivered=await unpack(actual);
+ ok(delivered.header.signed.signature===prepared.signature&&delivered.blobs.length===2&&delivered.header.signed.manifest.feedback[0].pronunciation.band===7);
+ await run('UPDATE learner_states SET revision=revision+1 WHERE user_id=?',uid);ok((await attachment()).status===409);
+ globalThis.__backupUser='empty-learner';const emptyTicket=(await prepareBackup(db,bucket,'empty-learner',secret)).downloadReceipt;
+ ok((await unpack(await (await attachment(emptyTicket)).blob())).blobs.length===0);
  console.log('PASS '+count+' backup assertions · '+(mf?'Miniflare D1 + R2':'SQLite + isolated R2 adapter'));
 }finally{if(mf)await mf.dispose();sql?.close();await rm(tmp,{recursive:true,force:true});}

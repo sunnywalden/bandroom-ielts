@@ -17,11 +17,14 @@ export const hash=async(data:ArrayBuffer|Uint8Array<ArrayBuffer>)=>toHex(await c
 export async function checkBlob(blob:Blob, clip:Clip) {
   if(blob.size!==clip.size||await hash(await blob.arrayBuffer())!==clip.hash) throw Error('录音校验失败，请重新选择完整的备份。');
 }
-export function pack(header:Header, recordings:Blob[]) {
+export function headerBytes(header:Header) {
   const data=encoder.encode(JSON.stringify(header));
   if(data.byteLength>metadataLimit) throw Error('课程记录超出单份备份的 8 MiB 上限。');
   const length=new Uint8Array(4);new DataView(length.buffer).setUint32(0,data.length);
-  const file=new Blob([magic,length,data,...recordings],{type:'application/octet-stream'});
+  return [magic,length,data];
+}
+export function pack(header:Header, recordings:Blob[]) {
+  const file=new Blob([...headerBytes(header),...recordings],{type:'application/octet-stream'});
   if(file.size>archiveLimit)throw Error('备份超出 512 MiB 上限。');
   return file;
 }

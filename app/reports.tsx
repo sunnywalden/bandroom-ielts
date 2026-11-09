@@ -16,7 +16,7 @@ type Digest={from:string;to:string;lines:Line[];tests:Test[];recall:[number,numb
 type Stored={created:string;updated:string;week:Digest;cycle?:Digest};
 export type ReportState=Ledger&{reports?:Record<string,unknown>;fullTests?:Test[]};
 type State=ReportState;
-type Props={s:State;pending:boolean;feedback:Feedback[];persist:(make:(prev:State)=>State)=>Promise<boolean>};
+type Props={account:string;s:State;pending:boolean;feedback:Feedback[];persist:(make:(prev:State)=>State)=>Promise<boolean>};
 const historyDates:Record<number,string>={8:"2026-10-29",9:"2026-10-30",10:"2026-11-02",11:"2026-11-02"};
 const kinds:Record<string,Skill>={listen:"Listening",read:"Reading",write:"Writing",speak:"Speaking"};
 const toDate=(s:string)=>s.length===10?s:Number.isFinite(Date.parse(s))?dayStamp(new Date(s)):"";
@@ -86,7 +86,7 @@ function makeDigest(s:State,comments:Feedback[],from:string,to:string):Digest {
   return {from,to,lines:lines.sort((a,b)=>a.date.localeCompare(b.date)),tests,recall,applications,priorities,comments:recent};
 }
 const testDescription=(t:Test)=>[t.date,t.exam==="通用"?"":t.exam,t.source,t.raw!==undefined?t.raw+"/40":"",t.band!==undefined?"Band "+t.band.toFixed(1):"",t.rater].filter(Boolean).join(" · ");
-function TestForm({s,persist,pending}:{s:State;persist:Props["persist"];pending:boolean}) {
+function TestForm({s,persist,pending,account}:{account:string;s:State;persist:Props["persist"];pending:boolean}) {
   const [skill,setSkill]=useState<Skill>("Listening"),[date,setDate]=useState(dayStamp()),[source,setSource]=useState(""),[rater,setRater]=useState(""),[raw,setRaw]=useState(""),[band,setBand]=useState(""),[proof,setProof]=useState(false),[file,setFile]=useState<File|null>(null),[busy,setBusy]=useState(false),[info,setInfo]=useState("");
   const cachedAudio=useRef<{file:File;id:string}|null>(null);
   const exact=skill==="Listening"||skill==="Reading", specific=skill==="Reading"||skill==="Writing";
@@ -103,7 +103,8 @@ function TestForm({s,persist,pending}:{s:State;persist:Props["persist"];pending:
         if(cachedAudio.current?.file===file)audio=cachedAudio.current.id;
         else {
           const mime=file.type==="audio/x-m4a"||/\.m4a$/i.test(file.name)?"audio/mp4":file.type;
-          const resp=await fetch("/api/audio",{method:"POST",headers:{"Content-Type":mime},body:file});
+          const resp=await fetch("/api/audio",{method:"POST",headers:{"Content-Type":mime,"X-Bandroom-Account":account},body:file});
+          if(resp.status===401||resp.status===428){setInfo("登录状态已变化。请重新登录原账号后再上传。");return;}
           if(!resp.ok){setInfo("录音上传失败。请确认文件格式与网络后重试。");return;}
           const result=await resp.json() as {id?:string};if(!result.id)throw Error();audio=result.id;cachedAudio.current={file,id:result.id};
         }
@@ -144,7 +145,7 @@ function DigestView({digest,showActions=true}:{digest:Digest;showActions?:boolea
     {showActions&&<><h3>下次验证</h3><ol>{d.priorities.map(p=><li key={p}>{p}</li>)}</ol></>}
   </div>;
 }
-export default function Reports({s,persist,pending,feedback}:Props){
+export default function Reports({s,persist,pending,feedback,account}:Props){
   const all=periods(),[id,setId]=useState(all[0]?.id||""),[message,setMessage]=useState("");
   const p=all.find(k=>k.id===id)??all[0], prior=p?s.reports?.[p.id] as Partial<Stored>|undefined:undefined;
   const week=p?makeDigest(s,feedback,p.from,p.to):undefined,cycle=p?.cycleFrom?makeDigest(s,feedback,p.cycleFrom,p.to):undefined;
@@ -158,5 +159,5 @@ export default function Reports({s,persist,pending,feedback}:Props){
       <div className="actions"><button className={prior?.week?"secondary":"primary"} disabled={pending||fresh} onClick={()=>void capture()}>{!prior?.week?"生成本期回顾":fresh?"已包含最新证据":"用新证据更新本期回顾"}</button>{prior?.created&&<small>首次生成 {toDate(prior.created)} · 最近更新 {toDate(prior.updated||prior.created)}</small>}</div>
       <p className="muted" role="status">{message}</p>
       {prior?.week?<><h3>{p.cycleFrom?"本周专项表现":"本周四科表现"}</h3><DigestView digest={prior.week} showActions={!p.cycleFrom}/>{prior.cycle&&<><h3>四周合评</h3><DigestView digest={prior.cycle}/></>}</>:<div className="rp-target">{skills.map(k=><span key={k}>{k}<b>{goals[k].toFixed(1)}</b></span>)}</div>}
-    </>:<p>第一个观察窗口于 2026-11-04 结束，次日起可生成。</p>}</section><TestForm s={s} persist={persist} pending={pending}/></div>;
+    </>:<p>第一个观察窗口于 2026-11-04 结束，次日起可生成。</p>}</section><TestForm account={account} s={s} persist={persist} pending={pending}/></div>;
 }

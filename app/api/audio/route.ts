@@ -28,6 +28,7 @@ export async function POST(request: Request) {
   const user = await getChatGPTUser();
   if (!user) return json({ error: "sign_in_required" }, 401);
   if (crossOrigin(request)) return json({ error: "invalid_origin" }, 403);
+  if(request.headers.get("X-Bandroom-Account")!==user.userId)return json({error:"refresh_account"},428);
   if (!env.BUCKET) return json({ error: "recordings_unavailable" }, 503);
   const type = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
   if (!["audio/webm","audio/ogg","audio/mp4","audio/wav","audio/x-wav"].includes(type)) return json({ error: "unsupported_audio" },415);

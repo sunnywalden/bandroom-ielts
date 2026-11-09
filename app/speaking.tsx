@@ -12,6 +12,7 @@ type Answer = {
   local?: string;
 };
 type Props = {
+  account:string;
   day: number;
   prompt: string;
   followup: string;
@@ -194,7 +195,7 @@ function History({items}: {items:Answer[]}) {
     </div>)}</details>;
 }
 
-function AnswerTask({day,phase,prompt,followup,entry,save,go,retake}:Props & {phase:"part2"|"followup";go:(p:Phase)=>void;retake:boolean}) {
+function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Props & {phase:"part2"|"followup";go:(p:Phase)=>void;retake:boolean}) {
   const key = phase === "part2" ? "speakingPart2" : "speakingFollowup";
   const items = answers(entry[key]);
   const draftKey = `${key}Draft`;
@@ -222,8 +223,8 @@ function AnswerTask({day,phase,prompt,followup,entry,save,go,retake}:Props & {ph
         if (pendingAudio.current?.blob === clip) ref = pendingAudio.current.reference;
         else {
           try {
-            const res = await fetch("/api/audio",{method:"POST",headers:{"Content-Type":clip.type || "audio/webm"},body:clip});
-            if(res.status===401||res.status===403){setMessage("当前登录已失效。先下载录音，再登录原账号后提交。");return;}
+            const res = await fetch("/api/audio",{method:"POST",headers:{"Content-Type":clip.type || "audio/webm","X-Bandroom-Account":account},body:clip});
+            if(res.status===401||res.status===403||res.status===428){setMessage("当前登录已失效。先下载录音，再登录原账号后提交。");return;}
             if(res.status===413||res.status===415){setMessage("未能接收本次录音文件。请先下载并保留原件，再重新录制。");return;}
             if (!res.ok) throw new Error("upload failed");
             const result = await res.json();
