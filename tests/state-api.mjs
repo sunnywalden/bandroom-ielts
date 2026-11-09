@@ -94,7 +94,23 @@ for(let day=12;day<=62;day++){
     insertLesson.run(owner,day,JSON.stringify(lesson));
   }
   await start(day);await reject(s=>{s.stage='listen'});
-  await mark(submitVoice('speakingPart2'));await mark(submitVoice('speakingFollowup'));
+  await mark(submitVoice('speakingPart2'));
+  if(day===12){
+    const previous=structuredClone(state),atRevision=revision,id=randomUUID();
+    clips.add(`speaking/${owner}/${id}`);
+    const next=edit(withEntry(submitVoice('speakingFollowup',{audio:id})));
+    const pair=await Promise.all([put(atRevision,next),put(atRevision,next)]);
+    eq(pair.map(([status])=>status),[200,200],'identical concurrent Part 3 requests are idempotent');
+    eq(pair.map(([,data])=>data.revision),[atRevision+1,atRevision+1]);
+    const saved=(await get())[1];eq(saved.state,next);eq(saved.revision,atRevision+1);
+    eq(saved.state.entries[12].speakingPart2,previous.entries[12].speakingPart2);
+    eq(saved.state.entries[11],previous.entries[11]);eq(saved.state.completed,previous.completed);
+    eq([saved.state.day,saved.state.stage,saved.state.finished],[12,'speak',false]);
+    eq((await put(atRevision,next))[0],200,'retry after lost acknowledgement');
+    const divergent=structuredClone(next);divergent.entries[12].speakingFollowup=JSON.stringify([{at:new Date().toISOString(),text:'Competing tab',spoken:true}]);
+    eq((await put(atRevision,divergent))[0],409);eq((await get())[1].state,next);
+    state=next;revision=atRevision+1;
+  }else await mark(submitVoice('speakingFollowup'));
   await mark({speakingComplete:'yes',speakingReview:'Reflect'});await advance('vocab');
   if(day===12)await reject(withEntry({vocabBatch:'2'}));
   await mark({vocabRecall:lesson.recall[1],vocabRecallCorrect:'1'});

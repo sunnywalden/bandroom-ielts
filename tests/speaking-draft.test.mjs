@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {answers,changeDraft,currentPhase,discardIfMatch,draftKey,submitted,uploadDraft,newRecordingId} from '../app/speaking-draft.ts';
+import {registerHooks} from 'node:module';
+registerHooks({resolve(specifier,ctx,next){
+  if(specifier==='./request-json'&&ctx.parentURL?.endsWith('/app/speaking-draft.ts'))return {url:new URL('../app/request-json.ts',import.meta.url).href,shortCircuit:true};
+  return next(specifier,ctx);
+}});
+const {answers,changeDraft,currentPhase,discardIfMatch,draftKey,submitted,uploadDraft,newRecordingId}=await import('../app/speaking-draft.ts');
 
 // Small transactional storage boundary. Browser acceptance separately exercises native IndexedDB.
 function memoryIDB() {

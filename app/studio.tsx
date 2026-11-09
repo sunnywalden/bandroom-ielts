@@ -11,6 +11,7 @@ import EntryHistory from './entry-history'
 import ReviewRequest from './review-request'
 import BackupPanel from './backup-panel'
 import Reports, { type ReportState } from './reports'
+import {requestJSON} from './request-json'
 
 const tabs=[['home','今日练习',LayoutDashboard],['history','学习档案',BookOpen],['notes','错题手记',NotebookPen],['report','阶段评估',Activity]] as const
 type Tab=typeof tabs[number][0]|'lesson'|'settings'
@@ -30,24 +31,26 @@ export default function Studio(){
  const [note,setNote]=useState(0),[reply,setReply]=useState(''),[result,setResult]=useState<boolean|null>(null),[check,setCheck]=useState(false),[memo,setMemo]=useState(''),[showPacket,setShowPacket]=useState(false)
  const navigate=(page:Tab)=>{setTab(page);setCheck(false);setShowPacket(false);if(typeof window!=='undefined')window.scrollTo({top:0,behavior:'instant'})}
  const revisionAtRead=useRef<number|null>(null), activeAccount=useRef('')
+ const coachRead=useRef(0)
  const requiresLogin=(response:Response)=>response.status===401||response.status===403||response.type==='opaqueredirect'
  async function refreshCoach(){
+  const read=++coachRead.current,owner=activeAccount.current
   try{
-   const res=await fetch('/api/coach',{cache:'no-store',redirect:'manual'})
+   const {response:res,data:c}=await requestJSON<{extras:Record<string,Lesson>;feedback:Feedback[]}>('/api/coach',{cache:'no-store',redirect:'manual'})
+   if(read!==coachRead.current||owner!==activeAccount.current)return
    if(requiresLogin(res)){setLocked(true);setSync('auth');return}
    if(!res.ok)throw Error()
-   const c=await res.json() as {extras:Record<string,Lesson>;feedback:Feedback[]}
+   if(!c)throw Error()
    registerExtraLessons(c.extras||{});setFeedback(c.feedback||[]);setCoachError(false)
-  }catch{setCoachError(true)}
+  }catch{if(read===coachRead.current&&owner===activeAccount.current)setCoachError(true)}
  }
  async function refresh(){
   if(busy.current)return
   busy.current=true;setSync('load');setError('')
   try{
-   const res=await fetch('/api/state',{cache:'no-store',redirect:'manual'})
+   const {response:res,data}=await requestJSON<{account:string;revision:number;state:Snapshot|null}>('/api/state',{cache:'no-store',redirect:'manual'})
    if(!res.ok){if(requiresLogin(res))setLocked(true);setSync(requiresLogin(res)?'auth':'fail');return}
-   const data=await res.json() as {account:string;revision:number;state:Snapshot|null}
-   if(!data.account||!Number.isSafeInteger(data.revision)||data.revision<0||(data.state&&data.state.version!==1))throw Error()
+   if(!data?.account||!Number.isSafeInteger(data.revision)||data.revision<0||(data.state&&data.state.version!==1))throw Error()
    const next:Snapshot=data.state??initial()
    const switched=activeAccount.current!==data.account, changed=rev.current!==data.revision
    if(switched){
@@ -60,26 +63,32 @@ export default function Studio(){
     setMemo(next.entries[next.day]?.reviewMemo||'');setCheck(false);setRefreshKey(k=>k+1)
    }
    live.current=next;rev.current=data.revision;activeAccount.current=data.account;revisionAtRead.current=data.revision
-   setAccount(data.account);setS(next);setLocked(false);setSync('ok');await refreshCoach()
+   setAccount(data.account);setS(next);setLocked(false);setSync('ok');void refreshCoach()
   }catch{setSync('fail')}finally{busy.current=false}
  }
+ // Initial subscription to the external, authenticated checkpoint.
+ // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
  useEffect(()=>{void refresh()},[])
  async function persist(make:(prev:Snapshot)=>Snapshot){
   if(busy.current||revisionAtRead.current===null||!activeAccount.current||sync==='conflict'||sync==='auth'||sync==='load')return false
   busy.current=true;setPending(true);setError('');setSync('write')
   try {
    const next=make(live.current)
+   const expectedRevision=rev.current+(JSON.stringify(next)===JSON.stringify(live.current)?0:1)
    const request={method:'PUT',redirect:'manual' as RequestRedirect,headers:{'Content-Type':'application/json','X-Bandroom-Account':activeAccount.current},body:JSON.stringify({revision:rev.current,state:next})}
    // One exact replay also recovers a successful commit whose response was lost.
-   let r:Response
-   try{r=await fetch('/api/state',request)}catch{r=await fetch('/api/state',request)}
+   let result:{response:Response;data:{revision:number;error?:string}|null}
+   try{result=await requestJSON('/api/state',request)}catch{result=await requestJSON('/api/state',request)}
+   const {response:r,data}=result
    if(!r.ok){
     if(r.status===409||r.status===428){if(r.status===428)setLocked(true);setSync('conflict');setError('云端记录或登录账号已经更新。请先保留当前草稿，再读取最新进度。')}
     else if(requiresLogin(r)){setLocked(true);setSync('auth');setError('登录已过期。请在新标签页重新登录，再回来读取进度。')}
-    else{setSync('fail');setError(r.status===422?'此提交与当前课程或证据记录不符。请核对输入，并读取最新进度。':'保存未成功，请保留当前页面并重试。')}
+    else{setSync('fail');setError(r.status===422?
+      (data?.error==='recording_not_found'?'录音尚未在云端找到。请保留录音并重新提交。':data?.error==='recording_question_mismatch'?'录音与本题或已有回答不符。请保留录音并读取最新进度。':'此提交与当前课程记录不符。请保留草稿，并读取最新进度。'):
+      `进度保存失败（${r.status}），录音和草稿已保留，请重试。`)}
     return false
    }
-   const data=await r.json() as {revision:number}
+   if(!data||!Number.isSafeInteger(data.revision)||data.revision!==expectedRevision)throw Error('Invalid save acknowledgement')
    live.current=next;rev.current=data.revision;setS(next);setSync('ok');return true
   }catch{setSync('conflict');setError('保存结果尚未确认。请保留草稿，再读取云端记录以核对。');return false}
   finally{busy.current=false;setPending(false)}
@@ -116,7 +125,7 @@ export default function Studio(){
   <div className="actions" style={{marginTop:16}}>{sync==='auth'&&<a className="primary" href="/signin-with-chatgpt?return_to=%2F" target="_blank" rel="noopener noreferrer">登录 ChatGPT</a>}
   {sync!=='load'&&<button className="secondary" onClick={()=>void refresh()}>重新读取进度</button>}</div></section>
  if(!account)return <main>{loginGate}</main>
- return <>{locked&&<main>{loginGate}</main>}<div className="app-shell" style={locked?{display:'none'}:undefined}>
+ return <>{locked&&<main>{loginGate}</main>}<div className="app-shell">
  <aside className="side"><button className="brand" onClick={()=>navigate('home')}><Emblem/><span><b>Bandroom</b><small>IELTS STUDY STUDIO</small></span></button>
  <div className="nav-label">WORKSPACE</div><nav>{tabs.map(([id,title,Icon])=><button key={id} className={'nav-item '+((tab===id||(tab==='lesson'&&id==='home'))?'selected':'')} onClick={()=>navigate(id)}><Icon size={18}/>{title}</button>)}</nav>
  <div className="sidebar-bottom"><div className="sidebar-target"><span>MY PROGRAMME</span><b>IELTS <em>{overallTarget.toFixed(1)}</em></b><small>62 课时学习计划</small></div><button className={'nav-item '+(tab==='settings'?'selected':'')} onClick={()=>navigate('settings')}><SlidersHorizontal size={17}/>训练设置</button><div className="profile"><span>HZ</span><div><b>Henry</b><small>个人学习空间</small></div></div></div>
@@ -124,7 +133,7 @@ export default function Studio(){
  <div className="main-column"><header className="topbar"><span className="crumb"><span>学习工作台</span><ChevronRight size={13}/><b>{tabLabel}</b></span><span className="mobile-brand"><Emblem small/>Bandroom</span><button className="sync" onClick={()=>void refresh()} disabled={pending||sync==='load'} title="重新读取进度与教练反馈">{sync==='ok'?<Cloud size={15}/>:<RefreshCw size={14}/>} {statuses[sync]}</button></header>
  <nav className="mobile-nav">{[...tabs,['settings','设置',SlidersHorizontal] as const].map(([id,title,I])=><button key={id} className={(tab===id||(id==='home'&&tab==='lesson'))?'selected':''} onClick={()=>navigate(id)}><I size={15}/>{title}</button>)}</nav>
  <main id="main">
- {(sync==='auth'||sync==='fail'||sync==='conflict'||error)&&<div role="status" className="alert"><CloudOff size={17}/><span>{error||(sync==='auth'?'请使用此站点所属的 ChatGPT 账号登录，以保存作答。':'暂时无法读取你的云端进度。请在继续练习前重试。')}</span>{sync==='auth'?<a href="/signin-with-chatgpt?return_to=%2F" target="_top">登录</a>:<button onClick={()=>void refresh()}>重新读取</button>}</div>}
+ {(sync==='auth'||sync==='fail'||sync==='conflict'||error)&&<div role="status" className="alert"><CloudOff size={17}/><span>{error||(sync==='auth'?'请使用此站点所属的 ChatGPT 账号登录，以保存作答。':'暂时无法读取你的云端进度。请在继续练习前重试。')}</span>{sync==='auth'?<a href="/signin-with-chatgpt?return_to=%2F" target="_blank" rel="noopener noreferrer">登录</a>:<button onClick={()=>void refresh()}>重新读取</button>}</div>}
  {coachError&&sync==='ok'&&<div className="alert"><span>教练反馈暂未载入。</span><button onClick={()=>void refreshCoach()}>重试</button></div>}
  {tab!=='lesson'&&<div className="page-intro"><div><div className="eyebrow"><span className="kicker-line"/>{titles[tab][0]}</div><h1>{titles[tab][1]}</h1><p>{titles[tab][2]}</p></div>{tab==='home'&&<div className="edition"><Disc3 size={15}/> PERSONAL EDITION</div>}</div>}
  {tab==='home'&&<div className="dashboard"><div className="desk-main"><section className="hero"><div className="hero-top"><span className="hero-tag"><i/>{s.finished?'本课已打卡':'进行中'}</span><span>LESSON {String(s.day).padStart(2,'0')} / 62</span></div><div className="hero-copy"><div className="hero-over">{s.finished?'LESSON COMPLETE':s.day===11?'SPEAKING LAB  /  PART 3':english[stage].toUpperCase()+' LAB'}</div><h2>{s.day===11?'仪表盘上的警示灯':topic.theme}</h2><p>{s.finished?'本课记录已归档。下一课由你开启。':s.day===11?'接续你的轮胎预警经历，练习解释原因与后果。':'从当前小题继续，保留每一次独立作答。'}</p>
