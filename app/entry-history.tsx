@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import AttemptFeedback from "./attempt-feedback";
 import { ChevronDown } from "lucide-react";
 import { getExercises, getLesson, type Item } from "./curriculum";
@@ -32,35 +32,49 @@ function dateLabel(value:string) {
 
 function readDeviceRecording(id:string):Promise<Blob> {
   return new Promise((resolve,reject)=>{
+    let settled=false,db:IDBDatabase|undefined;
+    const fail=()=>{if(settled)return;settled=true;clearTimeout(timer);db?.close();reject(new Error("recording_unavailable"));};
+    const timer=setTimeout(fail,8000);
     const request=indexedDB.open("ielts-speaking-audio",1);
     request.onupgradeneeded = () => request.result.createObjectStore("clips");
-    request.onerror = () => reject(request.error);
+    request.onerror=request.onblocked=fail;
     request.onsuccess = () => {
-      const db=request.result, tx=db.transaction("clips","readonly"), clip=tx.objectStore("clips").get(id);
-      tx.oncomplete=()=>{db.close(); if (clip.result instanceof Blob) resolve(clip.result); else reject(new Error("missing"));};
-      tx.onerror=tx.onabort=()=>{db.close(); reject(tx.error);};
+      db=request.result;if(settled){db.close();return;}
+      try {
+        const tx=db.transaction("clips","readonly"),clip=tx.objectStore("clips").get(id);
+        tx.oncomplete=()=>{
+          if(settled)return;
+          if(!(clip.result instanceof Blob)){fail();return;}
+          settled=true;clearTimeout(timer);db?.close();resolve(clip.result);
+        };
+        tx.onerror=tx.onabort=fail;
+      }catch{fail();}
     };
   });
 }
 
 function AudioEvidence({answer,filename}:{answer:Attempt;filename:string}) {
   const remote = answer.audio ? "/api/audio?id="+encodeURIComponent(answer.audio) : "";
-  const [file,setFile]=useState<Blob|null>(null),[url,setUrl]=useState(""),[message,setMessage]=useState("");
-  useEffect(()=>{
-    if (!file) return;
-    const objectUrl=URL.createObjectURL(file); setUrl(objectUrl);
-    return ()=>URL.revokeObjectURL(objectUrl);
-  },[file]);
+  const [clip,setClip]=useState<{file:Blob;url:string}|null>(null),[message,setMessage]=useState("");
+  const [loading,setLoading]=useState(false),mounted=useRef(false),loadingRef=useRef(false);
+  useEffect(()=>{mounted.current=true;return ()=>{mounted.current=false}},[]);
+  useEffect(()=>()=>{if(clip)URL.revokeObjectURL(clip.url)},[clip]);
+  const file=clip?.file,url=clip?.url;
   const source=remote||url, suffix=file ? file.type.includes("mp4")?".m4a":file.type.includes("webm")?".webm":file.type.includes("ogg")?".ogg":"" : "";
   if (!answer.audio && !answer.local) return null;
   return <div className="sp-play">
     {source?<><audio aria-label="回听这次口语回答" controls preload="none" src={source}
       onError={()=>setMessage("录音未能载入。请检查登录状态或在原设备打开。")}/>
       <a download={filename+suffix} href={source}>下载这段录音</a></>:
-      <button type="button" className="secondary" onClick={async()=>{
-        try {setFile(await readDeviceRecording(answer.local!));setMessage("");}
-        catch {setMessage("请在录制这段回答时使用的浏览器里打开。");}
-      }}>载入本机录音</button>}
+      <button type="button" className="secondary" disabled={loading} onClick={async()=>{
+        if(loadingRef.current)return;
+        loadingRef.current=true;setLoading(true);
+        try {
+          const file=await readDeviceRecording(answer.local!);
+          if(mounted.current){setClip({file,url:URL.createObjectURL(file)});setMessage("");}
+        }catch {if(mounted.current)setMessage("请在录制这段回答时使用的浏览器里打开。");}
+        finally {loadingRef.current=false;if(mounted.current)setLoading(false);}
+      }}>{loading?"载入中…":"载入本机录音"}</button>}
     {message&&<small role="status">{message}</small>}
   </div>;
 }
@@ -73,7 +87,7 @@ function SpeechGroup({name,items,prompt,day,date,field}:{field:string;name:strin
       <b>{i===0?"首次回答":"重答 "+i}</b>
       <small>{[dateLabel(a.at),a.audio?"已保存录音":a.local?"本机录音":a.spoken?"本人自报已开口作答":"文字草稿"].filter(Boolean).join(" · ")}</small>
       {a.text&&<p className="english-text" lang="en">{a.text}</p>}
-      <AudioEvidence answer={a} filename={"Day-"+(day??"IELTS")+"-"+name+"-"+(i+1)}/><AttemptFeedback field={field} index={i}/>
+      <AudioEvidence key={a.audio||a.local||a.at} answer={a} filename={"Day-"+(day??"IELTS")+"-"+name+"-"+(i+1)}/><AttemptFeedback field={field} index={i}/>
     </div>)}
   </Section>;
 }

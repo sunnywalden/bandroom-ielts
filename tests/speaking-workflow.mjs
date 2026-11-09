@@ -50,7 +50,7 @@ beforeEach(()=>{
   state={version:1,day:12,stage:'speak',finished:false,completed:Array.from({length:11},(_,i)=>i+1),checked:{11:'2026-11-09'},started:{11:'2026-11-02',12:'2026-11-09'},exam:'未选择',practice:{},entries:{11:{speakingReview:'Earlier feedback'},12:{speakingPart2:part2,speakingPhase:'followup'}}};
   globalThis.fetch=async(url,init={})=>{
     calls.push([url,init]);
-    if(url==='/api/coach')return coachFault?coachFault():response(200,{extras:{},feedback:[]});
+    if(url==='/api/coach')return coachFault?coachFault():response(200,{account:'fixture-learner',extras:{},feedback:[]});
     if(url==='/api/state'&&!init.method)return response(200,{account:'fixture-learner',revision,state:structuredClone(state)});
     if(url==='/api/audio')return audioFault?audioFault(init):response(201,{id:init.headers['X-Bandroom-Attempt']});
     if(url==='/api/state'){
@@ -98,12 +98,17 @@ test('upload timeout is bounded, explains the failure, and keeps the same attemp
   audioFault=null;await click(button('保存回答，进入自评'));
   assert.equal(JSON.parse(state.entries[12].speakingFollowup)[0].audio,first);preserved();
 });
-test('login expiry does not discard or hide the recording and does not advance',async()=>{
+test('login expiry locks access, retains the recording and restores it after authentication',async()=>{
   await mount();await writeDraft('Retain after auth expiry');await record();await stop();stateFault=()=>response(401,{error:'sign_in_required'});
   await click(button('保存回答，进入自评'));
   assert.ok(!state.entries[12].speakingFollowup);assert.match(text(),/登录已过期/);
-  assert.notEqual(document.querySelector('.app-shell').style.display,'none');
-  assert.ok(document.querySelector('a[download]'));preserved();
+  assert.equal(document.querySelector('.app-shell').hidden,true);
+  const clip=document.querySelector('a[download]').href;preserved();
+  stateFault=null;await click(button('重新读取进度'));
+  assert.equal(document.querySelector('.app-shell').hidden,false);
+  assert.equal(document.querySelector('a[download]').href,clip);
+  assert.equal(document.querySelector('textarea').value,'Retain after auth expiry');
+  await click(button('保存回答，进入自评'));assert.match(text(),/SPEAKING REVIEW/);preserved();
 });
 test('state timeout unlocks the UI, retains audio, and does not falsely advance',async()=>{
   await mount();await record();await stop();stateFault=()=>new Promise(()=>{});

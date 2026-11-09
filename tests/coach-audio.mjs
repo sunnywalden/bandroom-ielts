@@ -113,22 +113,26 @@ const pcm=execFileSync('ffmpeg',['-v','error','-i','pipe:0','-f','s16le','-ar','
 assert.ok(pcm.length>=30000&&pcm.some(v=>v!==0))
 assert.equal((await readAudio(webm,{mode:'bytes',offset:info.size})).isError,true)
 assert.equal((await readAudio(webm,{mode:'bytes',length:24577})).isError,true)
-const review={day:11,stage:'speak',attempt:'integration fixture',recordingId:webm,evidence:'Isolated synthetic audio transport fixture.',feedback:'Check complete clause usage.'}
+const submittedAttempt=result(await call('read_study_session')).reviewAttempts.find(a=>a.recordingId===webm)
+assert.ok(submittedAttempt)
+const review={day:11,stage:'speak',attempt:submittedAttempt.id,recordingId:webm,evidence:'Isolated synthetic audio transport fixture.',feedback:'Check complete clause usage.'}
+assert.equal((await call('add_coach_feedback',{...review,attempt:'integration fixture'})).isError,true)
 assert.equal((await call('add_coach_feedback',{...review,day:9,recordingId:undefined})).isError,true)
 const first=result(await call('add_coach_feedback',review)), second=result(await call('add_coach_feedback',review))
 assert.equal(first.id,second.id)
 const after=result(await call('read_study_session'));assert.equal(after.revision,1);assert.deepEqual(after.entry,state.entries[11]);assert.equal(after.feedback.length,1);assert.ok(after.feedback[0].evidence.includes(webm))
 assert.equal((await call('add_coach_feedback',{...review,recordingId:crypto.randomUUID()})).isError,true)
 const syntheticRating={band:6.5,reviewedWholeClip:true,observation:'TEST ONLY: fixture for the audible vowel and word-stress observation field.'}
-const rated={...review,attempt:'isolated scoring contract fixture',pronunciation:syntheticRating}
+const rated={...review,pronunciation:syntheticRating}
 assert.equal((await call('add_coach_feedback',{...rated,recordingId:undefined})).isError,true)
 assert.equal((await call('add_coach_feedback',{...rated,pronunciation:{...syntheticRating,reviewedWholeClip:false}})).isError,true)
 assert.equal((await call('add_coach_feedback',{...rated,pronunciation:{...syntheticRating,band:6.3}})).isError,true)
 assert.equal((await call('add_coach_feedback',{...rated,pronunciation:{...syntheticRating,observation:''}})).isError,true)
 assert.equal((await call('add_coach_feedback',{...review,recordingId:undefined,feedback:'发音暂定 7.0 分'})).isError,true)
 assert.equal((await call('add_coach_feedback',{...rated,feedback:'Overall speaking band 7.0'})).isError,true)
-assert.equal(result(await call('add_coach_feedback',rated)).id,result(await call('add_coach_feedback',rated)).id)
-const ratedRow=result(await call('read_study_session')).feedback.find(f=>f.attempt===rated.attempt)
+const ratedId=result(await call('add_coach_feedback',rated)).id
+assert.equal(ratedId,result(await call('add_coach_feedback',rated)).id)
+const ratedRow=result(await call('read_study_session')).feedback.find(f=>f.id===ratedId)
 assert.deepEqual(ratedRow.pronunciation,{...syntheticRating,recordingId:webm,scope:'partial'})
 assert.match(ratedRow.evidence,/发音专项暂定 6.5/);assert.match(ratedRow.evidence,/word-stress/)
 assert.deepEqual((await (await read.GET()).json()).feedback.find(f=>f.id===ratedRow.id),ratedRow)

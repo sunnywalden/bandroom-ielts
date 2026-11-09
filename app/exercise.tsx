@@ -1,5 +1,6 @@
 "use client";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
+import { useDraft } from "./use-draft";
 import { getExercises, sourceUrl, type Item, type Lesson } from "./curriculum";
 import ListeningPlayer from "./listening-player";
 import VocabularyReview, { learnedWords } from "./vocabulary-review";
@@ -20,30 +21,14 @@ const names: Record<Stage,[string,string,string]> = {
 };
 const modes = ["首听一遍","有额外重播","作答前参考了原文"];
 
-// Drafts survive an accidental page refresh. Submitted work comes from the saved lesson record.
-function useDraft(account:string,key:string, initial:string) {
-  const [value,setValue] = useState(initial);
-  const storageKey="bandroom.draft."+account+"."+key;
-  useEffect(()=>{
-    try {
-      const stored=JSON.parse(localStorage.getItem(storageKey)||"null");
-      setValue(stored?.base===initial && typeof stored?.value==="string"?stored.value:initial);
-    }catch{setValue(initial);}
-  },[storageKey,initial]);
-  const change=(s:string)=>{
-    setValue(s);
-    try{localStorage.setItem(storageKey,JSON.stringify({base:initial,value:s}));}catch{}
-  };
-  return [value,change] as const;
-}
 function Submit({children,disabled=false,onClick}:{children:ReactNode;disabled?:boolean;onClick:()=>void}) {
   return <button className="primary" type="button" disabled={disabled} onClick={onClick}>{children}</button>;
 }
 function SavedText({title,text}:{title:string;text:string}) {
   return <div className="ex-saved"><span>{title}</span><p lang="en">{text}</p></div>;
 }
-function ResponseBox({label,value,onChange,large=false}:{label:string;value:string;onChange:(s:string)=>void;large?:boolean}) {
-  return <label className="ex-label">{label}<textarea className={large?"ex-long":""} value={value}
+function ResponseBox({label,value,onChange,large=false,readOnly=false}:{label:string;value:string;onChange:(s:string)=>void;large?:boolean;readOnly?:boolean}) {
+  return <label className="ex-label">{label}<textarea className={large?"ex-long":""} value={value} readOnly={readOnly}
     maxLength={12000} lang="en" rows={large?10:3} onChange={e=>onChange(e.target.value)} placeholder={large?"Start writing here…":"Write your answer in English…"} /></label>;
 }
 function WordList({pairs}:{pairs:[string,string][]}) {
@@ -73,14 +58,14 @@ function Vocabulary({lesson,entry,save,advance,day,account,busy,completedDays}:C
       <div className="ex-columns"><div><h3>两条短语</h3><WordList pairs={lesson.phrases}/></div><div><h3>两组固定搭配</h3><WordList pairs={lesson.collocations}/></div></div>
       <p className="ex-question" lang="en">{lesson.use}</p>
       {done?<><SavedText title="你的例句 · 已保存" text={entry.vocabUse}/><AttemptFeedback field="vocabUse"/><Submit disabled={busy} onClick={advance}>进入听力 →</Submit></>:<>
-        <ResponseBox label="原创例句" value={sentence} onChange={setSentence}/>
+        <ResponseBox label="原创例句" value={sentence} onChange={setSentence} readOnly={busy}/>
         <Submit disabled={busy||!sentence.trim()} onClick={()=>void save({vocabUse:sentence.trim(),vocabDone:"1"})}>提交例句</Submit>
       </>}
     </>:<>
       <h2>试着回忆一个词</h2>
       <p className="ex-question" lang="en">{lesson.recall[0]}</p>
       <label className="ex-label">填写一个词<input lang="en" spellCheck={false} autoComplete="off" maxLength={100}
-        value={result?entry.vocabRecall:recall} onChange={e=>setRecall(e.target.value)} readOnly={result}/></label>
+        value={result?entry.vocabRecall:recall} onChange={e=>setRecall(e.target.value)} readOnly={result||busy}/></label>
       {result?<div className="ex-feedback"><div className="ex-word-heading"><strong role="status">{entry.vocabRecallCorrect==="1"?"回忆正确":"再记一次"} · {lesson.recall[1]}</strong><Pronunciation word={lesson.recall[1]}/></div><p>回顾这个词，再读今天的三个例句。</p></div>:
         <Submit disabled={busy||!recall.trim()} onClick={()=>void save({vocabRecall:recall.trim(),vocabRecallCorrect:normal(recall)===normal(lesson.recall[1])?"1":"0"})}>核对回忆</Submit>}
       {result&&<><AttemptFeedback field="vocabRecall"/><div className="ex-stack">{lesson.words.map(([term,meaning,example])=><div className="ex-word" key={term}><div className="ex-word-heading"><b lang="en">{term}</b><Pronunciation word={term}/><span className="ex-word-meaning">{meaning}</span></div><p lang="en">{example}</p></div>)}</div>
@@ -117,10 +102,10 @@ function ChoicePractice({lesson,entry,save,advance,day,account,busy,stage}:{stag
     <p className="ex-meta">{listening?"BRITISH COUNCIL · C1":"ORIGINAL PASSAGE"} <span>·</span> {index===0?"01":"02"} / 02</p>
     <h2 lang="en">{listening?lesson.audioTitle:lesson.readingTitle}</h2>
     {listening?<ListeningPlayer slug={lesson.slug} source={sourceUrl(lesson)}/>:<blockquote className="ex-passage" lang="en">{lesson.passage}</blockquote>}
-    <Question item={item} index={index} selected={selected} onSelect={setSelection} locked={submitted}/>
-    {listening?<label className="ex-label">本题作答时的播放条件<select value={mode||""} disabled={submitted} onChange={e=>setCondition(e.target.value)}>
+    <Question item={item} index={index} selected={selected} onSelect={setSelection} locked={submitted||busy}/>
+    {listening?<label className="ex-label">本题作答时的播放条件<select value={mode||""} disabled={submitted||busy} onChange={e=>setCondition(e.target.value)}>
       <option value="">选择实际情况</option>{modes.map(m=><option key={m}>{m}</option>)}</select></label>:
-      submitted?<SavedText title="你选择的证据" text={entry[stage+"Evidence"+index]}/>:<ResponseBox label="用一句英语说明哪条证据支持你的选择" value={evidence} onChange={setEvidence}/>}
+      submitted?<SavedText title="你选择的证据" text={entry[stage+"Evidence"+index]}/>:<ResponseBox label="用一句英语说明哪条证据支持你的选择" value={evidence} onChange={setEvidence} readOnly={busy}/>}
     {submitted?<><div className="ex-feedback" role="status"><strong>{selected===String(item.answer)?"选择正确":"再看一处证据"} · 答案 {"ABC"[item.answer]}</strong><p>{item.why}</p></div>
       <AttemptFeedback field={key}/>
       {index===0?<Submit disabled={busy} onClick={()=>void save({[stage+"Batch"]:"2"})}>继续下一题 →</Submit>:
@@ -136,6 +121,8 @@ function Writing({lesson,entry,save,advance,day,account,busy}:Common) {
   const [second,setSecond]=useDraft(account,"fieldnotes."+day+".write.revision",entry.writeRevisionDraft||original||"");
   const [condition,setCondition]=useDraft(account,"fieldnotes."+day+".write.condition","独立 · 未计时");
   const [shortOk,setShortOk]=useState(false);
+  const [submitting,setSubmitting]=useState(false);
+  const submittingRef=useRef(false);
   const [focus,setFocus]=useDraft(account,"fieldnotes."+day+".write.focus","");
   const min=lesson.fullEssay?250:90;
   const current=isRevision?second:first;
@@ -143,10 +130,14 @@ function Writing({lesson,entry,save,advance,day,account,busy}:Common) {
   const changed=second.trim()!==(original||"").trim();
   const ready=current.trim().length>0 && (!under||shortOk) && (!isRevision||changed&&Boolean(focus.trim()));
   const draftKey=isRevision?"writeRevisionDraft":"writeDraft";
-  function submit() {
-    if (!ready) return;
-    if (isRevision) void save({writeRevision:second.trim(),writeFocus:focus.trim(),writeDone:"1"});
-    else { setSecond(first.trim()); setShortOk(false); void save({writeOriginal:first.trim(),writeCondition:condition}); }
+  async function submit() {
+    if (!ready||busy||submittingRef.current) return;
+    submittingRef.current=true;setSubmitting(true);
+    try {
+      const ok=await save(isRevision?{writeRevision:second.trim(),writeFocus:focus.trim(),writeDone:"1"}:
+        {writeOriginal:first.trim(),writeCondition:condition});
+      if(ok)setShortOk(false);
+    }finally{submittingRef.current=false;setSubmitting(false);}
   }
   return <>
     <p className="ex-meta">{lesson.fullEssay?"TASK 2 · FULL ESSAY":"WRITING WORKSHOP"} <span>·</span> {isRevision?"REVISION":"FIRST DRAFT"}</p>
@@ -157,12 +148,12 @@ function Writing({lesson,entry,save,advance,day,account,busy}:Common) {
     {revised!==undefined?<><SavedText title={"修订稿 · "+count(revised)+" 词"} text={revised}/><AttemptFeedback field="writeRevision"/><div className="ex-feedback"><strong>本次修改意图</strong><p>{entry.writeFocus}</p></div><Submit disabled={busy} onClick={advance}>进入复盘 →</Submit></>:<>
       {isRevision?<div className="ex-feedback"><strong>课程修订提示（非本篇批改）</strong><p>{lesson.edit}</p></div>:
         <p className="ex-hint">{lesson.fullEssay?"本次完整 Task 2 建议独立限时 40 分钟。请按实际情况选择作答条件。":"先用自己的语言写首稿。提交后可查看定向修订提示。"}</p>}
-      <ResponseBox label={isRevision?"修订稿":"首稿"} value={current} onChange={isRevision?setSecond:setFirst} large/>
+      <ResponseBox label={isRevision?"修订稿":"首稿"} value={current} onChange={isRevision?setSecond:setFirst} large readOnly={submitting}/>
       <div className="ex-count">{count(current)} 词 · {lesson.fullEssay?"目标 ≥ 250 词":"建议 90–130 词"}</div>
-      {isRevision?<label className="ex-label">我改了哪一处，为什么？<input value={focus} onChange={e=>setFocus(e.target.value)} maxLength={400} placeholder="中文或英文均可"/></label>:
-        <label className="ex-label">实际写作条件<select value={condition} onChange={e=>setCondition(e.target.value)}>
+      {isRevision?<label className="ex-label">我改了哪一处，为什么？<input value={focus} readOnly={submitting} onChange={e=>setFocus(e.target.value)} maxLength={400} placeholder="中文或英文均可"/></label>:
+        <label className="ex-label">实际写作条件<select value={condition} disabled={submitting} onChange={e=>setCondition(e.target.value)}>
           <option>独立 · 未计时</option><option>独立 · 我已自行计时</option><option>有参考或获得提示</option></select></label>}
-      {under&&current.trim()&&<label className="ex-check"><input type="checkbox" checked={shortOk} onChange={e=>setShortOk(e.target.checked)}/>按当前字数提交，并保留篇幅不足的记录</label>}
+      {under&&current.trim()&&<label className="ex-check"><input type="checkbox" disabled={submitting} checked={shortOk} onChange={e=>setShortOk(e.target.checked)}/>按当前字数提交，并保留篇幅不足的记录</label>}
       <div className="actions"><Submit disabled={busy||!ready} onClick={submit}>{isRevision?"提交修订稿":"提交并锁定首稿"}</Submit>
         <button type="button" className="secondary" disabled={busy||!current.trim()} onClick={()=>void save({[draftKey]:current})}>保存草稿</button></div>
       <p className="ex-hint">提交后可在当前 Work 会话请教练批改，评语将自动显示在对应稿件旁。你可以先看反馈，再动笔修订。</p>

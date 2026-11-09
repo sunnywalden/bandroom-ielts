@@ -3,17 +3,22 @@ import {createContext,useContext,useEffect,useState,type ReactNode} from 'react'
 import {feedbackFor,reviewAttempts,reviewRequest,type CoachFeedback,type ReviewAttempt} from './feedback-model';
 import './feedback.css';
 
-type Context = {attempts:ReviewAttempt[];feedback:CoachFeedback[];error:boolean;refresh:()=>void};
-const FeedbackContext=createContext<Context>({attempts:[],feedback:[],error:false,refresh:()=>{}});
+type Context = {attempts:ReviewAttempt[];feedback:CoachFeedback[];error:boolean;refresh:()=>void;ready:boolean;identificationFailed:boolean;retry:()=>void};
+const FeedbackContext=createContext<Context>({attempts:[],feedback:[],error:false,refresh:()=>{},ready:false,identificationFailed:false,retry:()=>{}});
 export function FeedbackProvider({day,entry,feedback,error,refresh,children}:{day:number;entry:Record<string,string>;feedback:CoachFeedback[];error:boolean;refresh:()=>void;children:ReactNode}) {
-  const source=JSON.stringify(entry),[identified,setIdentified]=useState<{day:number;source:string;attempts:ReviewAttempt[]}|null>(null);
+  const source=JSON.stringify(entry),[identified,setIdentified]=useState<{day:number;source:string;attempts:ReviewAttempt[];failed?:boolean}|null>(null);
+  const [retryCount,setRetryCount]=useState(0);
   useEffect(()=>{
     let active=true;
-    void reviewAttempts(day,JSON.parse(source)).then(attempts=>{if(active)setIdentified({day,source,attempts})}).catch(()=>{if(active)setIdentified(null)});
+    void reviewAttempts(day,JSON.parse(source)).then(attempts=>{if(active)setIdentified({day,source,attempts})}).catch(()=>{if(active)setIdentified({day,source,attempts:[],failed:true})});
     return ()=>{active=false};
-  },[day,source]);
-  const attempts=identified?.day===day&&identified.source===source?identified.attempts:[];
-  return <FeedbackContext.Provider value={{attempts,feedback,error,refresh}}>{children}</FeedbackContext.Provider>;
+  },[day,source,retryCount]);
+  const current=identified?.day===day&&identified.source===source?identified:null;
+  return <FeedbackContext.Provider value={{attempts:current?.attempts??[],feedback,error,refresh,ready:Boolean(current&&!current.failed),identificationFailed:Boolean(current?.failed),retry:()=>setRetryCount(n=>n+1)}}>{children}</FeedbackContext.Provider>;
+}
+export function FeedbackIdentificationStatus(){
+  const {identificationFailed,retry}=useContext(FeedbackContext);
+  return identificationFailed?<div className="alert" role="status"><span>暂时无法定位对应练习的反馈。已保存的答案和评语仍保留。</span><button type="button" onClick={retry}>重试定位反馈</button></div>:null;
 }
 function QuickCheck({attempt}:{attempt:ReviewAttempt}) {
   const {field,response,recordingId,conditions}=attempt;
@@ -48,7 +53,8 @@ export default function AttemptFeedback({field,index=0}:{field:string;index?:num
   </section>;
 }
 export function UnmatchedFeedback(){
-  const {attempts,feedback}=useContext(FeedbackContext);
+  const {attempts,feedback,ready}=useContext(FeedbackContext);
+  if(!ready)return null;
   const rows=feedback.filter(f=>!attempts.some(a=>feedbackFor(a,[f]).length));
   return rows.length?<details className="af-legacy"><summary>其他已保存的教练评语 · {rows.length}</summary><p className="af-hint">这些评语未绑定到当前这一次提交，保留供你回看。</p>{rows.map(f=><article key={f.id}><small>{f.attempt} · {f.evidence}</small><p>{f.feedback}</p></article>)}</details>:null;
 }
