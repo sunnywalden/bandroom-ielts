@@ -1,14 +1,34 @@
 import { z } from "zod";
-import { initial, labels, oldOrder, stages, type Entry, type Stage } from "../../ledger";
+import { dayStamp, initial, labels, oldOrder, stages, type Entry, type Stage } from "../../ledger";
 
-const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
-const snapshot = z.object({
+import { getExercises, type Lesson } from "../../curriculum";
+import { periods } from "../../period";
+
+const date = z.string().date();
+const skill = z.enum(["Listening","Reading","Writing","Speaking"]);
+const fullTest = z.object({
+  id:z.string().uuid(), skill, date, exam:z.enum(["通用","Academic","General Training"]),
+  source:z.string().trim().min(1).max(160),rater:z.string().trim().min(1).max(200),
+  raw:z.number().int().min(0).max(40).optional(),band:z.number().min(0).max(9).multipleOf(.5).optional(),
+  audio:z.string().uuid().optional()
+}).strict().refine(t=>(t.skill==="Listening"||t.skill==="Reading"? t.raw!==undefined : t.band!==undefined)
+  && (t.skill==="Speaking"?!!t.audio:!t.audio)
+  && (t.skill==="Reading"||t.skill==="Writing"?t.exam!=="通用":t.exam==="通用"));
+const digest=z.object({
+  from:date,to:date,lines:z.array(z.object({date,day:z.number().int().optional(),kind:z.enum(["Listening","Reading","Writing","Speaking","词汇","综合"]),text:z.string()})),
+  tests:z.array(fullTest),recall:z.tuple([z.number().int().nonnegative(),z.number().int().nonnegative()]),
+  applications:z.number().int().nonnegative(),priorities:z.array(z.string()).max(2),
+  comments:z.array(z.object({day:z.number().int(),stage:z.enum(["speak","listen","read","write","vocab","review"]),attempt:z.string(),evidence:z.string(),feedback:z.string(),createdAt:z.string()})),
+}).strict();
+const report=z.object({created:z.string().datetime(),updated:z.string().datetime(),week:digest,cycle:digest.optional()}).strict();
+export const snapshotSchema = z.object({
   version:z.literal(1), day:z.number().int().min(11).max(62),
   stage:z.enum(["speak","vocab","listen","read","write","review"]), finished:z.boolean(),
   completed:z.array(z.number().int()), checked:z.record(date), started:z.record(date),
   entries:z.record(z.record(z.string())), exam:z.enum(["未选择","Academic","General Training"]),
-  practice:z.record(z.object({count:z.number().int().nonnegative(), date})),
-});
+  practice:z.record(z.object({count:z.number().int().nonnegative(),date,lastCorrect:z.boolean().optional()}).strict()),
+  fullTests:z.array(fullTest).optional(),reports:z.record(z.string().regex(/^W[1-9]\d*$/),report).optional(),
+}).strict();
 const attempt = z.object({ at:z.string().datetime(), text:z.string(), spoken:z.literal(true),
   audio:z.string().uuid().optional(), local:z.string().uuid().optional() }).strict();
 
@@ -16,9 +36,9 @@ function attempts(raw?:string) {
   try { return z.array(attempt).parse(JSON.parse(raw ?? "[]")); } catch { return null; }
 }
 
-function same(a:unknown,b:unknown):boolean {
+export function same(a:unknown,b:unknown):boolean {
   if (a===b) return true;
-  if (!a || !b || typeof a!=="object" || typeof b!=="object") return false;
+  if (!a || !b || typeof a!=="object" || typeof b!=="object" || Array.isArray(a)!==Array.isArray(b)) return false;
   const one=a as Record<string,unknown>, two=b as Record<string,unknown>;
   return Object.keys(one).length===Object.keys(two).length && Object.keys(one).every(k=>Object.hasOwn(two,k)&&same(one[k],two[k]));
 }
@@ -44,7 +64,7 @@ function ready(day:number, stage:Stage, e:Entry) {
   }
 }
 
-function validEntry(day:number, stage:Stage, before:Entry, after:Entry) {
+function validEntry(day:number, stage:Stage, before:Entry, after:Entry, lesson?:Lesson) {
   const changed=[...new Set([...Object.keys(before),...Object.keys(after)])].filter(k=>before[k]!==after[k]);
   for(const k of changed){
     if(!Object.hasOwn(after,k))return false;
@@ -60,6 +80,29 @@ function validEntry(day:number, stage:Stage, before:Entry, after:Entry) {
       if(k==="speakingFollowup" && day!==11 && !attempts(before.speakingPart2)?.length)return false;
     } else if(before[k]!==undefined && !(k.endsWith("Draft") || k==="speakingPhase"))return false;
   }
+  if(stage==="vocab" && changed.length){
+    if(!lesson)return false;
+    if(changed.includes("vocabBatch") && (after.vocabBatch!=="2"||!before.vocabRecall))return false;
+    if(changed.includes("vocabUse") && before.vocabBatch!=="2")return false;
+    if(changed.includes("vocabRecall") || changed.includes("vocabRecallCorrect")){
+      const normalize=(s:string)=>s.trim().toLowerCase().replace(/[.!?。]$/,"").trim();
+      if(!after.vocabRecall?.trim()||after.vocabRecallCorrect!==(normalize(after.vocabRecall)===normalize(lesson.recall[1])?"1":"0"))return false;
+    }
+  }
+  if((stage==="listen"||stage==="read")&&changed.length){
+    if(!lesson)return false;
+    if(changed.includes(stage+"Batch") && (after[stage+"Batch"]!=="2"||before[stage+"Q0"]===undefined))return false;
+    for(const i of [0,1]){
+      const k=stage+"Q"+i;
+      if(!changed.includes(k)&&!changed.includes(k+"Correct"))continue;
+      if(i===1&&before[stage+"Batch"]!=="2")return false;
+      const item=(stage==="listen"?lesson.listening:lesson.reading)[i];
+      if(!["0","1","2"].includes(after[k]) || after[k+"Correct"]!==(String(item.answer)===after[k]?"1":"0"))return false;
+      if(stage==="listen"&&!["首听一遍","有额外重播","作答前参考了原文"].includes(after["listenMode"+i]))return false;
+      if(stage==="read"&&!after["readEvidence"+i]?.trim())return false;
+    }
+  }
+  if(changed.includes("writeOriginal")&&(!after.writeOriginal.trim()||!["独立 · 未计时","独立 · 我已自行计时","有参考或获得提示"].includes(after.writeCondition)))return false;
   if(changed.includes("writeRevision") && !before.writeOriginal?.trim())return false;
   if(changed.includes("speakingComplete") && !attempts(before.speakingFollowup)?.length)return false;
   const done=stage==="speak"?"speakingComplete":stage+"Done";
@@ -67,16 +110,33 @@ function validEntry(day:number, stage:Stage, before:Entry, after:Entry) {
 }
 
 // The client saves answers, advances modules, checks in, and starts the next lesson in separate requests.
-export function validTransition(previous:unknown, candidate:unknown):boolean {
-  const old=snapshot.safeParse(previous??initial()), next=snapshot.safeParse(candidate);
+export function validTransition(previous:unknown, candidate:unknown, lesson?:Lesson):boolean {
+  const old=snapshotSchema.safeParse(previous??initial()), next=snapshotSchema.safeParse(candidate);
   if(!old.success||!next.success)return false;
   const a=old.data,b=next.data, newDay=b.day===a.day+1, checking=!a.finished&&b.finished;
+  const tests=a.fullTests??[],newTests=b.fullTests??[];
+  if(newTests.length<tests.length || newTests.length>tests.length+1 || !tests.every((t,i)=>same(t,newTests[i])))return false;
+  if(newTests.length>tests.length){
+    const t=newTests[tests.length];
+    if(t.date>dayStamp()||t.date<"2026-10-29"||(t.exam!=="通用"&&t.exam!==b.exam)
+      ||tests.some(old=>old.id===t.id||(old.date===t.date&&old.skill===t.skill&&old.exam===t.exam&&old.source.toLowerCase()===t.source.toLowerCase())))return false;
+  }
+  for(const [key,prior] of Object.entries(a.reports??{}))if(b.reports?.[key]?.created!==prior.created)return false;
+  for(const [key,value] of Object.entries(b.reports??{})){
+    if(same(value,a.reports?.[key]))continue;
+    const window=periods().find(w=>w.id===key);
+    if(!window||value.week.from!==window.from||value.week.to!==window.to||value.created>value.updated||
+       (window.cycleFrom ? value.cycle?.from!==window.cycleFrom||value.cycle?.to!==window.to : value.cycle!==undefined))return false;
+  }
+  for(const [key,prior] of Object.entries(a.practice))if(!b.practice[key]||b.practice[key].count<prior.count)return false;
+  for(const [key,value] of Object.entries(b.practice))if(!same(value,a.practice[key]) &&
+    (value.count!==(a.practice[key]?.count??0)+1 ||value.date!==dayStamp()))return false;
   if(b.day!==a.day&&!newDay)return false;
   if(newDay&&(!a.finished||!a.checked[a.day]||b.stage!=="speak"||b.finished))return false;
   if(!newDay && a.finished && (!b.finished || b.stage!==a.stage))return false;
   const completed=checking?[...a.completed,a.day]:a.completed;
   if(!same(completed,b.completed))return false;
-  if(checking&&!b.checked[a.day] || newDay&&!b.started[b.day])return false;
+  if(checking&&b.checked[a.day]!==dayStamp() || newDay&&b.started[b.day]!==dayStamp())return false;
   if(!same(b.checked,checking?{...a.checked,[a.day]:b.checked[a.day]}:a.checked))return false;
   if(!same(b.started,newDay?{...a.started,[b.day]:b.started[b.day]}:a.started))return false;
   const prev=a.entries[a.day]??{}, current=b.entries[a.day]??{};
@@ -85,7 +145,7 @@ export function validTransition(previous:unknown, candidate:unknown):boolean {
   if(!same(expectedEntries,b.entries))return false;
   if(a.finished || newDay || a.stage!==b.stage){
     if(!same(prev,current))return false;
-  }else if(!validEntry(a.day,a.stage,prev,current))return false;
+  }else if(!validEntry(a.day,a.stage,prev,current,lesson??(a.day<=16?getExercises(a.day):undefined)))return false;
   if(newDay)return true;
   const order=a.day===11?oldOrder:stages;
   if(checking)return a.stage==="review"&&b.stage==="review"&&typeof current.reviewMemo==="string"&&order.filter(s=>s!=="review").every(s=>ready(a.day,s,prev));

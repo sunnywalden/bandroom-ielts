@@ -1,10 +1,12 @@
 import { and, eq } from "drizzle-orm";
 import { getChatGPTUser } from "@/app/chatgpt-auth";
 import { getDb } from "@/db";
-import { learnerStates } from "@/db/schema";
+import { learnerStates, teacherLessons } from "@/db/schema";
 import { crossOrigin, json, limitedBody } from "../shared";
 
-import { validTransition } from "./transition";
+import { env } from "cloudflare:workers";
+import { getExercises } from "../../curriculum";
+import { validTransition, same } from "./transition";
 
 export const dynamic = "force-dynamic";
 
@@ -13,13 +15,14 @@ export async function GET() {
   if (!user) return json({ error: "sign_in_required" }, 401);
   const result = await getDb().select({ revision: learnerStates.revision, state: learnerStates.state })
     .from(learnerStates).where(eq(learnerStates.userId, user.userId)).get();
-  return json(result ?? { revision: 0, state: null });
+  return json({ account:user.userId, ...(result ?? { revision: 0, state: null }) });
 }
 
 export async function PUT(request: Request) {
   const user = await getChatGPTUser();
   if (!user) return json({ error: "sign_in_required" }, 401);
   if (crossOrigin(request)) return json({ error: "invalid_origin" }, 403);
+  if (request.headers.get("X-Bandroom-Account")!==user.userId) return json({error:"refresh_account"},428);
   if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json")
     return json({ error: "expected_json" }, 415);
 
@@ -38,10 +41,33 @@ export async function PUT(request: Request) {
     return json({ error: "invalid_checkpoint" }, 400);
 
   const db = getDb();
-  const prior = await db.select({ revision: learnerStates.revision, state: learnerStates.state })
+  const read = () => db.select({ revision: learnerStates.revision, state: learnerStates.state })
     .from(learnerStates).where(eq(learnerStates.userId, user.userId)).get();
-  if ((prior?.revision ?? 0) !== revision) return json({ error: "revision_conflict" }, 409);
-  if (!validTransition(prior?.state, state)) return json({ error: "invalid_transition" }, 422);
+  const prior=await read();
+  // A lost response may cause an exact replay. A divergent stale write must still conflict.
+  const conflict=(row:typeof prior)=>row&&row.revision===revision+1 && same(row.state,state)
+    ? json({revision:row.revision}) : json({error:"revision_conflict"},409);
+  if ((prior?.revision ?? 0) !== revision) return conflict(prior);
+  if (!Number.isInteger(state.day)||state.day<11||state.day>62) return json({error:"invalid_checkpoint"},422);
+  const lesson=state.day<=16?getExercises(state.day):(await db.select({lesson:teacherLessons.lesson}).from(teacherLessons)
+    .where(and(eq(teacherLessons.userId,user.userId),eq(teacherLessons.day,state.day))).get())?.lesson;
+  if (state.day>=12&&!lesson) return json({error:"lesson_unavailable"},422);
+  if (!validTransition(prior?.state,state,lesson)) return json({error:"invalid_transition"},422);
+  const previous=prior?.state as typeof state|undefined, refs:string[]=[];
+  const entry=state.entries[state.day]??{}, old=previous?.entries?.[state.day]??{};
+  for (const key of ["speakingPart2","speakingFollowup"]) {
+    if (entry[key]===old[key]||!entry[key]) continue;
+    const last=JSON.parse(entry[key]).at(-1);
+    if (last?.audio) refs.push(last.audio);
+  }
+  if ((state.fullTests?.length??0)>(previous?.fullTests?.length??0) && state.fullTests.at(-1)?.audio)
+    refs.push(state.fullTests.at(-1).audio);
+  for (const id of refs) {
+    if (!env.BUCKET) return json({error:"recordings_unavailable"},503);
+    if (!await env.BUCKET.head(`speaking/${encodeURIComponent(user.userId)}/${id}`))
+      return json({error:"recording_not_found"},422);
+  }
+  if (prior&&same(prior.state,state)) return json({revision:prior.revision});
   const returning = { revision: learnerStates.revision };
   const result = revision === 0
     ? await db.insert(learnerStates).values({ userId: user.userId, revision: 1, state })
@@ -49,5 +75,5 @@ export async function PUT(request: Request) {
     : await db.update(learnerStates).set({ revision: revision + 1, state })
         .where(and(eq(learnerStates.userId, user.userId), eq(learnerStates.revision, revision)))
         .returning(returning).get();
-  return result ? json(result) : json({ error: "revision_conflict" }, 409);
+  return result ? json(result) : conflict(await read());
 }

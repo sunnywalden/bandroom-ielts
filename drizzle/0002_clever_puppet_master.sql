@@ -1,0 +1,1 @@
+ALTER TABLE `teacher_feedback` ADD `pronunciation` text;

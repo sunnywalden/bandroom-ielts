@@ -4,10 +4,11 @@ import { dayStamp, labels, oldResults, type Ledger, type Stage } from "./ledger"
 import { getExercises } from "./curriculum";
 import { periods } from "./period";
 import "./reports.css";
+import {targets as goals} from "./goals";
 
 const skills = ["Listening","Reading","Writing","Speaking"] as const;
 type Skill = typeof skills[number];
-const goals:Record<Skill,number>={Listening:8.5,Reading:8.5,Writing:7.5,Speaking:7};
+
 type Feedback={day:number;stage:string;feedback:string;evidence:string;attempt:string;createdAt:string};
 type Test={id:string;skill:Skill;date:string;exam:string;source:string;raw?:number;band?:number;rater:string;audio?:string};
 type Line={date:string;day?:number;kind:Skill|"词汇"|"综合";text:string};

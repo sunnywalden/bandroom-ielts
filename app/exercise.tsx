@@ -6,7 +6,7 @@ import "./exercise.css";
 
 type Stage = "vocab"|"listen"|"read"|"write";
 type Props = {
-  day:number; stage:Stage; entry:Record<string,string>;
+  day:number; account:string; stage:Stage; entry:Record<string,string>;
   save:(patch:Record<string,string>)=>Promise<boolean>; advance:()=>void;
 };
 const names: Record<Stage,[string,string,string]> = {
@@ -18,14 +18,18 @@ const names: Record<Stage,[string,string,string]> = {
 const modes = ["首听一遍","有额外重播","作答前参考了原文"];
 
 // Drafts survive an accidental page refresh. Submitted work comes from the saved lesson record.
-function useDraft(key:string, initial:string) {
+function useDraft(account:string,key:string, initial:string) {
   const [value,setValue] = useState(initial);
+  const storageKey="bandroom.draft."+account+"."+key;
   useEffect(()=>{
-    try { const stored = localStorage.getItem(key); if (stored !== null) setValue(stored); } catch { /* Browser storage is optional. */ }
-  },[key]);
-  const change = (s:string) => {
+    try {
+      const stored=JSON.parse(localStorage.getItem(storageKey)||"null");
+      setValue(stored?.base===initial && typeof stored?.value==="string"?stored.value:initial);
+    }catch{setValue(initial);}
+  },[storageKey,initial]);
+  const change=(s:string)=>{
     setValue(s);
-    try { localStorage.setItem(key,s); } catch { /* Current-session editing still works. */ }
+    try{localStorage.setItem(storageKey,JSON.stringify({base:initial,value:s}));}catch{}
   };
   return [value,change] as const;
 }
@@ -42,9 +46,9 @@ function ResponseBox({label,value,onChange,large=false}:{label:string;value:stri
 function WordList({pairs}:{pairs:[string,string][]}) {
   return <dl className="ex-pairs">{pairs.map(([term,meaning])=><div key={term}><dt lang="en">{term}</dt><dd>{meaning}</dd></div>)}</dl>;
 }
-function Vocabulary({lesson,entry,save,advance,day,busy}:Common) {
-  const [recall,setRecall] = useDraft("fieldnotes."+day+".vocab.recall",entry.vocabRecallDraft||"");
-  const [sentence,setSentence] = useDraft("fieldnotes."+day+".vocab.use",entry.vocabUseDraft||"");
+function Vocabulary({lesson,entry,save,advance,day,account,busy}:Common) {
+  const [recall,setRecall] = useDraft(account,"fieldnotes."+day+".vocab.recall",entry.vocabRecallDraft||"");
+  const [sentence,setSentence] = useDraft(account,"fieldnotes."+day+".vocab.use",entry.vocabUseDraft||"");
   const normal = (s:string) => s.trim().toLowerCase().replace(/[.!?。]$/,"").trim();
   const result = entry.vocabRecall !== undefined;
   const pageTwo = entry.vocabBatch==="2";
@@ -80,13 +84,13 @@ function Question({item,index,selected,onSelect,locked}:{item:Item;index:number;
     </label>)}
   </fieldset>;
 }
-function ChoicePractice({lesson,entry,save,advance,day,busy,stage}:{stage:"listen"|"read"}&Common) {
+function ChoicePractice({lesson,entry,save,advance,day,account,busy,stage}:{stage:"listen"|"read"}&Common) {
   const listening=stage==="listen", index=entry[stage+"Batch"]==="2"?1:0;
   const quiz= listening?lesson.listening:lesson.reading;
   const item=quiz[index], key=stage+"Q"+index, submitted=entry[key]!==undefined;
-  const [selection,setSelection]=useDraft("fieldnotes."+day+"."+key+"Choice","");
-  const [condition,setCondition]=useDraft("fieldnotes."+day+"."+key+"Conditions","");
-  const [evidence,setEvidence]=useDraft("fieldnotes."+day+"."+key+"Evidence","");
+  const [selection,setSelection]=useDraft(account,"fieldnotes."+day+"."+key+"Choice","");
+  const [condition,setCondition]=useDraft(account,"fieldnotes."+day+"."+key+"Conditions","");
+  const [evidence,setEvidence]=useDraft(account,"fieldnotes."+day+"."+key+"Evidence","");
   const selected=submitted?entry[key]:selection;
   const mode=submitted?entry[stage+"Mode"+index]:condition;
   const valid=["0","1","2"].includes(selected) && (listening?modes.includes(mode):Boolean(evidence.trim()));
@@ -112,13 +116,13 @@ function ChoicePractice({lesson,entry,save,advance,day,busy,stage}:{stage:"liste
   </>;
 }
 const count = (s:string) => (s.match(/\S+/g)||[]).length;
-function Writing({lesson,entry,save,advance,day,busy}:Common) {
+function Writing({lesson,entry,save,advance,day,account,busy}:Common) {
   const original=entry.writeOriginal, revised=entry.writeRevision, isRevision=original!==undefined;
-  const [first,setFirst]=useDraft("fieldnotes."+day+".write.original",entry.writeDraft||"");
-  const [second,setSecond]=useDraft("fieldnotes."+day+".write.revision",entry.writeRevisionDraft||original||"");
-  const [condition,setCondition]=useDraft("fieldnotes."+day+".write.condition","独立 · 未计时");
+  const [first,setFirst]=useDraft(account,"fieldnotes."+day+".write.original",entry.writeDraft||"");
+  const [second,setSecond]=useDraft(account,"fieldnotes."+day+".write.revision",entry.writeRevisionDraft||original||"");
+  const [condition,setCondition]=useDraft(account,"fieldnotes."+day+".write.condition","独立 · 未计时");
   const [shortOk,setShortOk]=useState(false);
-  const [focus,setFocus]=useDraft("fieldnotes."+day+".write.focus","");
+  const [focus,setFocus]=useDraft(account,"fieldnotes."+day+".write.focus","");
   const min=lesson.fullEssay?250:90;
   const current=isRevision?second:first;
   const under=count(current)<min;

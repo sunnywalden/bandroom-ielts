@@ -20,5 +20,8 @@ export const teacherFeedback = sqliteTable("teacher_feedback", {
   attempt: text("attempt").notNull(),
   evidence: text("evidence").notNull(),
   feedback: text("feedback").notNull(),
+  pronunciation:text("pronunciation",{mode:"json"}).$type<{
+    band:number;recordingId:string;reviewedWholeClip:true;observation:string;scope:"partial"
+  }>(),
   createdAt: text("created_at").notNull(),
 }, table => [index("teacher_feedback_user_day").on(table.userId, table.day)]);

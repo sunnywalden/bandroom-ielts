@@ -1,0 +1,18 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bandroom 工程验收记录</title><style>
+:root{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:#f3f5ee;color:#1e3731;font:16px/1.72 system-ui,-apple-system,sans-serif}main{max-width:950px;margin:auto;padding:40px clamp(18px,4vw,52px) 65px}a{color:#285d45}header{border-bottom:2px solid #78917b;padding-bottom:20px}small{color:#506953;letter-spacing:.09em}h1{font-size:clamp(28px,4vw,42px);margin:.25em 0}h2{font-size:22px;margin:28px 0 8px}p{margin:8px 0}li{margin:7px 0}dl{display:grid;grid-template-columns:9em 1fr;border-top:1px solid #c8d5c6}dt,dd{margin:0;padding:11px 10px 11px 0;border-bottom:1px solid #c8d5c6}dt{font-weight:650}code,pre{background:#e5ebe0;border-radius:5px}code{padding:2px 5px}pre{padding:14px;overflow-x:auto;font-size:13px}footer{color:#526453;border-top:1px solid #c8d5c6;margin-top:26px;padding-top:12px}@media(max-width:600px){dl{display:block}dt{border:0;padding:11px 0 0}dd{padding:2px 0 11px}}
+</style><main><header><small>BANDROOM / ENGINEERING REVIEW</small><h1>工程验收记录</h1><p>适用于 Bandroom 第二个发布版本。测试账号、录音夹具和模拟课包仅用于回归。</p><a href="/">返回我的练习室</a></header>
+<h2>修复与验证</h2><dl>
+<dt>课程与并发</dt><dd>服务端按账号和版本校验提交。重复提交同一份数据只写一次，其他设备的冲突提交会提示重新读取。独立首稿、首次答案和既有录音均受保护。隔离数据库从 Day 11 运行到 Day 62，覆盖 1,181 次提交、2,451 项断言。</dd>
+<dt>会话与设备</dt><dd>首次登录校验前显示读取状态；登录过期时保留当前表单。浏览器测试在保存口语草稿期间使会话过期，恢复同账号后逐字核对草稿，再从另一个页面读到已打卡状态。不同账号的草稿与云端记录分开。</dd>
+<dt>录音与教练</dt><dd>用真实编码的 WebM/Opus、OGG/Opus、MP4/AAC、WAV/PCM 检验上传、范围读取、重组、解码与越权拒绝。教练可以读取本人已提交的音轨、追加评语并回读。半分制发音专项估分需要提交过的录音、评阅者的整段听取确认和具体听辨依据。单题记录为专项暂定结果。</dd>
+<dt>备份与恢复</dt><dd>设置页可导出签名备份。归档包含学习记录、报告、已发布课包、教练评语和引用的录音。导入先验签、核对账号和文件摘要，再预览可补回的内容。恢复可重试，遇到较新或不同的记录会停止。已在隔离 D1 与 R2 环境完成备份、缺失数据恢复和逐字节比对。</dd>
+<dt>窄屏布局</dt><dd>修复 320 像素布局中导航超出右侧的问题。以真实 Chromium 渲染检查首页、学习档案、错题手记、阶段评估、设置及口语打卡路径。验证范围是响应式网页与浏览器交互；各型号手机的麦克风授权和 Safari 系统行为取决于设备。</dd>
+<dt>课包与目标</dt><dd>核对 Day 12–16 全部五份内置课包、20 道听读客观题的选项与答案索引，并实测五份听力资源可分段读取。Day 17–62 按学习表现编排。测试使用账号专属模拟课包走到最后一课，也检查没有已发布课包时阻止开课。首页、设置、阶段评估与教练使用同一组目标：听力 8.5、阅读 9、写作 8.5、口语 7.5，总分 8.5。</dd>
+</dl><h2>复现检查</h2><p>在源码检出目录中使用 Node.js 24、项目依赖和 FFmpeg。Miniflare 测试启动临时本地 Worker，测试结束后清理数据。</p>
+<pre>npm run test:review
+./node_modules/.bin/tsc --noEmit --incremental false
+npm run build</pre>
+<p>回归代码位于 <code>tests/</code>。状态测试使用真实 SQLite 和应用路由，备份测试另行运行于本地 D1/R2。正式账号用于回读进度和已有录音。</p>
+<h2>恢复范围</h2><p>备份保存在持有人选择的位置。设备本地录音需从存有原音的浏览器导出；恢复签名绑定原站点和账号。运维需保留原站点的签名密钥，轮换时应安排版本兼容。单份归档上限 512 MiB，每段录音上限 12 MiB。</p>
+<footer>课程打卡、工程测试和 IELTS 成绩分别记录。测试夹具产生的评分不进入个人学习档案。</footer></main></html>

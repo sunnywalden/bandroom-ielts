@@ -151,7 +151,7 @@ function Recorder({limit,clip,onClip,onActive}:{
       if (!mounted.current) { stream.getTracks().forEach(t => t.stop()); return; }
       activeStream.current = stream;
       const preferred = ["audio/webm;codecs=opus","audio/mp4","audio/ogg;codecs=opus"].find(type => MediaRecorder.isTypeSupported(type));
-      const rec = new MediaRecorder(stream, preferred ? {mimeType:preferred} : undefined);
+      const rec = new MediaRecorder(stream, preferred ? {mimeType:preferred,audioBitsPerSecond:64000} : {audioBitsPerSecond:64000});
       recorder.current = rec;
       const parts:Blob[] = [];
       rec.ondataavailable = event => { if (event.data.size) parts.push(event.data); };
@@ -223,6 +223,8 @@ function AnswerTask({day,phase,prompt,followup,entry,save,go,retake}:Props & {ph
         else {
           try {
             const res = await fetch("/api/audio",{method:"POST",headers:{"Content-Type":clip.type || "audio/webm"},body:clip});
+            if(res.status===401||res.status===403){setMessage("当前登录已失效。先下载录音，再登录原账号后提交。");return;}
+            if(res.status===413||res.status===415){setMessage("未能接收本次录音文件。请先下载并保留原件，再重新录制。");return;}
             if (!res.ok) throw new Error("upload failed");
             const result = await res.json();
             if (!result || typeof result !== "object" || !("id" in result) || typeof result.id !== "string" || !result.id) throw new Error("missing id");
