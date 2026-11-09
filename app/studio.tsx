@@ -13,6 +13,7 @@ import BackupPanel from './backup-panel'
 import Reports, { type ReportState } from './reports'
 import AttemptFeedback,{FeedbackProvider,UnmatchedFeedback,FeedbackIdentificationStatus} from './attempt-feedback'
 import {requestJSON} from './request-json'
+import type {ReviewLink} from './feedback-model'
 import {useDraft} from './use-draft'
 
 const tabs=[['home','今日练习',LayoutDashboard],['history','学习档案',BookOpen],['notes','错题手记',NotebookPen],['report','阶段评估',Activity]] as const
@@ -20,6 +21,18 @@ type Tab=typeof tabs[number][0]|'lesson'|'settings'
 const titles:Record<Tab,[string,string,string]>={home:['Study desk','今日练习','从上次停下的地方继续，每次专注一道题。'],lesson:['Practice room','练习室',''],history:['Learning archive','学习档案','查阅每一课的提交记录、独立首稿与修订。'],notes:['Correction notebook','错题手记','用一个新句子，检验容易反复出现的表达。'],report:['Progress review','阶段评估','按实际学习日期回看证据，每七天一个观察窗口。'],settings:['Study preferences','训练设置','确认考试类型，查看课程的预算和评估规则。']}
 type Feedback={id:string;day:number;stage:string;evidence:string;attempt:string;feedback:string;createdAt:string}
 type Snapshot=ReportState
+type Checkpoint={account:string;revision:number;state:Snapshot|null}
+type SaveReply={revision:number;error?:string;attemptId?:string;submissionKey?:string;sourceId?:string}
+const reviewFields=['speakingPart2','speakingFollowup','speakingReview','vocabUse','readQ0','readQ1','writeOriginal','writeRevision','reviewMemo']
+const pendingPrefix=(account:string)=>'bandroom.pending-submission.'+encodeURIComponent(account)+'.'
+const sendCheckpoint=(account:string,body:string)=>requestJSON<SaveReply|null>('/api/state',{
+ method:'PUT',redirect:'manual',headers:{'Content-Type':'application/json','X-Bandroom-Account':account},body,
+})
+const readCheckpoint=()=>requestJSON<Checkpoint>('/api/state',{cache:'no-store',redirect:'manual'})
+function clearPending(key:string,body:string){
+ try{if(localStorage.getItem(key)===body)localStorage.removeItem(key)}catch{/* A successful server receipt is authoritative. */}
+}
+
 function Emblem({small=false}:{small?:boolean}){return <div className={'emblem '+(small?'small':'')}><Mark/></div>}
 function pill(txt:string,active=false){return <span className={'pill '+(active?'live':'')}>{active&&<i/>}{txt}</span>}
 function dayName(s:Ledger){return 'Day '+String(s.day).padStart(2,'0')}
@@ -29,6 +42,7 @@ export default function Studio(){
  const [tab,setTab]=useState<Tab>('home'),[sync,setSync]=useState<'load'|'ok'|'write'|'fail'|'conflict'|'auth'>('load'),[error,setError]=useState(''),[pending,setPending]=useState(false)
  const [account,setAccount]=useState(''),[locked,setLocked]=useState(false),[refreshKey,setRefreshKey]=useState(0)
  const [historyDay,setHistoryDay]=useState(11),[feedback,setFeedback]=useState<Feedback[]>([]),[coachError,setCoachError]=useState(false)
+ const [reviewLinks,setReviewLinks]=useState<ReviewLink[]>([])
  const [note,setNote]=useState(0),[reply,setReply]=useState(''),[result,setResult]=useState<boolean|null>(null),[check,setCheck]=useState(false),[showPacket,setShowPacket]=useState(false)
  const navigate=(page:Tab)=>{setTab(page);setCheck(false);setShowPacket(false);if(typeof window!=='undefined')window.scrollTo({top:0,behavior:'instant'})}
  const revisionAtRead=useRef<number|null>(null), activeAccount=useRef(''),accessLocked=useRef(false)
@@ -42,26 +56,56 @@ export default function Studio(){
   coachBusy.current=true
   const read=++coachRead.current,owner=activeAccount.current
   try{
-   const {response:res,data:c}=await requestJSON<{account:string;extras:Record<string,Lesson>;feedback:Feedback[]}>('/api/coach',{cache:'no-store',redirect:'manual'})
+   const {response:res,data:c}=await requestJSON<{account:string;extras:Record<string,Lesson>;feedback:Feedback[];reviewLinks?:ReviewLink[]}>('/api/coach',{cache:'no-store',redirect:'manual'})
    if(read!==coachRead.current||owner!==activeAccount.current)return
    if(requiresLogin(res)){lockAccess();return}
    if(!res.ok)throw Error()
    if(c?.account!==owner){lockAccess('登录账号已改变。请重新读取进度，核对当前账号。');return}
    if(!c||!c.extras||typeof c.extras!=='object'||!Array.isArray(c.feedback)||c.feedback.some(f=>!f||typeof f.id!=='string'||typeof f.attempt!=='string'||typeof f.feedback!=='string'))throw Error()
-   registerExtraLessons(c.extras||{});setFeedback(c.feedback||[]);setCoachError(false)
+   registerExtraLessons(c.extras||{});setFeedback(c.feedback||[]);if(Array.isArray(c.reviewLinks))setReviewLinks(current=>[...c.reviewLinks!,...current.filter(row=>!c.reviewLinks!.some(job=>job.id===row.id))]);setCoachError(false)
   }catch{if(read===coachRead.current&&owner===activeAccount.current)setCoachError(true)}finally{coachBusy.current=false}
  }
  async function refresh(){
   if(busy.current)return
   busy.current=true;setSync('load');setError('')
+  let recovering=false;
   try{
-   const {response:res,data}=await requestJSON<{account:string;revision:number;state:Snapshot|null}>('/api/state',{cache:'no-store',redirect:'manual'})
+   let {response:res,data}=await readCheckpoint()
    if(!res.ok){if(requiresLogin(res))lockAccess();else setSync('fail');return}
    if(!data?.account||!Number.isSafeInteger(data.revision)||data.revision<0||(data.state&&data.state.version!==1))throw Error()
+   let recoveryMessage='';
+   const owner=data.account, prefix=pendingPrefix(owner);
+   if(activeAccount.current && activeAccount.current!==owner){
+    accessLocked.current=true;setLocked(true)
+   }
+   let pendingKeys:string[]=[];
+   try{pendingKeys=Object.keys(localStorage).filter(key=>key.startsWith(prefix))}catch{/* Storage may be unavailable. */}
+   recovering=pendingKeys.length>0;
+   for(const key of pendingKeys){
+    const body=localStorage.getItem(key);
+    if(!body)continue;
+    const submitted=await sendCheckpoint(owner,body);
+    if(requiresLogin(submitted.response)||submitted.response.status===428){lockAccess();return}
+    if(submitted.response.ok&&submitted.data?.submissionKey===key.slice(prefix.length)&&submitted.data?.attemptId){
+     clearPending(key,body);
+    }else if([400,409,413,415,422].includes(submitted.response.status)&&submitted.data?.error){
+     clearPending(key,body);
+     recoveryMessage='上一份提交未保存。云端进度已重新读取，草稿和设备录音可用于重新提交。';
+    }else{
+     setError('上一份提交仍待确认，录音和草稿已保留。请重新读取进度。');
+     setSync('conflict');return
+    }
+   }
+   if(recovering){
+    ({response:res,data}=await readCheckpoint());
+    if(requiresLogin(res)){lockAccess();return}
+    if(res.ok&&data?.account!==owner){lockAccess('登录账号已改变。请重新读取进度，核对当前账号。');return}
+    if(!res.ok||!Number.isSafeInteger(data.revision)||data.revision<0||(data.state&&data.state.version!==1))throw Error();
+   }
    const next:Snapshot=data.state??initial()
    const switched=activeAccount.current!==data.account, changed=rev.current!==data.revision
    if(switched){
-    registerExtraLessons({});setFeedback([]);setHistoryDay(next.day);navigate('home');setReply('');setResult(null)
+    registerExtraLessons({});setFeedback([]);setReviewLinks([]);setHistoryDay(next.day);navigate('home');setReply('');setResult(null)
    }
    const previous=live.current
    const differentLesson=next.day!==previous.day||next.stage!==previous.stage||
@@ -70,8 +114,11 @@ export default function Studio(){
     setCheck(false);setRefreshKey(k=>k+1)
    }
    live.current=next;rev.current=data.revision;activeAccount.current=data.account;revisionAtRead.current=data.revision
-   accessLocked.current=false;setAccount(data.account);setS(next);setLocked(false);setSync('ok');void refreshCoach()
-  }catch{setSync('fail')}finally{busy.current=false}
+   accessLocked.current=false;setAccount(data.account);setS(next);setLocked(false);setSync('ok');if(recoveryMessage)setError(recoveryMessage);void refreshCoach()
+  }catch{
+   setSync(recovering?'conflict':'fail');
+   if(recovering)setError('上一份提交仍待确认，录音和草稿已保留。请重新读取进度。');
+  }finally{busy.current=false}
  }
  // Initial subscription to the external, authenticated checkpoint.
  // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
@@ -80,35 +127,51 @@ export default function Studio(){
  useEffect(()=>{
   if(!account||locked)return
   const poll=()=>{if(document.visibilityState==='visible')void refreshCoach()}
-  const timer=setInterval(poll,10_000)
+  const awaiting=reviewLinks.some(link=>!feedback.some(row=>row.attempt===link.id));
+  const timer=setInterval(poll,awaiting?3_000:10_000)
   window.addEventListener('focus',poll);document.addEventListener('visibilitychange',poll)
   // This is a request-generation counter, intentionally read at cleanup (not a DOM ref).
   // eslint-disable-next-line react-hooks/exhaustive-deps
   return ()=>{clearInterval(timer);window.removeEventListener('focus',poll);document.removeEventListener('visibilitychange',poll);coachRead.current++}
  // refreshCoach reads the current account through its ref.
  // eslint-disable-next-line react-hooks/exhaustive-deps
- },[account,locked])
- async function persist(make:(prev:Snapshot)=>Snapshot){
+ },[account,locked,reviewLinks.length,feedback.length])
+ async function persist(make:(prev:Snapshot)=>Snapshot,forReview=false){
   if(accessLocked.current||busy.current||revisionAtRead.current===null||!activeAccount.current||sync==='conflict'||sync==='auth'||sync==='load')return false
   busy.current=true;setPending(true);setError('');setSync('write')
   try {
    const next=make(live.current)
    const expectedRevision=rev.current+(JSON.stringify(next)===JSON.stringify(live.current)?0:1)
-   const request={method:'PUT',redirect:'manual' as RequestRedirect,headers:{'Content-Type':'application/json','X-Bandroom-Account':activeAccount.current},body:JSON.stringify({revision:rev.current,state:next})}
+   const owner=activeAccount.current, day=live.current.day;
+   const submissionKey=forReview&&expectedRevision!==rev.current?crypto.randomUUID():undefined;
+   const body=JSON.stringify({revision:rev.current,state:next,submissionKey});
+   const recoveryKey=submissionKey?pendingPrefix(owner)+submissionKey:undefined;
+   if(recoveryKey){
+    try{localStorage.setItem(recoveryKey,body)}catch{
+     setSync('fail');setError('浏览器无法保留本次提交凭据。请保留草稿和录音，释放存储空间后重试。');return false
+    }
+   }
    // One exact replay also recovers a successful commit whose response was lost.
-   let result:{response:Response;data:{revision:number;error?:string}|null}
-   try{result=await requestJSON('/api/state',request)}catch{result=await requestJSON('/api/state',request)}
+   let result;
+   try{result=await sendCheckpoint(owner,body)}catch{result=await sendCheckpoint(owner,body)}
    const {response:r,data}=result
    if(!r.ok){
+    if(recoveryKey&&[400,409,413,415,422].includes(r.status)&&data?.error)clearPending(recoveryKey,body);
     if(r.status===428)lockAccess('登录账号已经更新。请重新读取进度，核对当前账号。')
     else if(requiresLogin(r))lockAccess()
     else if(r.status===409){if(!accessLocked.current)setSync('conflict');setError('云端记录已经更新。请先保留当前草稿，再读取最新进度。')}
-    else{if(!accessLocked.current)setSync('fail');setError(r.status===422?
+    else{if(!accessLocked.current)setSync(submissionKey&&r.status>=500?'conflict':'fail');setError(r.status===422?
       (data?.error==='recording_not_found'?'录音尚未在云端找到。请保留录音并重新提交。':data?.error==='recording_question_mismatch'?'录音与本题或已有回答不符。请保留录音并读取最新进度。':'此提交与当前课程记录不符。请保留草稿，并读取最新进度。'):
       `进度保存失败（${r.status}），录音和草稿已保留，请重试。`)}
     return false
    }
    if(!data||!Number.isSafeInteger(data.revision)||data.revision!==expectedRevision)throw Error('Invalid save acknowledgement')
+   if(recoveryKey){
+    if(data.submissionKey!==submissionKey||!data.attemptId||!data.sourceId)throw Error('Invalid submission receipt');
+    const link={id:data.attemptId,sourceId:data.sourceId,day};
+    clearPending(recoveryKey,body);
+    setReviewLinks(links=>[...links.filter(row=>row.id!==link.id),link]);
+   }
    live.current=next;rev.current=data.revision;setS(next);if(!accessLocked.current)setSync('ok');return true
   }catch{if(!accessLocked.current)setSync('conflict');setError('保存结果尚未确认。请保留草稿，再读取云端记录以核对。');return false}
   finally{busy.current=false;setPending(false)}
@@ -127,13 +190,14 @@ export default function Studio(){
    const doneKey=stage==='speak'?'speakingComplete':stage+'Done'
    if(p[doneKey]&&!e[doneKey])p['_date_'+labels[stage]]=dayStamp()
    return {...prev,entries:{...prev.entries,[d]:{...e,...p}}}
-  })
+  },reviewFields.some(field=>patch[field]!==undefined&&patch[field]!==entry[field]))
  }
  const advance=async()=>{const prev=live.current, current=prev.entries[prev.day]||{};if(!stageDone(prev.stage,current))return;const to=order[order.indexOf(prev.stage)+1];if(to)await persist(p=>({...p,stage:to}))}
  async function start(){const next=s.day+1;if(!s.finished||next>62||!hasLesson(next))return
  if(await persist(p=>({...p,day:next,stage:'speak',finished:false,started:{...p.started,[next]:dayStamp()}}))){navigate('lesson')}}
- async function finish(){if(!check||s.stage!=='review'||!order.filter(st=>st!=='review').every(x=>stageDone(x)))return
- if(await persist(p=>({...p,finished:true,completed:[...new Set([...p.completed,p.day])],checked:{...p.checked,[p.day]:dayStamp()},entries:{...p.entries,[p.day]:{...p.entries[p.day],reviewMemo:entry.reviewMemo??memo.trim()}}}))){navigate('home')}}
+ const unsavedMemo=!entry.reviewMemo&&!!memo.trim()
+ async function finish(){if(!check||unsavedMemo||s.stage!=='review'||!order.filter(st=>st!=='review').every(x=>stageDone(x)))return
+ if(await persist(p=>({...p,finished:true,completed:[...new Set([...p.completed,p.day])],checked:{...p.checked,[p.day]:dayStamp()},entries:{...p.entries,[p.day]:{...p.entries[p.day],reviewMemo:entry.reviewMemo??''}}}))){navigate('home')}}
  function archive(d:number){setHistoryDay(d);navigate('history')}
  const done=s.completed.length, menu=tabs.find(x=>x[0]===tab),tabLabel=menu?.[1]||titles[tab][1]
  const statuses={ok:'进度已同步',write:'正在保存',load:'读取进度',conflict:'发现新版进度',fail:'连接待恢复',auth:'需要登录'}
@@ -147,7 +211,7 @@ export default function Studio(){
   {sync!=='load'&&<button className="secondary" onClick={()=>void refresh()}>重新读取进度</button>}</div></section>
  if(!account)return <main>{loginGate}</main>
  const feedbackDay=tab==='history'?historyDay:s.day
- return <FeedbackProvider key={account} day={feedbackDay} entry={s.entries[feedbackDay]||{}} feedback={feedback.filter(f=>f.day===feedbackDay)} error={coachError} refresh={()=>void refreshCoach()}>{locked&&<main>{loginGate}</main>}<div className="app-shell" hidden={locked} inert={locked} style={locked?{display:'none'}:undefined}>
+ return <FeedbackProvider key={account} day={feedbackDay} entry={s.entries[feedbackDay]||{}} feedback={feedback.filter(f=>f.day===feedbackDay)} links={reviewLinks} error={coachError} refresh={()=>void refreshCoach()}>{locked&&<main>{loginGate}</main>}<div className="app-shell" hidden={locked} inert={locked} style={locked?{display:'none'}:undefined}>
  <aside className="side"><button className="brand" onClick={()=>navigate('home')}><Emblem/><span><b>Bandroom</b><small>IELTS STUDY STUDIO</small></span></button>
  <div className="nav-label">WORKSPACE</div><nav>{tabs.map(([id,title,Icon])=><button key={id} className={'nav-item '+((tab===id||(tab==='lesson'&&id==='home'))?'selected':'')} onClick={()=>navigate(id)}><Icon size={18}/>{title}</button>)}</nav>
  <div className="sidebar-bottom"><div className="sidebar-target"><span>MY PROGRAMME</span><b>IELTS <em>{overallTarget.toFixed(1)}</em></b><small>62 课时学习计划</small></div><button className={'nav-item '+(tab==='settings'?'selected':'')} onClick={()=>navigate('settings')}><SlidersHorizontal size={17}/>训练设置</button><div className="profile"><span>HZ</span><div><b>Henry</b><small>个人学习空间</small></div></div></div>
@@ -167,7 +231,7 @@ export default function Studio(){
  </div><aside className="desk-aside"><section className="card progress-card"><div className="section-head"><div className="eyebrow">Programme</div><Flag size={16}/></div><h2>课程进度</h2><div className="big-count">{done}<small> / 62</small></div><div className="prog-track"><div style={{width:done/62*100+'%'}}/></div><div className="metric-note"><span>已打卡课时</span><b>{(done/62*100).toFixed(1)}%</b></div><div className="goal-split"/><div className="tiny-label"><Target size={15}/> 我的目标分数</div><Goals/></section>
  <section className="card focus-card"><div className="eyebrow"><span className="coral-dot"/>Coach’s note</div><h2>口语练习重点</h2><p>回答原因类问题时，先说出一个具体原因，再说明它可能带来什么后果。</p><div className="phrase">“One reason is that …”</div><button className="text-btn" onClick={()=>navigate('notes')}>打开错题手记 <ArrowUpRight size={14}/></button></section></aside></div>}
  {tab==='lesson'&&<><button className="back" onClick={()=>navigate('home')}><ArrowLeft size={16}/>今日练习</button><div className="page-intro"><div><div className="eyebrow"><span className="kicker-line"/>{dayName(s)} / {english[stage]}</div><h1>{labels[stage]}</h1><p>{s.day===11?'预警信号与判断':topic.theme}</p></div>{pill(s.finished?'已打卡':'进行中',!s.finished)}</div>
- {s.finished?<section className="card pad"><h2>本课已打卡</h2><button className="secondary" onClick={()=>archive(s.day)}>查看档案</button></section>:stage==='speak'?<Speaking account={account} key={account+"-"+s.day+"-"+refreshKey} day={s.day} entry={entry} prompt={topic.speaking} followup={s.day===11?part3:topic.followup} save={save} advance={()=>void advance()}/>:stage!=='review'?<Exercise key={account+"-"+s.day+stage+"-"+refreshKey} account={account} day={s.day} stage={stage} entry={entry} completedDays={s.completed} save={save} advance={()=>void advance()}/>:<section className="card pad check-card"><div className="eyebrow">Final check-in</div><h2>给 Day {s.day} 收个尾</h2><p>回想一个下次能独立用出的表达，或一个仍需练习的问题。</p><label>一句复盘 <small>可选；保存后可请 Work 教练给建议</small><textarea readOnly={pending||entry.reviewMemo!==undefined} value={entry.reviewMemo??memo} onChange={e=>setMemo(e.target.value)} placeholder="下次我想试着……"/></label>{entry.reviewMemo===undefined?<button className="secondary" disabled={pending||!memo.trim()} onClick={()=>void save({reviewMemo:memo.trim()})}>保存复盘，交给 Work 教练</button>:<AttemptFeedback field="reviewMemo"/>}<p className="muted">保存复盘和查看反馈不会完成本课；最终打卡由你确认。</p><label className="checkbox"><input type="checkbox" checked={check} onChange={e=>setCheck(e.target.checked)}/>我已完成本课核心练习，确认打卡 Day {s.day}。</label><button className="primary" disabled={!check||pending} onClick={()=>void finish()}>确认完成 Day {s.day}<CheckCheck size={17}/></button></section>}
+ {s.finished?<section className="card pad"><h2>本课已打卡</h2><button className="secondary" onClick={()=>archive(s.day)}>查看档案</button></section>:stage==='speak'?<Speaking account={account} key={account+"-"+s.day+"-"+refreshKey} day={s.day} entry={entry} prompt={topic.speaking} followup={s.day===11?part3:topic.followup} save={save} advance={()=>void advance()}/>:stage!=='review'?<Exercise key={account+"-"+s.day+stage+"-"+refreshKey} account={account} day={s.day} stage={stage} entry={entry} completedDays={s.completed} save={save} advance={()=>void advance()}/>:<section className="card pad check-card"><div className="eyebrow">Final check-in</div><h2>给 Day {s.day} 收个尾</h2><p>回想一个下次能独立用出的表达，或一个仍需练习的问题。</p><label>一句复盘 <small>可选；保存后可请 Work 教练给建议</small><textarea readOnly={pending||entry.reviewMemo!==undefined} value={entry.reviewMemo??memo} onChange={e=>setMemo(e.target.value)} placeholder="下次我想试着……"/></label>{entry.reviewMemo===undefined?<button className="secondary" disabled={pending||!memo.trim()} onClick={()=>void save({reviewMemo:memo.trim()})}>保存复盘，查看批改入口</button>:<AttemptFeedback field="reviewMemo"/>}<p className="muted">保存复盘和查看反馈不会完成本课；最终打卡由你确认。</p><label className="checkbox"><input type="checkbox" checked={check} onChange={e=>setCheck(e.target.checked)}/>我已完成本课核心练习，确认打卡 Day {s.day}。</label><button className="primary" disabled={!check||pending||unsavedMemo} onClick={()=>void finish()}>确认完成 Day {s.day}<CheckCheck size={17}/></button></section>}
  <div className="lesson-foot"><Clock3 size={14}/><span>当前模块预算 {mins[stage]} 分钟 · 本课总预算 {cap} 分钟</span><button onClick={()=>navigate('home')}>返回工作台</button></div></>}
  {tab==='history'&&<div className="archive-grid"><div className="card archive-list">{Array.from({length:s.day},(_,i)=>s.day-i).map(d=><button key={d} className={d===historyDay?'selected':''} onClick={()=>{setHistoryDay(d);setShowPacket(false)}}><span>Day {String(d).padStart(2,'0')}</span>{s.completed.includes(d)?<Check size={15}/>:<i/>}</button>)}</div><div className="card pad history-detail"><div className="eyebrow">Lesson record / {String(historyDay).padStart(2,'0')}</div><h2>{brief[historyDay]||getLesson(historyDay).theme}</h2>{pill(s.completed.includes(historyDay)?'已打卡':'进行中',!s.completed.includes(historyDay))}<div className="record-list">{(oldResults[historyDay]||[]).map(([a,b])=><div key={a}><span>{a}</span><b>{b}</b></div>)}</div>
  {writings[historyDay]?.map((t,i)=><details key={i}><summary>{i?'写作修订稿':'写作独立首稿'}<ChevronDown size={15}/></summary><p className="english-text">{t}</p></details>)}

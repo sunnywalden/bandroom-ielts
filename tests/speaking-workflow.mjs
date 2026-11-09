@@ -33,6 +33,9 @@ class Recorder {
   finish(){this.ondataavailable?.({data:new Blob(['fixture audio'],{type:'audio/webm'})});this.onstop?.()}
 }
 const response=(status,data)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}});
+const receipt=payload=>response(200,{revision,...(payload.submissionKey?{
+  submissionKey:payload.submissionKey,attemptId:'v2:'+payload.submissionKey,sourceId:'v1:fixture'
+}:{})});
 const text=()=>document.body.textContent;
 const button=label=>[...document.querySelectorAll('button')].find(b=>label instanceof RegExp?label.test(b.textContent):b.textContent===label);
 const click=async target=>{assert.ok(target,'button exists');assert.equal(target.disabled,false,'button enabled');await act(async()=>target.click());await flush()};
@@ -55,7 +58,7 @@ beforeEach(()=>{
     if(url==='/api/audio')return audioFault?audioFault(init):response(201,{id:init.headers['X-Bandroom-Attempt']});
     if(url==='/api/state'){
       if(stateFault)return stateFault(init);
-      const payload=JSON.parse(init.body);state=payload.state;revision=payload.revision+1;return response(200,{revision});
+      const payload=JSON.parse(init.body);state=payload.state;revision=payload.revision+1;return receipt(payload);
     }
     throw Error('Unexpected fixture request '+url);
   };
@@ -68,7 +71,7 @@ test('stop-and-submit finalizes audio exactly once and advances only on acknowle
   assert.ok(!text().includes('SPEAKING REVIEW'));assert.equal(calls.filter(([u])=>u==='/api/audio').length,1);
   const puts=calls.filter(([u,o])=>u==='/api/state'&&o.method);assert.equal(puts.length,1);
   const payload=JSON.parse(puts[0][1].body);state=payload.state;revision++;
-  await act(async()=>pendingState(response(200,{revision})));await flush();
+  await act(async()=>pendingState(receipt(payload)));await flush();
   assert.match(text(),/SPEAKING REVIEW/);assert.equal(JSON.parse(state.entries[12].speakingFollowup).length,1);preserved();
 });
 test('blocked IndexedDB cannot permanently disable recording or submission',async()=>{
@@ -103,12 +106,15 @@ test('login expiry locks access, retains the recording and restores it after aut
   await click(button('保存回答，进入自评'));
   assert.ok(!state.entries[12].speakingFollowup);assert.match(text(),/登录已过期/);
   assert.equal(document.querySelector('.app-shell').hidden,true);
-  const clip=document.querySelector('a[download]').href;preserved();
+  assert.ok(document.querySelector('a[download]').href);preserved();
   stateFault=null;await click(button('重新读取进度'));
   assert.equal(document.querySelector('.app-shell').hidden,false);
-  assert.equal(document.querySelector('a[download]').href,clip);
-  assert.equal(document.querySelector('textarea').value,'Retain after auth expiry');
-  await click(button('保存回答，进入自评'));assert.match(text(),/SPEAKING REVIEW/);preserved();
+  assert.match(text(),/SPEAKING REVIEW/);preserved();
+  const [answer]=JSON.parse(state.entries[12].speakingFollowup);
+  assert.equal(answer.text,'Retain after auth expiry');assert.ok(answer.audio);
+  assert.equal(calls.filter(([u])=>u==='/api/audio').length,1);
+  const puts=calls.filter(([url,init])=>url==='/api/state'&&init.method==='PUT');
+  assert.equal(puts.length,2);assert.equal(puts[0][1].body,puts[1][1].body);
 });
 test('state timeout unlocks the UI, retains audio, and does not falsely advance',async()=>{
   await mount();await record();await stop();stateFault=()=>new Promise(()=>{});
@@ -141,7 +147,7 @@ test('a lost commit response replays the identical request without uploading or 
   stateFault=async init=>{
     puts++;
     if(puts===1){first=init.body;const p=JSON.parse(first);state=p.state;revision++;throw Error('response lost')}
-    assert.equal(init.body,first);return response(200,{revision});
+    assert.equal(init.body,first);return receipt(JSON.parse(first));
   };
   await click(button('保存回答，进入自评'));
   assert.equal(puts,2);assert.equal(calls.filter(([u])=>u==='/api/audio').length,1);

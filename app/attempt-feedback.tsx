@@ -1,11 +1,11 @@
 'use client';
 import {createContext,useContext,useEffect,useState,type ReactNode} from 'react';
-import {feedbackFor,reviewAttempts,reviewRequest,type CoachFeedback,type ReviewAttempt} from './feedback-model';
+import {feedbackFor,reviewAttempts,reviewRequest,type CoachFeedback,type ReviewAttempt,type ReviewLink} from './feedback-model';
 import './feedback.css';
 
 type Context = {attempts:ReviewAttempt[];feedback:CoachFeedback[];error:boolean;refresh:()=>void;ready:boolean;identificationFailed:boolean;retry:()=>void};
 const FeedbackContext=createContext<Context>({attempts:[],feedback:[],error:false,refresh:()=>{},ready:false,identificationFailed:false,retry:()=>{}});
-export function FeedbackProvider({day,entry,feedback,error,refresh,children}:{day:number;entry:Record<string,string>;feedback:CoachFeedback[];error:boolean;refresh:()=>void;children:ReactNode}) {
+export function FeedbackProvider({day,entry,feedback,links,error,refresh,children}:{day:number;entry:Record<string,string>;feedback:CoachFeedback[];links?:ReviewLink[];error:boolean;refresh:()=>void;children:ReactNode}) {
   const source=JSON.stringify(entry),[identified,setIdentified]=useState<{day:number;source:string;attempts:ReviewAttempt[];failed?:boolean}|null>(null);
   const [retryCount,setRetryCount]=useState(0);
   useEffect(()=>{
@@ -14,7 +14,11 @@ export function FeedbackProvider({day,entry,feedback,error,refresh,children}:{da
     return ()=>{active=false};
   },[day,source,retryCount]);
   const current=identified?.day===day&&identified.source===source?identified:null;
-  return <FeedbackContext.Provider value={{attempts:current?.attempts??[],feedback,error,refresh,ready:Boolean(current&&!current.failed),identificationFailed:Boolean(current?.failed),retry:()=>setRetryCount(n=>n+1)}}>{children}</FeedbackContext.Provider>;
+  const attempts=(current?.attempts??[]).map(attempt=>{
+    const link=links?.find(row=>row.day===day&&row.sourceId===attempt.id);
+    return link?{...attempt,id:link.id}:attempt;
+  });
+  return <FeedbackContext.Provider value={{attempts,feedback,error,refresh,ready:Boolean(current&&!current.failed),identificationFailed:Boolean(current?.failed),retry:()=>setRetryCount(n=>n+1)}}>{children}</FeedbackContext.Provider>;
 }
 export function FeedbackIdentificationStatus(){
   const {identificationFailed,retry}=useContext(FeedbackContext);
@@ -37,7 +41,7 @@ export default function AttemptFeedback({field,index=0}:{field:string;index?:num
   if(attempt.kind==='objective'&&!rows.length)return null;
   const request=reviewRequest(attempt);
   return <section className="attempt-feedback" aria-label={attempt.title+'反馈'}>
-    <div className="af-heading"><strong>{attempt.title} · {rows.length?'教练批改':'已保存'}</strong><span className={'af-badge '+(rows.length?'af-ready':'')}>{rows.length?'批改已返回':'等待 Work 教练'}</span></div>
+    <div className="af-heading"><strong>{attempt.title} · {rows.length?'教练批改':'已保存'}</strong><span className={'af-badge '+(rows.length?'af-ready':'')}>{rows.length?'批改已返回':'待在 Work 中发起'}</span></div>
     {!rows.length&&<QuickCheck attempt={attempt}/>}
     <div aria-live="polite" aria-relevant="additions text">{rows.map(row=><article className="af-review" key={row.id}>
       <p>{row.feedback}</p><details><summary>批改依据与时间</summary><p>{row.evidence}</p><time dateTime={row.createdAt}>{new Date(row.createdAt).toLocaleString('zh-CN')}</time></details>

@@ -82,7 +82,7 @@ export default {async fetch(request){
  if(url.pathname==='/api/audio/recovery')return getRecovery(request);
  if(url.pathname==='/__fixture/status'){
   const state=await(await getState()).json(),objects=await env.BUCKET.list(),coach=await(await getCoach()).json();
-  return Response.json({...state,feedback:coach.feedback,recordings:objects.objects.map(o=>({key:o.key,size:o.size,etag:o.etag}))});
+  return Response.json({...state,feedback:coach.feedback,reviewLinks:coach.reviewLinks,recordings:objects.objects.map(o=>({key:o.key,size:o.size,etag:o.etag}))});
  }
  return new Response('Not found',{status:404});
 }}`,resolveDir:process.cwd()},bundle:true,format:'esm',write:false,platform:'browser',external:['cloudflare:workers'],plugins:[{name:'fixture-identity',setup(b){

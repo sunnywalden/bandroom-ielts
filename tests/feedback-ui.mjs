@@ -20,10 +20,21 @@ const {createElement,act}=await import('react'),{createRoot}=await import('react
 const {default:Studio}=await import('../.sites-runtime/tests/feedback-studio.mjs');
 const realInterval=globalThis.setInterval,realClear=globalThis.clearInterval;
 let poll;
-globalThis.setInterval=(fn,ms,...args)=>ms===10000?(poll=fn,'feedback-poll'):realInterval(fn,ms,...args);
+globalThis.setInterval=(fn,ms,...args)=>[3000,10000].includes(ms)?(poll=fn,'feedback-poll'):realInterval(fn,ms,...args);
 globalThis.clearInterval=id=>id==='feedback-poll'?poll=undefined:realClear(id);
 const response=(status,data)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}});
-let root,state,revision,feedback,calls,coachFault,stateFault;
+let root,state,revision,feedback,reviewLinks,calls,coachFault,stateFault;
+async function receipt(payload){
+ if(!payload.submissionKey)return response(200,{revision});
+ const id='v2:'+payload.submissionKey;
+ let link=reviewLinks.find(link=>link.id===id);
+ if(!link){
+  const source=(await reviewAttempts(12,payload.state.entries[12])).at(-1);
+  assert.ok(source);
+  link={id,day:12,sourceId:source.id};reviewLinks.push(link);
+ }
+ return response(200,{revision,submissionKey:payload.submissionKey,attemptId:id,sourceId:link.sourceId});
+}
 const text=()=>document.body.textContent;
 const button=label=>[...document.querySelectorAll('button')].find(b=>label instanceof RegExp?label.test(b.textContent):b.textContent===label);
 const flush=async()=>act(async()=>{await sleep(15)});
@@ -35,25 +46,25 @@ async function write(value){const el=document.querySelector('textarea');assert.o
 async function tick(){assert.ok(poll);await act(async()=>poll());await flush();}
 async function row(field,message){
  const attempt=(await reviewAttempts(12,state.entries[12])).find(a=>a.field===field);assert.ok(attempt);
- return {id:crypto.randomUUID(),day:12,stage:attempt.stage,attempt:attempt.id,evidence:'Synthetic submitted evidence',feedback:message,createdAt:'2026-11-09T01:00:00Z'};
+ return {id:crypto.randomUUID(),day:12,stage:attempt.stage,attempt:reviewLinks.find(link=>link.sourceId===attempt.id)?.id??attempt.id,evidence:'Synthetic submitted evidence',feedback:message,createdAt:'2026-11-09T01:00:00Z'};
 }
 beforeEach(()=>{
- localStorage.clear();calls=[];feedback=[];coachFault=stateFault=null;revision=21;
+ localStorage.clear();calls=[];feedback=[];reviewLinks=[];coachFault=stateFault=null;revision=21;
  state={version:1,day:12,stage:'write',finished:false,completed:Array.from({length:11},(_,i)=>i+1),checked:{11:'2026-11-09'},started:{11:'2026-11-02',12:'2026-11-09'},exam:'未选择',practice:{},entries:{11:{speakingReview:'Preserved older feedback'},12:{writeOriginal:'Independent original answer.',writeCondition:'独立 · 未计时'}}};
  globalThis.fetch=async(url,init={})=>{
   calls.push([url,init]);
-  if(url==='/api/coach')return coachFault?coachFault(init):response(200,{account:'fixture-feedback-ui',extras:{},feedback:structuredClone(feedback)});
+  if(url==='/api/coach')return coachFault?coachFault(init):response(200,{account:'fixture-feedback-ui',extras:{},feedback:structuredClone(feedback),reviewLinks:structuredClone(reviewLinks)});
   if(url==='/api/state'&&!init.method)return response(200,{account:'fixture-feedback-ui',revision,state:structuredClone(state)});
   if(url==='/api/state'){
    if(stateFault)return stateFault(init);
-   const payload=JSON.parse(init.body);state=payload.state;revision=payload.revision+1;return response(200,{revision});
+   const payload=JSON.parse(init.body);state=payload.state;revision=payload.revision+1;return receipt(payload);
   }
   throw Error('Unexpected fixture request '+url);
  };
 });
 afterEach(async()=>{await unmount()});
 test('delayed Work review arrives by polling at the original and preserves the revision draft',async()=>{
- await mount();assert.match(text(),/等待 Work 教练/);
+ await mount();assert.match(text(),/待在 Work 中发起/);
  await write('Unsaved revision that must survive feedback refresh.');
  feedback=[await row('writeOriginal','Return fixture correction for the original.')];
  await tick();
@@ -100,7 +111,7 @@ test('old or other-attempt feedback never attaches to the current original or re
 test('first-draft failure retains text; delayed duplicate clicks create only one save and no advance',async()=>{
  delete state.entries[12].writeOriginal;delete state.entries[12].writeCondition;
  await mount();const draft=Array.from({length:100},(_,i)=>'word'+i).join(' ');await write(draft);
- stateFault=()=>response(503,{error:'unavailable'});await click(button('提交并锁定首稿'));
+ stateFault=()=>response(422,{error:'invalid_review_submission'});await click(button('提交并锁定首稿'));
  assert.equal(state.entries[12].writeOriginal,undefined);assert.equal(document.querySelector('textarea').value,draft);
  let resolve,payload;stateFault=init=>{payload=JSON.parse(init.body);return new Promise(r=>{resolve=r})};
  const submit=button('提交并锁定首稿'),before=puts().length;
@@ -108,9 +119,13 @@ test('first-draft failure retains text; delayed duplicate clicks create only one
  assert.equal(puts().length,before+1);assert.equal(state.entries[12].writeOriginal,undefined);
  assert.equal(document.querySelector('textarea').readOnly,true);
  state=payload.state;revision++;
- await act(async()=>resolve(response(200,{revision})));await flush();
+ await act(async()=>resolve(await receipt(payload)));await flush();
  assert.equal(state.entries[12].writeOriginal,draft);assert.equal(state.stage,'write');assert.equal(state.finished,false);
- assert.match(text(),/等待 Work 教练/);assert.deepEqual(state.completed,Array.from({length:11},(_,i)=>i+1));
+ assert.match(text(),/待在 Work 中发起/);
+ assert.equal(reviewLinks.length,1);assert.match(reviewLinks[0].id,/^v2:/);
+ stateFault=null;feedback=[await row('writeOriginal','Exact new attempt review from Work.')];await tick();
+ assert.match(document.querySelector('[aria-label="写作首稿反馈"]').textContent,/Exact new attempt review/);
+ assert.deepEqual(state.completed,Array.from({length:11},(_,i)=>i+1));
 });
 test('typing during a delayed draft save survives its acknowledgement and a page reload',async()=>{
  delete state.entries[12].writeOriginal;delete state.entries[12].writeCondition;
@@ -120,7 +135,7 @@ test('typing during a delayed draft save survives its acknowledgement and a page
  assert.equal(document.querySelector('textarea').readOnly,false);
  await write('New edits made while the save is pending.');
  state=payload.state;revision++;
- await act(async()=>resolve(response(200,{revision})));await flush();
+ await act(async()=>resolve(await receipt(payload)));await flush();
  assert.equal(state.entries[12].writeDraft,'The draft sent to the server.');
  assert.equal(document.querySelector('textarea').value,'New edits made while the save is pending.');
  await unmount();await mount();
@@ -151,7 +166,7 @@ test('a late successful save cannot unlock an expired session',async()=>{
  await click(button('保存草稿'));
  coachFault=()=>response(401,{error:'sign_in_required'});await tick();
  state=payload.state;revision++;
- await act(async()=>resolve(response(200,{revision})));await flush();
+ await act(async()=>resolve(await receipt(payload)));await flush();
  assert.match(text(),/登录学习空间/);
  assert.equal(document.querySelector('.app-shell').hidden,true);
  const before=puts().length;
@@ -166,10 +181,10 @@ test('reflection draft survives reload and a submitted reflection stays authorit
  await unmount();await mount();
  assert.equal(document.querySelector('textarea').value,'Practise one clear cause next time.');
  let resolve,payload;stateFault=init=>{payload=JSON.parse(init.body);return new Promise(r=>{resolve=r})};
- await click(button('保存复盘，交给 Work 教练'));
+ await click(button('保存复盘，查看批改入口'));
  assert.equal(document.querySelector('textarea').readOnly,true);
  state=payload.state;revision++;
- await act(async()=>resolve(response(200,{revision})));await flush();
+ await act(async()=>resolve(await receipt(payload)));await flush();
  assert.equal(document.querySelector('textarea').value,state.entries[12].reviewMemo);
  assert.equal(state.finished,false);assert.equal(state.day,12);
  await unmount();await mount();
@@ -195,9 +210,9 @@ test('speaking self-review freezes while saving and stays for feedback until the
  await click(button('保存自评，查看反馈'));
  assert.equal(document.querySelector('fieldset.sp-focus').disabled,true);
  state=payload.state;revision++;
- await act(async()=>resolve(response(200,{revision})));await flush();stateFault=null;
+ await act(async()=>resolve(await receipt(payload)));await flush();stateFault=null;
  assert.equal(state.stage,'speak');assert.equal(state.entries[12].speakingComplete,'yes');
- assert.match(document.querySelector('[aria-label="口语自评反馈"]').textContent,/等待 Work 教练/);
+ assert.match(document.querySelector('[aria-label="口语自评反馈"]').textContent,/待在 Work 中发起/);
  feedback=[await row('speakingReview','Practise one cause and consequence.')];await tick();
  assert.match(document.querySelector('[aria-label="口语自评反馈"]').textContent,/Practise one cause/);
  assert.equal(puts().length,1);assert.equal(state.stage,'speak');

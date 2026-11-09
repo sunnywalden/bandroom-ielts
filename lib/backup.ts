@@ -1,4 +1,4 @@
-import { archiveLimit,clipLimit,hash,headerBytes,metadataLimit,toHex,uuid, type Clip, type Data, type Manifest, type RemoteClip, type Signed, type Review, type Course,type Header } from './backup-format';
+import { archiveLimit,clipLimit,hash,headerBytes,metadataLimit,toHex,uuid, type Clip, type Data, type Manifest, type RemoteClip, type Signed, type Review, type Course,type Header,type SavedReviewJob } from './backup-format';
 
 export class BackupError extends Error {
   status:number;
@@ -25,7 +25,7 @@ const ownerTag=(uid:string)=>hash(utf8.encode(uid));
 const path=(uid:string,id:string)=>'speaking/'+encodeURIComponent(uid)+'/'+id;
 const ticket=(key:string,uid:string,c:Clip)=>sign(key,JSON.stringify(['clip',uid,c.id,c.size,c.type,c.hash]));
 const recordSignature=(key:string,m:Manifest)=>sign(key,'manifest\n'+canonical(m));
-function refs(state:Data['state']){
+function refs(state:Data['state'],reviewJobs:SavedReviewJob[]=[]){
   const cloud=new Set<string>(),device=new Set<string>();
   const add=(bag:Set<string>,id:unknown)=>{if(id===undefined)return;if(typeof id!=='string'||!uuid.test(id))reject(422,'学习记录含有无法识别的录音标识。');else bag.add(id)};
   for(const e of Object.values(state?.entries??{}) as Record<string,string>[]){
@@ -37,16 +37,21 @@ function refs(state:Data['state']){
     }
   }
   for(const t of (state?.fullTests||[]) as {audio?:string}[])add(cloud,t.audio);
+  for(const job of reviewJobs)add(cloud,job.snapshot.attempt.recordingId);
   return {cloud:[...cloud].sort(),device:[...device].sort()};
 }
 async function snapshot(db:D1Database,uid:string):Promise<Data>{
-  const [states,feedback,lessons]=await db.batch([
+  const [states,feedback,lessons,jobs]=await db.batch([
     db.prepare('SELECT revision,state FROM learner_states WHERE user_id=?').bind(uid),
     db.prepare('SELECT id,day,stage,attempt,evidence,feedback,created_at AS createdAt,pronunciation FROM teacher_feedback WHERE user_id=? ORDER BY id').bind(uid),
-    db.prepare('SELECT day,lesson FROM teacher_lessons WHERE user_id=? ORDER BY day').bind(uid)
+    db.prepare('SELECT day,lesson FROM teacher_lessons WHERE user_id=? ORDER BY day').bind(uid),
+    db.prepare(`SELECT id,day,submission_key AS submissionKey,request_hash AS requestHash,revision,snapshot,created_at AS createdAt
+      FROM review_jobs WHERE user_id=? ORDER BY id`).bind(uid)
   ]);
   const state=states.results[0] as {revision:number;state:string}|undefined;
-  return {state:state?JSON.parse(String(state.state)):null,revision:Number(state?.revision||0),
+  const reviewJobs=(jobs.results as (Omit<SavedReviewJob,'snapshot'>&{snapshot:string})[])
+    .map(({snapshot,...job})=>({...job,snapshot:JSON.parse(snapshot) as SavedReviewJob['snapshot']}));
+  return {...(reviewJobs.length?{reviewJobs}:{}),state:state?JSON.parse(String(state.state)):null,revision:Number(state?.revision||0),
     feedback:(feedback.results as (Review & {pronunciation:string|null})[]).map(({pronunciation,...r})=>pronunciation?{...r,pronunciation:JSON.parse(pronunciation)}:r),lessons:(lessons.results as {day:number;lesson:string}[]).map(r=>({day:Number(r.day),lesson:JSON.parse(String(r.lesson))}))};
 }
 async function inspect(bucket:R2Bucket,uid:string,id:string):Promise<Clip|null>{
@@ -57,14 +62,14 @@ async function inspect(bucket:R2Bucket,uid:string,id:string):Promise<Clip|null>{
   return {id,type,size:obj.size,hash:await hash(await obj.arrayBuffer())};
 }
 export async function exportBackup(db:D1Database,bucket:R2Bucket,uid:string,key:string,created=new Date().toISOString()):Promise<Signed>{
-  const data=await snapshot(db,uid),ids=refs(data.state),audio:RemoteClip[]=[];
+  const data=await snapshot(db,uid),ids=refs(data.state,data.reviewJobs),audio:RemoteClip[]=[];
   let bytes=0;
   for(const id of ids.cloud){
     const c=await inspect(bucket,uid,id);if(!c)return reject(409,'发现缺失的云端录音，无法导出完整备份。');
     bytes+=c.size;if(bytes>archiveLimit)return reject(413,'云端录音超过单份备份的 512 MiB 上限。');
     audio.push({...c,ticket:await ticket(key,uid,c)});
   }
-  const manifest:Manifest={format:1,owner:await ownerTag(uid),created,...data,audio,local:ids.device};
+  const manifest:Manifest={format:data.reviewJobs?.length?2:1,owner:await ownerTag(uid),created,...data,audio,local:ids.device};
   if(utf8.encode(JSON.stringify(manifest)).length>metadataLimit-1024)return reject(413,'课程记录超出单份备份的 8 MiB 上限。');
   return {manifest,signature:await recordSignature(key,manifest)};
 }
@@ -102,7 +107,7 @@ export async function downloadBackup(db:D1Database,bucket:R2Bucket,uid:string,ke
 }
 async function authentic(uid:string,key:string,signed:Signed){
   const m=signed?.manifest;
-  if(!m||m.format!==1||!Array.isArray(m.audio)||!Array.isArray(m.feedback)||!Array.isArray(m.lessons)||!Array.isArray(m.local))return reject(422,'备份格式无效。');
+  if(!m||![1,2].includes(m.format)||(m.format===2&&!Array.isArray(m.reviewJobs))||!Array.isArray(m.audio)||!Array.isArray(m.feedback)||!Array.isArray(m.lessons)||!Array.isArray(m.local))return reject(422,'备份格式无效。');
   if(m.owner!==await ownerTag(uid))return reject(403,'此备份属于其他账号或站点。');
   if(!equalSig(signed.signature,await recordSignature(key,m)))return reject(422,'备份签名无效或内容已被修改。');
   return m;
@@ -137,27 +142,33 @@ export async function restoreBackup(db:D1Database,bucket:R2Bucket,uid:string,key
   if(data.state&&(!m.state||canonical(data.state)!==canonical(m.state)))return reject(409,'当前学习进度与备份不同，已停止恢复。');
   const feedback=compareRows(data.feedback,m.feedback,x=>x.id);
   const lessons=compareRows(data.lessons,m.lessons,x=>x.day);
+  const reviewJobs=compareRows(data.reviewJobs??[],m.reviewJobs??[],x=>x.id);
   const missing:string[]=[];
   for(const c of m.audio){
     const found=await inspect(bucket,uid,c.id);
     if(!found)missing.push(c.id);else if(c.hash!==found.hash||c.type!==found.type||c.size!==found.size)return reject(409,'云端已有同标识的不同录音，已停止恢复。');
   }
   const stateToAdd=!data.state&&!!m.state;
-  const result={missing,stateToAdd,lessons:lessons.length,feedback:feedback.length};
+  const result={missing,stateToAdd,lessons:lessons.length,feedback:feedback.length,reviewJobs:reviewJobs.length};
   if(!apply)return result;
   if(missing.length)return reject(409,'录音尚未全部通过校验，课程记录尚未恢复。');
   // The read snapshot includes append-only coach tables. Recheck counts/revision in the same transaction as every insert.
   const commands=[db.prepare(`SELECT json(CASE WHEN
     COALESCE((SELECT revision FROM learner_states WHERE user_id=?),0)=? AND
     (SELECT COUNT(*) FROM teacher_lessons WHERE user_id=?)=? AND
-    (SELECT COUNT(*) FROM teacher_feedback WHERE user_id=?)=? THEN 'true' ELSE 'conflict' END)`).bind(uid,data.revision,uid,data.lessons.length,uid,data.feedback.length)];
+    (SELECT COUNT(*) FROM teacher_feedback WHERE user_id=?)=? AND
+    (SELECT COUNT(*) FROM review_jobs WHERE user_id=?)=? THEN 'true' ELSE 'conflict' END)`)
+    .bind(uid,data.revision,uid,data.lessons.length,uid,data.feedback.length,uid,data.reviewJobs?.length??0)];
   if(stateToAdd)commands.push(db.prepare('INSERT INTO learner_states(user_id,revision,state) VALUES(?,?,?)').bind(uid,m.revision+1,JSON.stringify(m.state)));
-  function batches<T extends Review|Course>(rows:T[],query:string){
+  function batches<T extends Review|Course|SavedReviewJob>(rows:T[],query:string){
     for(let i=0;i<rows.length;i+=35)commands.push(db.prepare(query).bind(uid,JSON.stringify(rows.slice(i,i+35))));
   }
   batches(lessons,"INSERT INTO teacher_lessons(user_id,day,lesson) SELECT ?,value->>'$.day',value->'$.lesson' FROM json_each(?)");
   batches(feedback,`INSERT INTO teacher_feedback(user_id,id,day,stage,attempt,evidence,feedback,created_at,pronunciation)
     SELECT ?,value->>'$.id',value->>'$.day',value->>'$.stage',value->>'$.attempt',value->>'$.evidence',value->>'$.feedback',value->>'$.createdAt',value->'$.pronunciation' FROM json_each(?)`);
+  batches(reviewJobs,`INSERT INTO review_jobs(user_id,id,day,submission_key,request_hash,revision,snapshot,created_at)
+    SELECT ?,value->>'$.id',value->>'$.day',value->>'$.submissionKey',value->>'$.requestHash',
+      value->>'$.revision',value->'$.snapshot',value->>'$.createdAt' FROM json_each(?)`);
   try {await db.batch(commands);}catch(e){
     if(/malformed JSON|UNIQUE constraint/i.test(String(e)+' '+String((e as Error).cause)))return reject(409,'记录在恢复过程中发生变化。请重新核对备份。');
     throw e;

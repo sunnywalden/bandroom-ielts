@@ -1,4 +1,4 @@
-import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const learnerStates = sqliteTable("learner_states", {
   userId: text("user_id").primaryKey(),
@@ -25,3 +25,17 @@ export const teacherFeedback = sqliteTable("teacher_feedback", {
   }>(),
   createdAt: text("created_at").notNull(),
 }, table => [index("teacher_feedback_user_day").on(table.userId, table.day)]);
+
+export const reviewJobs = sqliteTable("review_jobs", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  day: integer("day").notNull(),
+  submissionKey: text("submission_key").notNull(),
+  requestHash: text("request_hash").notNull(),
+  revision: integer("revision").notNull(),
+  snapshot: text("snapshot", {mode:"json"}).$type<import("@/lib/review-jobs").FrozenReview>().notNull(),
+  createdAt: text("created_at").notNull(),
+}, table => [
+  uniqueIndex("review_jobs_submission").on(table.userId, table.submissionKey),
+  index("review_jobs_user_day").on(table.userId, table.day),
+]);

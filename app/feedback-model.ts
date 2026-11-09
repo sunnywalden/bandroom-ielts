@@ -6,6 +6,7 @@ export type ReviewAttempt = {
   title:string; kind:'objective'|'subjective'; response:string; conditions:string;
   evidence:string; recordingId?:string; at?:string; localOnly?:boolean;
 };
+export type ReviewLink = { id: string; sourceId: string; day: number };
 type Candidate = Omit<ReviewAttempt,'id'>;
 export async function reviewAttempts(day:number, entry:Record<string,string>):Promise<ReviewAttempt[]> {
   const candidates:Candidate[]=[];
@@ -42,5 +43,5 @@ export function feedbackFor(attempt:ReviewAttempt,feedback:CoachFeedback[]) {
   return feedback.filter(f=>f.day===attempt.day&&f.stage===attempt.stage&&f.attempt===attempt.id);
 }
 export function reviewRequest(attempt:ReviewAttempt) {
-  return `请通过 Bandroom 读取 Day ${attempt.day} 的已提交作答，批改“${attempt.title}”（attempt: ${attempt.id}）。结合题目逐句指出问题，给出修正表达、原因和下一步练习；使用 add_coach_feedback 将评语写回这个 attempt。口语必须实际听到录音才评发音和流利度。不要完成本课或开启下一课。`;
+  return `请通过 Bandroom 调用 read_study_session（day: ${attempt.day}, attemptId: ${attempt.id}）读取已提交作答，批改“${attempt.title}”（attempt: ${attempt.id}）。结合题目逐句指出问题，给出修正表达、原因和下一步练习；使用 add_coach_feedback 将评语写回这个 attempt。口语必须实际听到录音才评发音和流利度。不要完成本课或开启下一课。`;
 }

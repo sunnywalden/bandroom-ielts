@@ -6,6 +6,8 @@ import { getDb } from "@/db";
 import { learnerStates, teacherFeedback, teacherLessons } from "@/db/schema";
 import { getExercises, type Lesson } from "@/app/curriculum";
 import { targets, overallTarget } from "@/app/goals";
+import { frozenReviews } from "./review-jobs";
+import { reviewContext } from "./review-context";
 import { listRecoverable } from "./recording-recovery";
 import { initial, oldResults, part3, writings, type Ledger } from "@/app/ledger";
 
@@ -57,7 +59,7 @@ function compatibleLesson(value:unknown):unknown {
 }
 const dayNumber = z.number().int().min(1).max(62);
 const stageName = z.enum(["speak","vocab","listen","read","write","review"]);
-const readSpec = z.strictObject({ inspectUnlinkedRecordings:z.boolean().optional().describe("Check for this account’s uploaded but unlinked audio for the active question. Legacy matches are time-window candidates requiring learner audition."), day: dayNumber.optional().describe("Day to inspect; defaults to the current day. Only started days are accessible.") });
+const readSpec = z.strictObject({ attemptId:text(160,"Exact attempt ID. When set, return only this submitted question, its answer and feedback.").optional(), inspectUnlinkedRecordings:z.boolean().optional().describe("Check for this account’s uploaded but unlinked audio for the active question. Legacy matches are time-window candidates requiring learner audition."), day: dayNumber.optional().describe("Day to inspect; defaults to the current day. Only started days are accessible.") });
 const feedbackSpec = z.strictObject({
   day: dayNumber, stage: stageName, feedback: text(6000, "Specific coaching feedback addressed to the learner."),
   evidence: text(2000, "Identify the submitted text or audible sample, its conditions, and evidence used. No pronunciation assessment from text."),
@@ -97,10 +99,11 @@ async function reviews(userId:string, day?:number) {
   return rows.map(row=>row.pronunciation?{...row,evidence:row.evidence+` · 发音专项暂定 ${row.pronunciation.band.toFixed(1)}/9（本次录音）· ${row.pronunciation.observation}`}:row);
 }
 export async function coachData(userId:string) {
-  const [lessons,feedback] = await Promise.all([
-    getDb().select({day:teacherLessons.day,lesson:teacherLessons.lesson}).from(teacherLessons).where(eq(teacherLessons.userId,userId)), reviews(userId)
+  const [lessons,feedback,jobs] = await Promise.all([
+    getDb().select({day:teacherLessons.day,lesson:teacherLessons.lesson}).from(teacherLessons).where(eq(teacherLessons.userId,userId)), reviews(userId), frozenReviews(userId)
   ]);
-  return {account:userId,extras:Object.fromEntries(lessons.map(({day,lesson})=>[day,lesson])),feedback};
+  return {account:userId,extras:Object.fromEntries(lessons.map(({day,lesson})=>[day,lesson])),feedback,
+    reviewLinks:jobs.map(({id,day,snapshot})=>({id,day,sourceId:snapshot.sourceId}))};
 }
 
 class CoachError extends Error {}
@@ -142,7 +145,7 @@ function question(ledger:Ledger,lesson:Lesson|undefined) {
   return { ...(stage==="read" ? {passage:lesson.passage} : {source: "https://learnenglish.britishcouncil.org/free-resources/listening/c1/"+lesson.slug}),prompt:item.prompt,choices:item.choices};
 }
 
-async function studySession(userId:string, selected?:number, inspect=false) {
+async function studySession(userId:string, selected?:number, inspect=false, attemptId?:string) {
   const {revision, ledger} = await checkpoint(userId);
   const day = selected ?? ledger.day;
   requireStarted(day,ledger);
@@ -151,7 +154,21 @@ async function studySession(userId:string, selected?:number, inspect=false) {
       .where(and(eq(teacherLessons.userId,userId),eq(teacherLessons.day,d))).get())?.lesson;
   const lesson=await lessonFor(day), currentLesson=day===ledger.day?lesson:await lessonFor(ledger.day);
   const feedback=await reviews(userId,day);
-  const attempts=await reviewAttempts(day,ledger.entries[day]??{});
+  const frozen=await frozenReviews(userId,day);
+  const snapshots=frozen.map(row=>row.snapshot);
+  const attempts=(await reviewAttempts(day,ledger.entries[day]??{}))
+    .filter(attempt=>!snapshots.some(snapshot=>snapshot.sourceId===attempt.id));
+  const reviewRows=[
+    ...snapshots.map(({attempt,context})=>({...attempt,context})),
+    ...attempts.map(attempt=>({...attempt,context:reviewContext(attempt,lesson)})),
+  ].map(attempt=>({...attempt,
+    status:feedbackFor(attempt,feedback).length?'reviewed':attempt.kind==='objective'?'answer_key_checked':'awaiting_coach',
+  }));
+  if(attemptId){
+    const attempt=reviewRows.find(a=>a.id===attemptId);
+    if(!attempt)throw new CoachError("This exact submitted attempt is unavailable for the selected day.");
+    return {day,reviewAttempts:[attempt],feedback:feedbackFor(attempt,feedback)};
+  }
   const phase=ledger.entries[day]?.speakingPhase || (day===11?"followup":"part2");
   let recovery;
   if(inspect&&day===ledger.day&&ledger.stage==="speak"&&!ledger.finished&&(phase==="part2"||phase==="followup")){
@@ -164,27 +181,8 @@ async function studySession(userId:string, selected?:number, inspect=false) {
     ...writings[day] && {writingSamples:{original:writings[day][0],revision:writings[day][1]}},
     ...day===11 && {speakingCarryover:{provenance:"Prior dialogue transcript. Original audio unavailable here. Spoken story and prompted follow-up already attempted.",
       lastTranscript:"If there comes the same type pressure warning. Are there with it immediately"}},
-    feedback,reviewAttempts:attempts.map(attempt=>({...attempt,
-      status:feedbackFor(attempt,feedback).length?'reviewed':attempt.kind==='objective'?'answer_key_checked':'awaiting_coach',
-      context:reviewContext(attempt,lesson),
-    })),reviewWorkflow:{mode:'work_conversation',instructions:'Review pending subjective attempts using their exact IDs. Quote the learner’s actual wording, give corrections with reasons and one next practice step. Write each result with add_coach_feedback. Audio must actually be heard before pronunciation or fluency assessment. The page synchronizes returned feedback; no lesson progression is authorized.'},
+    feedback,reviewAttempts:reviewRows,reviewWorkflow:{mode:'work_conversation',instructions:'Review pending subjective attempts using their exact IDs. Quote the learner’s actual wording, give corrections with reasons and one next practice step. Write each result with add_coach_feedback. Audio must actually be heard before pronunciation or fluency assessment. The page synchronizes returned feedback; no lesson progression is authorized.'},
     nextTask:question(ledger,currentLesson)};
-}
-function reviewContext(attempt:ReviewAttempt,lesson:Lesson|undefined) {
-  if(attempt.day===11&&attempt.field==='speakingFollowup')return {prompt:part3};
-  if(!lesson)return {scope:'Use only the available submitted evidence; full task context unavailable.'};
-  const field=attempt.field;
-  if(field==='speakingPart2')return {prompt:lesson.speaking};
-  if(field==='speakingFollowup')return {prompt:attempt.day===11?part3:lesson.followup};
-  if(field==='vocabRecall')return {prompt:lesson.recall[0],answer:lesson.recall[1]};
-  if(field==='vocabUse')return {prompt:lesson.use,phrases:lesson.phrases,collocations:lesson.collocations};
-  if(field.startsWith('readQ')||field.startsWith('listenQ')) {
-    const reading=field.startsWith('readQ'),index=Number(field.slice(-1));
-    return {...(reading?{passage:lesson.passage}:{source:'https://learnenglish.britishcouncil.org/free-resources/listening/c1/'+lesson.slug}),
-      ...(reading?lesson.reading:lesson.listening)[index]};
-  }
-  if(field.startsWith('write'))return {prompt:lesson.writing,revisionGuidance:lesson.edit,fullEssay:!!lesson.fullEssay,sourcePassage:lesson.passage};
-  return {prompt:'Review the learner’s reflection and suggest one specific next practice step.'};
 }
 const content = (value:unknown)=>({content:[{type:"text",text:JSON.stringify(value)}]});
 export const toolError = (message:string)=>({content:[{type:"text",text:message}],isError:true});
@@ -210,7 +208,7 @@ async function encoded(file:R2ObjectBody) {
 export async function callCoach(userId:string, name:string, args:unknown) {
   try {
     switch(name) {
-      case "read_study_session": {const q=readSpec.parse(args);return content(await studySession(userId,q.day,q.inspectUnlinkedRecordings));}
+      case "read_study_session": {const q=readSpec.parse(args);return content(await studySession(userId,q.day,q.inspectUnlinkedRecordings,q.attemptId));}
       case "add_coach_feedback": {
         const {recordingId,pronunciation,...values}=feedbackSpec.parse(args);
         if(pronunciation&&!recordingId)throw new CoachError("A pronunciation rating requires a submitted recording you actually heard. For text or self-report, leave pronunciation unassessed.");
@@ -226,9 +224,17 @@ export async function callCoach(userId:string, name:string, args:unknown) {
         const {ledger}=await checkpoint(userId);
         requireStarted(values.day,ledger);
         const attempts=await reviewAttempts(values.day,ledger.entries[values.day]??{});
+        const snapshots=await frozenReviews(userId,values.day);
+        const fixed=snapshots.find(job=>job.id===values.attempt)?.snapshot.attempt;
+        if(values.attempt.startsWith('v2:')&&(!fixed||fixed.stage!==values.stage))
+          throw new CoachError('This exact submitted attempt is unavailable for the selected day and stage.');
+        if(snapshots.some(job=>job.snapshot.sourceId===values.attempt))
+          throw new CoachError('Read study_session again and use the new exact attempt ID.');
+        if(fixed&&recordingId&&fixed.recordingId!==recordingId)
+          throw new CoachError('The recording does not belong to this exact attempt.');
         // Descriptive labels are retained only for historical, unstructured records.
         // A structured submission must always use its exact ID, regardless of prefix.
-        if(values.attempt.startsWith('v1:')||attempts.some(a=>a.stage===values.stage)) {
+        if(!fixed&&(values.attempt.startsWith('v1:')||attempts.some(a=>a.stage===values.stage))) {
           const attempt=attempts.find(a=>a.id===values.attempt);
           if(!attempt||attempt.stage!==values.stage)throw new CoachError('This exact submitted attempt is unavailable or has changed. Read study_session again and use its current reviewAttempts ID.');
           if(recordingId&&attempt.recordingId!==recordingId)throw new CoachError('The recording does not belong to this exact attempt.');
@@ -243,11 +249,11 @@ export async function callCoach(userId:string, name:string, args:unknown) {
           const fields={speak:["speakingPart2","speakingFollowup","speakingReview"],vocab:["vocabRecall","vocabUse"],listen:["listenQ0","listenQ1"],read:["readQ0","readQ1"],write:["writeOriginal","writeRevision"],review:["reviewMemo"]};
           const legacyLabels={speak:/口语/,vocab:/词汇|搭配/,listen:/听力/,read:/阅读/,write:/写作|造句|纠错|独立应用|语法/,review:/回忆|证据|纠错/};
           const historic=(oldResults[values.day]||[]).some(([label])=>legacyLabels[values.stage].test(label)) || (values.day===11&&values.stage==="speak") || (values.stage==="review"&&ledger.completed.includes(values.day));
-          if(!historic&&!fields[values.stage].some(k=>entry[k]!==undefined))throw new CoachError("Submit a response in this stage before adding an assessment.");
+          if(!fixed&&!historic&&!fields[values.stage].some(k=>entry[k]!==undefined))throw new CoachError("Submit a response in this stage before adding an assessment.");
         }
         const rating=pronunciation&&recordingId?{...pronunciation,recordingId,scope:"partial" as const}:null;
         const hash=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(rating?[userId,values,rating]:[userId,values])));
-        const id=Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,"0")).join("");
+        const id=fixed?.id??Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,"0")).join("");
         await getDb().insert(teacherFeedback).values({...values,id,userId,pronunciation:rating,createdAt:new Date().toISOString()}).onConflictDoNothing();
         return content({saved:true,id,day:values.day,attempt:values.attempt});
       }
