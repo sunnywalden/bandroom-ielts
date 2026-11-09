@@ -2,6 +2,10 @@ import { and, eq } from "drizzle-orm";
 import { getChatGPTUser } from "@/app/chatgpt-auth";
 import { getDb } from "@/db";
 import { learnerStates, teacherLessons } from "@/db/schema";
+import { hash, uuid } from "@/lib/backup-format";
+import { findSubmission, submitReview } from "@/lib/review-jobs";
+import { reviewContext } from "@/lib/review-context";
+import { reviewAttempts } from "@/app/feedback-model";
 import { linkedRecordings } from "@/lib/recording-recovery";
 import { crossOrigin, json, limitedBody } from "../shared";
 
@@ -41,6 +45,18 @@ export async function PUT(request: Request) {
     || !state || typeof state !== "object" || Array.isArray(state))
     return json({ error: "invalid_checkpoint" }, 400);
 
+  const submissionKey = payload?.submissionKey;
+  if (submissionKey !== undefined && (typeof submissionKey !== "string" || !uuid.test(submissionKey)))
+    return json({ error: "invalid_submission_key" }, 400);
+  const requestHash = submissionKey ? await hash(body) : "";
+  const receipt = (job: NonNullable<Awaited<ReturnType<typeof findSubmission>>>) =>
+    job.requestHash === requestHash
+      ? json({ revision: job.revision, attemptId: job.id, submissionKey, sourceId: job.snapshot.sourceId })
+      : json({ error: "submission_key_conflict" }, 409);
+  if (submissionKey) {
+    const saved = await findSubmission(user.userId, submissionKey);
+    if (saved) return receipt(saved);
+  }
   const db = getDb();
   const read = () => db.select({ revision: learnerStates.revision, state: learnerStates.state })
     .from(learnerStates).where(eq(learnerStates.userId, user.userId)).get();
@@ -48,7 +64,13 @@ export async function PUT(request: Request) {
   // A lost response may cause an exact replay. A divergent stale write must still conflict.
   const conflict=(row:typeof prior)=>row&&row.revision===revision+1 && same(row.state,state)
     ? json({revision:row.revision}) : json({error:"revision_conflict"},409);
-  if ((prior?.revision ?? 0) !== revision) return conflict(prior);
+  if ((prior?.revision ?? 0) !== revision) {
+    if (submissionKey) {
+      const saved = await findSubmission(user.userId, submissionKey);
+      return saved ? receipt(saved) : json({ error: "revision_conflict" }, 409);
+    }
+    return conflict(prior);
+  }
   if (!Number.isInteger(state.day)||state.day<11||state.day>62) return json({error:"invalid_checkpoint"},422);
   const lesson=state.day<=16?getExercises(state.day):(await db.select({lesson:teacherLessons.lesson}).from(teacherLessons)
     .where(and(eq(teacherLessons.userId,user.userId),eq(teacherLessons.day,state.day))).get())?.lesson;
@@ -73,6 +95,19 @@ export async function PUT(request: Request) {
     if(linked.has(id)||(m?.purpose==="assessment"&&phase!=="assessment")||(m?.purpose==="speaking"&&(m.day!==String(state.day)||m.phase!==phase)))
       return json({error:"recording_question_mismatch"},422);
     linked.add(id);
+  }
+  if (submissionKey) {
+    const before = await reviewAttempts(state.day, old);
+    const after = await reviewAttempts(state.day, entry);
+    const submitted = after.filter(a => a.kind === "subjective" && !before.some(b => a.id === b.id));
+    if (submitted.length !== 1 || state.finished || state.stage !== submitted[0].stage)
+      return json({ error: "invalid_review_submission" }, 422);
+    const attempt = submitted[0];
+    const saved = await submitReview(user.userId, submissionKey, requestHash, revision, state, {
+      sourceId: attempt.id, attempt: { ...attempt, id: "v2:" + crypto.randomUUID() },
+      context: reviewContext(attempt, lesson),
+    });
+    return saved ? receipt(saved) : json({ error: "revision_conflict" }, 409);
   }
   if (prior&&same(prior.state,state)) return json({revision:prior.revision});
   const returning = { revision: learnerStates.revision };

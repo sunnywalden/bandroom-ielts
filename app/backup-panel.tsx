@@ -2,7 +2,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { checkBlob, clipLimit, hash, pack, unpack,type Signed,type Clip,type Header } from '@/lib/backup-format';
 
-type Plan={missing:string[];stateToAdd:boolean;lessons:number;feedback:number};
+type Plan={missing:string[];stateToAdd:boolean;lessons:number;feedback:number;reviewJobs:number};
 type Ready={file:Awaited<ReturnType<typeof unpack>>;plan:Plan};
 async function checked(response:Response){
   if(!response.ok){const error=await response.json().catch(()=>null) as {error?:string}|null;throw Error(error?.error||'请求失败，请确认登录与网络。');}
@@ -84,7 +84,7 @@ function AccountBackup({account,onRestored}:BackupProps){
     {downloadLink&&<a className="primary" href={downloadLink.url} download={downloadLink.name}>下载备份文件</a>}
     <label className="packet-label">选择 .bandroom 备份文件<input type="file" accept=".bandroom,application/octet-stream" disabled={busy} onChange={e=>{setArchive(e.target.files?.[0]||null);setReady(null);setConsent(false);setMessage('')}}/></label>
     <button className="secondary" disabled={!account||!archive||busy} onClick={()=>void run(verify)}>校验并预览恢复</button>
-    {ready&&<div className="notice"><p>可补回 {ready.plan.stateToAdd?1:0} 份学习进度、{ready.plan.feedback} 条评语、{ready.plan.lessons} 个课包及 {ready.plan.missing.length} 段云端录音。本机录音 {ready.file.header.device.length} 段。</p>
+    {ready&&<div className="notice"><p>可补回 {ready.plan.stateToAdd?1:0} 份学习进度、{ready.plan.feedback} 条评语、{ready.plan.lessons} 个课包、{ready.plan.reviewJobs??0} 份独立作答及 {ready.plan.missing.length} 段云端录音。本机录音 {ready.file.header.device.length} 段。</p>
       <p>只补入同账号缺失的数据。当前记录与备份存在差异时，恢复会停止。</p>
       <label><input type="checkbox" checked={consent} disabled={busy} onChange={e=>setConsent(e.target.checked)}/> 确认补回上述内容</label>
       <button className="primary" disabled={!consent||busy} onClick={()=>void run(restore)}>恢复已核验备份</button></div>}

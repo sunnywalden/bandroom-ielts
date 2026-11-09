@@ -17,7 +17,12 @@ const clips=new Set(),identity=new AsyncLocalStorage();
 globalThis.fixtureIdentity=identity;
 globalThis.fixturePlatform={
   DB:{prepare(query){const statement=sql.prepare(query);statement.setReturnArrays(true);return {
-    bind:(...args)=>({raw:async()=>statement.all(...args)})};}},
+    bind:(...args)=>({raw:async()=>statement.all(...args),execute:()=>statement.all(...args)})};},
+    async batch(commands){
+      sql.exec('BEGIN');
+      try{const results=commands.map(c=>c.execute());sql.exec('COMMIT');return results;}
+      catch(error){sql.exec('ROLLBACK');throw error;}
+    }},
   BUCKET:{head:async key=>clips.has(key)?{size:44}:null}
 };
 registerHooks({resolve(specifier,ctx,next){
@@ -35,9 +40,9 @@ const {getExercises}=await import('../app/curriculum.ts');
 const {snapshotSchema}=await import('../app/api/state/transition.ts');
 const origin='https://study.example',owner='learner-a',other='learner-b',now=dayStamp();
 const get=async(id=owner)=>identity.run(id&&{userId:id},async()=>{const r=await GET();return [r.status,await r.json()]});
-const put=async(revision,state,{actor=owner,header=actor,from=origin}={})=>
+const put=async(revision,state,{actor=owner,header=actor,from=origin,submissionKey}={})=>
   identity.run(actor&&{userId:actor},async()=>{const r=await PUT(new Request(origin+'/api/state',{method:'PUT',
-    headers:{'Content-Type':'application/json',Origin:from,'X-Bandroom-Account':header??''},body:JSON.stringify({revision,state})}));
+    headers:{'Content-Type':'application/json',Origin:from,'X-Bandroom-Account':header??''},body:JSON.stringify({revision,state,submissionKey})}));
     return [r.status,await r.json()];});
 let checks=0;
 function eq(actual,expected,context){assert.deepEqual(actual,expected,context);checks++}
@@ -99,17 +104,37 @@ for(let day=12;day<=62;day++){
     const previous=structuredClone(state),atRevision=revision,id=randomUUID();
     clips.add(`speaking/${owner}/${id}`);
     const next=edit(withEntry(submitVoice('speakingFollowup',{audio:id})));
-    const pair=await Promise.all([put(atRevision,next),put(atRevision,next)]);
+    const submissionKey=randomUUID(), options={submissionKey};
+    eq((await put(atRevision,next,{...options,actor:null}))[0],401);
+    eq((await put(atRevision,next,{...options,actor:other,header:owner}))[0],428);
+    eq((await put(atRevision,next,{...options,actor:other}))[0],409);
+    sql.exec(`CREATE TRIGGER fail_checkpoint BEFORE UPDATE ON learner_states BEGIN SELECT RAISE(ABORT,'fixture failure'); END`);
+    await assert.rejects(put(atRevision,next,options),/fixture failure/);checks++;
+    eq(sql.prepare('SELECT COUNT(*) n FROM review_jobs').get().n,0);
+    eq((await get())[1].state,previous);
+    sql.exec('DROP TRIGGER fail_checkpoint');
+    const pair=await Promise.all([put(atRevision,next,options),put(atRevision,next,options),put(atRevision,next,{submissionKey:randomUUID()})]);
+    eq(pair.pop()[0],409,'a different tab cannot reserve a second job at the same revision');
     eq(pair.map(([status])=>status),[200,200],'identical concurrent Part 3 requests are idempotent');
     eq(pair.map(([,data])=>data.revision),[atRevision+1,atRevision+1]);
+    eq(pair[0][1],pair[1][1]);eq(pair[0][1].submissionKey,submissionKey);
+    assert.match(pair[0][1].attemptId,/^v2:/);checks++;
+    eq(sql.prepare('SELECT COUNT(*) n FROM review_jobs').get().n,1);
+    const frozen=JSON.parse(sql.prepare('SELECT snapshot FROM review_jobs').get().snapshot);
+    eq(frozen.context.prompt,lesson.followup);eq(frozen.attempt.recordingId,id);
     const saved=(await get())[1];eq(saved.state,next);eq(saved.revision,atRevision+1);
     eq(saved.state.entries[12].speakingPart2,previous.entries[12].speakingPart2);
     eq(saved.state.entries[11],previous.entries[11]);eq(saved.state.completed,previous.completed);
     eq([saved.state.day,saved.state.stage,saved.state.finished],[12,'speak',false]);
-    eq((await put(atRevision,next))[0],200,'retry after lost acknowledgement');
+    eq(await put(atRevision,next,options),pair[0],'retry after lost acknowledgement');
     const divergent=structuredClone(next);divergent.entries[12].speakingFollowup=JSON.stringify([{at:new Date().toISOString(),text:'Competing tab',spoken:true}]);
-    eq((await put(atRevision,divergent))[0],409);eq((await get())[1].state,next);
+    eq((await put(atRevision,divergent,options)),[409,{error:'submission_key_conflict'}]);
+    eq((await put(atRevision,divergent,{submissionKey:randomUUID()}))[0],409);
+    eq((await get())[1].state,next);
     state=next;revision=atRevision+1;
+    await commit(s=>{s.exam='Academic'});
+    eq(await put(atRevision,next,options),pair[0],'old receipt still resolves after a later checkpoint');
+    eq((await get())[1].state,state);
   }else await mark(submitVoice('speakingFollowup'));
   await mark({speakingComplete:'yes',speakingReview:'Reflect'});await advance('vocab');
   if(day===12)await reject(withEntry({vocabBatch:'2'}));
