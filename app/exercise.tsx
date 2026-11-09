@@ -1,8 +1,9 @@
 "use client";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { getExercises, sourceUrl, type Item, type Lesson } from "./curriculum";
 import ListeningPlayer from "./listening-player";
 import VocabularyReview, { learnedWords } from "./vocabulary-review";
+import AttemptFeedback from "./attempt-feedback";
 import Pronunciation from "./pronunciation";
 import "./exercise.css";
 
@@ -71,7 +72,7 @@ function Vocabulary({lesson,entry,save,advance,day,account,busy,completedDays}:C
       <h2>让表达进入自己的句子</h2>
       <div className="ex-columns"><div><h3>两条短语</h3><WordList pairs={lesson.phrases}/></div><div><h3>两组固定搭配</h3><WordList pairs={lesson.collocations}/></div></div>
       <p className="ex-question" lang="en">{lesson.use}</p>
-      {done?<><SavedText title="你的例句 · 已留作搭配复核" text={entry.vocabUse}/><Submit disabled={busy} onClick={advance}>进入听力 →</Submit></>:<>
+      {done?<><SavedText title="你的例句 · 已保存" text={entry.vocabUse}/><AttemptFeedback field="vocabUse"/><Submit disabled={busy} onClick={advance}>进入听力 →</Submit></>:<>
         <ResponseBox label="原创例句" value={sentence} onChange={setSentence}/>
         <Submit disabled={busy||!sentence.trim()} onClick={()=>void save({vocabUse:sentence.trim(),vocabDone:"1"})}>提交例句</Submit>
       </>}
@@ -82,7 +83,7 @@ function Vocabulary({lesson,entry,save,advance,day,account,busy,completedDays}:C
         value={result?entry.vocabRecall:recall} onChange={e=>setRecall(e.target.value)} readOnly={result}/></label>
       {result?<div className="ex-feedback"><div className="ex-word-heading"><strong role="status">{entry.vocabRecallCorrect==="1"?"回忆正确":"再记一次"} · {lesson.recall[1]}</strong><Pronunciation word={lesson.recall[1]}/></div><p>回顾这个词，再读今天的三个例句。</p></div>:
         <Submit disabled={busy||!recall.trim()} onClick={()=>void save({vocabRecall:recall.trim(),vocabRecallCorrect:normal(recall)===normal(lesson.recall[1])?"1":"0"})}>核对回忆</Submit>}
-      {result&&<><div className="ex-stack">{lesson.words.map(([term,meaning,example])=><div className="ex-word" key={term}><div className="ex-word-heading"><b lang="en">{term}</b><Pronunciation word={term}/><span className="ex-word-meaning">{meaning}</span></div><p lang="en">{example}</p></div>)}</div>
+      {result&&<><AttemptFeedback field="vocabRecall"/><div className="ex-stack">{lesson.words.map(([term,meaning,example])=><div className="ex-word" key={term}><div className="ex-word-heading"><b lang="en">{term}</b><Pronunciation word={term}/><span className="ex-word-meaning">{meaning}</span></div><p lang="en">{example}</p></div>)}</div>
         <Submit disabled={busy} onClick={()=>void save({vocabBatch:"2"})}>继续练习短语与搭配 →</Submit></>}
     </>}
   </>;
@@ -121,6 +122,7 @@ function ChoicePractice({lesson,entry,save,advance,day,account,busy,stage}:{stag
       <option value="">选择实际情况</option>{modes.map(m=><option key={m}>{m}</option>)}</select></label>:
       submitted?<SavedText title="你选择的证据" text={entry[stage+"Evidence"+index]}/>:<ResponseBox label="用一句英语说明哪条证据支持你的选择" value={evidence} onChange={setEvidence}/>}
     {submitted?<><div className="ex-feedback" role="status"><strong>{selected===String(item.answer)?"选择正确":"再看一处证据"} · 答案 {"ABC"[item.answer]}</strong><p>{item.why}</p></div>
+      <AttemptFeedback field={key}/>
       {index===0?<Submit disabled={busy} onClick={()=>void save({[stage+"Batch"]:"2"})}>继续下一题 →</Submit>:
         <><p className="ex-result">本组选择题 {Number(entry[stage+"Q0Correct"]==="1")+Number(entry[stage+"Q1Correct"]==="1")} / 2 · 专项练习</p>
           <Submit disabled={busy} onClick={advance}>{names[stage][2]} →</Submit></>}
@@ -151,9 +153,9 @@ function Writing({lesson,entry,save,advance,day,account,busy}:Common) {
     <h2>{revised!==undefined?"对照两次表达":isRevision?"带着一个目标修订":"完成独立首稿"}</h2>
     <p className="ex-question" lang="en">{lesson.writing}</p>
     {!lesson.fullEssay&&<details className="ex-details"><summary>查看写作依据 · {lesson.readingTitle}</summary><p lang="en">{lesson.passage}</p></details>}
-    {isRevision&&<SavedText title={"独立首稿 · "+count(original)+" 词 · "+(entry.writeCondition||"条件未记录")} text={original}/>}
-    {revised!==undefined?<><SavedText title={"修订稿 · "+count(revised)+" 词"} text={revised}/><div className="ex-feedback"><strong>本次修改意图</strong><p>{entry.writeFocus}</p></div><Submit disabled={busy} onClick={advance}>进入复盘 →</Submit></>:<>
-      {isRevision?<div className="ex-feedback"><strong>定向修订提示</strong><p>{lesson.edit}</p></div>:
+    {isRevision&&<><SavedText title={"独立首稿 · "+count(original)+" 词 · "+(entry.writeCondition||"条件未记录")} text={original}/><AttemptFeedback field="writeOriginal"/></>}
+    {revised!==undefined?<><SavedText title={"修订稿 · "+count(revised)+" 词"} text={revised}/><AttemptFeedback field="writeRevision"/><div className="ex-feedback"><strong>本次修改意图</strong><p>{entry.writeFocus}</p></div><Submit disabled={busy} onClick={advance}>进入复盘 →</Submit></>:<>
+      {isRevision?<div className="ex-feedback"><strong>课程修订提示（非本篇批改）</strong><p>{lesson.edit}</p></div>:
         <p className="ex-hint">{lesson.fullEssay?"本次完整 Task 2 建议独立限时 40 分钟。请按实际情况选择作答条件。":"先用自己的语言写首稿。提交后可查看定向修订提示。"}</p>}
       <ResponseBox label={isRevision?"修订稿":"首稿"} value={current} onChange={isRevision?setSecond:setFirst} large/>
       <div className="ex-count">{count(current)} 词 · {lesson.fullEssay?"目标 ≥ 250 词":"建议 90–130 词"}</div>
@@ -163,23 +165,24 @@ function Writing({lesson,entry,save,advance,day,account,busy}:Common) {
       {under&&current.trim()&&<label className="ex-check"><input type="checkbox" checked={shortOk} onChange={e=>setShortOk(e.target.checked)}/>按当前字数提交，并保留篇幅不足的记录</label>}
       <div className="actions"><Submit disabled={busy||!ready} onClick={submit}>{isRevision?"提交修订稿":"提交并锁定首稿"}</Submit>
         <button type="button" className="secondary" disabled={busy||!current.trim()} onClick={()=>void save({[draftKey]:current})}>保存草稿</button></div>
-      <p className="ex-hint">页面保留原文、作答条件和修改记录。评估论证与语言时可交给教练复核。</p>
+      <p className="ex-hint">提交后可在当前 Work 会话请教练批改，评语将自动显示在对应稿件旁。你可以先看反馈，再动笔修订。</p>
     </>}
   </>;
 }
 export default function Exercise(props: Props) {
   const [busy,setBusy]=useState(false), [message,setMessage]=useState("");
+  const saving=useRef(false);
   const {stage,entry}=props, lesson=getExercises(props.day);
   if (!lesson) return <section className="card ex-card">这一天的训练内容待编排。</section>;
   async function persist(patch:Record<string,string>) {
-    if (busy) return false;
-    setBusy(true); setMessage("");
+    if (saving.current) return false;
+    saving.current=true;setBusy(true); setMessage("");
     try {
       const ok=await props.save(patch);
       setMessage(ok?"已保存":"保存未成功。请保留当前页面并重试。");
       return ok;
     } catch { setMessage("保存未成功。请保留当前页面并重试。"); return false; }
-    finally { setBusy(false); }
+    finally { saving.current=false;setBusy(false); }
   }
   const common={...props,save:persist,lesson,busy};
   return <section className="card ex-card" aria-label={names[stage][1]}>

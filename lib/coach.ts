@@ -1,3 +1,4 @@
+import { reviewAttempts, feedbackFor, type ReviewAttempt } from "@/app/feedback-model";
 import { env } from "cloudflare:workers";
 import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod/v4";
@@ -66,7 +67,7 @@ const feedbackSpec = z.strictObject({
     reviewedWholeClip:z.literal(true).describe("Confirm you personally heard the whole clip in an audio-capable client."),
     observation:text(1000,"Concrete audible words, sounds, stress, rhythm or intelligibility observations from this particular attempt."),
   }).optional().describe("Optional practice rating only with recordingId, actual audible evidence and full-clip listening. Leave absent for transcripts, metadata, technical decoding or text-only clients. Never aggregate into an overall Speaking band."),
-  attempt: text(160, "Identify the attempt, e.g. independent first draft, assisted revision, or follow-up recorded at an ISO timestamp."),
+  attempt: text(160, "Use the exact reviewAttempts[].id from read_study_session for the answer being reviewed. Legacy descriptive labels are for historic records only. Never invent an ID."),
 });
 const publishSpec = z.strictObject({ day: z.number().int().min(17).max(62), lesson: lessonSpec });
 const recordingSpec = z.strictObject({
@@ -78,8 +79,8 @@ const recordingSpec = z.strictObject({
 });
 
 export const coachTools = [
-  {name:"read_study_session",description:"Read the learner's checkpoint, selected day's saved answers and available original/revised writing, historical results, coach feedback and current small task. Audio references require read_speaking_recording. Never start or complete a day.",schema:readSpec,readOnly:true},
-  {name:"add_coach_feedback",description:"Append a private, evidence-based review of one identified attempt for a started day. First use read_study_session or inspect the learner's actual submitted evidence. Never infer pronunciation from a transcript. Existing attempts and scores remain intact; identical retries are deduplicated.",schema:feedbackSpec,readOnly:false},
+  {name:"read_study_session",description:"Read canonical reviewAttempts IDs, question context and pending reviews, plus the learner's checkpoint and selected day's saved answers and available original/revised writing, historical results, coach feedback and current small task. Audio references require read_speaking_recording. Never start or complete a day.",schema:readSpec,readOnly:true},
+  {name:"add_coach_feedback",description:"Append a private, evidence-based review using its exact reviewAttempts[].id; the page automatically displays it beside that answer. Review one identified attempt for a started day. First use read_study_session or inspect the learner's actual submitted evidence. Never infer pronunciation from a transcript. Existing attempts and scores remain intact; identical retries are deduplicated.",schema:feedbackSpec,readOnly:false},
   {name:"publish_lesson",description:"Add one complete new lesson to this learner's private catalogue for Day 17–62. Verify the British Council source audio, transcript and q/a; use original reading material. Match the learner's exam pathway and budget. Use only after the learner requests preparation or expansion; this does not start the day. A published day cannot be replaced.",schema:publishSpec,readOnly:false},
   {name:"read_recording_bytes",description:"Code-capable clients: retrieve one bounded byte range of the learner's submitted recording, before decoding audio locally. Never display base64. Supply offset=0 for the first block and use nextOffset until null. Use this when an older read_speaking_recording schema lacks bytes mode.",schema:z.strictObject({day:dayNumber,recordingId:z.uuidv4(),offset:z.number().int().min(0).max(12*1024*1024),length:z.number().int().min(1).max(24576).optional()}),readOnly:true},
   {name:"read_speaking_recording",description:"Read a submitted recording. Use audio mode first. If the client omits the sound, retrieve metadata then bytes and reconstruct privately in a supported audio decoder. Technical verification or text alone cannot justify pronunciation or fluency ratings. Device-only recordings can be played in the recording browser.",schema:recordingSpec,readOnly:true},
@@ -145,9 +146,12 @@ async function studySession(userId:string, selected?:number, inspect=false) {
   const {revision, ledger} = await checkpoint(userId);
   const day = selected ?? ledger.day;
   requireStarted(day,ledger);
-  const lesson = getExercises(ledger.day) ??
+  const lessonFor=async (d:number)=>getExercises(d) ??
     (await getDb().select({lesson:teacherLessons.lesson}).from(teacherLessons)
-      .where(and(eq(teacherLessons.userId,userId),eq(teacherLessons.day,ledger.day))).get())?.lesson;
+      .where(and(eq(teacherLessons.userId,userId),eq(teacherLessons.day,d))).get())?.lesson;
+  const lesson=await lessonFor(day), currentLesson=day===ledger.day?lesson:await lessonFor(ledger.day);
+  const feedback=await reviews(userId,day);
+  const attempts=await reviewAttempts(day,ledger.entries[day]??{});
   const phase=ledger.entries[day]?.speakingPhase || (day===11?"followup":"part2");
   let recovery;
   if(inspect&&day===ledger.day&&ledger.stage==="speak"&&!ledger.finished&&(phase==="part2"||phase==="followup")){
@@ -160,7 +164,27 @@ async function studySession(userId:string, selected?:number, inspect=false) {
     ...writings[day] && {writingSamples:{original:writings[day][0],revision:writings[day][1]}},
     ...day===11 && {speakingCarryover:{provenance:"Prior dialogue transcript. Original audio unavailable here. Spoken story and prompted follow-up already attempted.",
       lastTranscript:"If there comes the same type pressure warning. Are there with it immediately"}},
-    feedback:await reviews(userId,day),nextTask:question(ledger,lesson)};
+    feedback,reviewAttempts:attempts.map(attempt=>({...attempt,
+      status:feedbackFor(attempt,feedback).length?'reviewed':attempt.kind==='objective'?'answer_key_checked':'awaiting_coach',
+      context:reviewContext(attempt,lesson),
+    })),reviewWorkflow:{mode:'work_conversation',instructions:'Review pending subjective attempts using their exact IDs. Quote the learner’s actual wording, give corrections with reasons and one next practice step. Write each result with add_coach_feedback. Audio must actually be heard before pronunciation or fluency assessment. The page synchronizes returned feedback; no lesson progression is authorized.'},
+    nextTask:question(ledger,currentLesson)};
+}
+function reviewContext(attempt:ReviewAttempt,lesson:Lesson|undefined) {
+  if(attempt.day===11&&attempt.field==='speakingFollowup')return {prompt:part3};
+  if(!lesson)return {scope:'Use only the available submitted evidence; full task context unavailable.'};
+  const field=attempt.field;
+  if(field==='speakingPart2')return {prompt:lesson.speaking};
+  if(field==='speakingFollowup')return {prompt:attempt.day===11?part3:lesson.followup};
+  if(field==='vocabRecall')return {prompt:lesson.recall[0],answer:lesson.recall[1]};
+  if(field==='vocabUse')return {prompt:lesson.use,phrases:lesson.phrases,collocations:lesson.collocations};
+  if(field.startsWith('readQ')||field.startsWith('listenQ')) {
+    const reading=field.startsWith('readQ'),index=Number(field.slice(-1));
+    return {...(reading?{passage:lesson.passage}:{source:'https://learnenglish.britishcouncil.org/free-resources/listening/c1/'+lesson.slug}),
+      ...(reading?lesson.reading:lesson.listening)[index]};
+  }
+  if(field.startsWith('write'))return {prompt:lesson.writing,revisionGuidance:lesson.edit,fullEssay:!!lesson.fullEssay,sourcePassage:lesson.passage};
+  return {prompt:'Review the learner’s reflection and suggest one specific next practice step.'};
 }
 const content = (value:unknown)=>({content:[{type:"text",text:JSON.stringify(value)}]});
 export const toolError = (message:string)=>({content:[{type:"text",text:message}],isError:true});
@@ -201,6 +225,11 @@ export async function callCoach(userId:string, name:string, args:unknown) {
         }
         const {ledger}=await checkpoint(userId);
         requireStarted(values.day,ledger);
+        if(values.attempt.startsWith('v1:')) {
+          const attempt=(await reviewAttempts(values.day,ledger.entries[values.day]??{})).find(a=>a.id===values.attempt);
+          if(!attempt||attempt.stage!==values.stage)throw new CoachError('This exact submitted attempt is unavailable or has changed. Read study_session again and use its current reviewAttempts ID.');
+          if(recordingId&&attempt.recordingId!==recordingId)throw new CoachError('The recording does not belong to this exact attempt.');
+        }
         if(recordingId){
           if(values.stage!=="speak")throw new CoachError("Attach audio evidence only to a speaking review.");
           await submittedRecording(userId,ledger,values.day,recordingId);
@@ -208,7 +237,7 @@ export async function callCoach(userId:string, name:string, args:unknown) {
         }
         {
           const entry=ledger.entries[values.day]||{};
-          const fields={speak:["speakingPart2","speakingFollowup"],vocab:["vocabRecall","vocabUse"],listen:["listenQ0","listenQ1"],read:["readQ0","readQ1"],write:["writeOriginal","writeRevision"],review:["reviewMemo"]};
+          const fields={speak:["speakingPart2","speakingFollowup","speakingReview"],vocab:["vocabRecall","vocabUse"],listen:["listenQ0","listenQ1"],read:["readQ0","readQ1"],write:["writeOriginal","writeRevision"],review:["reviewMemo"]};
           const legacyLabels={speak:/口语/,vocab:/词汇|搭配/,listen:/听力/,read:/阅读/,write:/写作|造句|纠错|独立应用|语法/,review:/回忆|证据|纠错/};
           const historic=(oldResults[values.day]||[]).some(([label])=>legacyLabels[values.stage].test(label)) || (values.day===11&&values.stage==="speak") || (values.stage==="review"&&ledger.completed.includes(values.day));
           if(!historic&&!fields[values.stage].some(k=>entry[k]!==undefined))throw new CoachError("Submit a response in this stage before adding an assessment.");

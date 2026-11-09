@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
+import AttemptFeedback from "./attempt-feedback";
 import { ChevronDown } from "lucide-react";
 import { getExercises, getLesson, type Item } from "./curriculum";
 
@@ -64,7 +65,7 @@ function AudioEvidence({answer,filename}:{answer:Attempt;filename:string}) {
   </div>;
 }
 
-function SpeechGroup({name,items,prompt,day,date}:{name:string;items:Attempt[];prompt?:string;day?:number;date?:string}) {
+function SpeechGroup({name,items,prompt,day,date,field}:{field:string;name:string;items:Attempt[];prompt?:string;day?:number;date?:string}) {
   if (!items.length) return null;
   return <Section title={name+" · "+items.length+" 次回答"} date={date}>
     {prompt&&<p className="english-text" lang="en">{prompt}</p>}
@@ -72,7 +73,7 @@ function SpeechGroup({name,items,prompt,day,date}:{name:string;items:Attempt[];p
       <b>{i===0?"首次回答":"重答 "+i}</b>
       <small>{[dateLabel(a.at),a.audio?"已保存录音":a.local?"本机录音":a.spoken?"本人自报已开口作答":"文字草稿"].filter(Boolean).join(" · ")}</small>
       {a.text&&<p className="english-text" lang="en">{a.text}</p>}
-      <AudioEvidence answer={a} filename={"Day-"+(day??"IELTS")+"-"+name+"-"+(i+1)}/>
+      <AudioEvidence answer={a} filename={"Day-"+(day??"IELTS")+"-"+name+"-"+(i+1)}/><AttemptFeedback field={field} index={i}/>
     </div>)}
   </Section>;
 }
@@ -88,7 +89,7 @@ function ChoiceRecord({entry,stage,index,item}:{entry:Entry;stage:"read"|"listen
     <p>你的选择：{letter || "未记录"}{item?.choices[n] ? " · "+item.choices[n] : ""}</p>
     {stage==="listen"&&mode&&<small>作答条件 · {mode}</small>}
     {stage==="read"&&evidence&&<><small>你给出的证据</small><p className="english-text" lang="en">{evidence}</p></>}
-    {item&&<p className="muted">依据 · {item.why}</p>}
+    {item&&<p className="muted">正确答案 {"ABC"[item.answer]} · {item.why}</p>}<AttemptFeedback field={key}/>
   </div>;
 }
 
@@ -107,14 +108,15 @@ export default function EntryHistory({entry,day}:{entry:Entry;day?:number}) {
     [entry.writeRevision,"写作 · 修订稿",entry.writeFocus?"修改说明 · "+entry.writeFocus:undefined],
   ];
   return <>
-    <SpeechGroup name="口语 Part 2" items={readAttempts(entry.speakingPart2)} prompt={speaking?.speaking} day={day} date={dates("口语表达")}/>
-    <SpeechGroup name={day===11?"口语 Part 3":"口语追问"} items={readAttempts(entry.speakingFollowup)} prompt={speaking?.followup} day={day} date={dates("口语表达")}/>
-    {entry.speakingReview&&<Section title="口语自评"><p>{entry.speakingReview}</p></Section>}
+    <SpeechGroup field="speakingPart2" name="口语 Part 2" items={readAttempts(entry.speakingPart2)} prompt={speaking?.speaking} day={day} date={dates("口语表达")}/>
+    <SpeechGroup field="speakingFollowup" name={day===11?"口语 Part 3":"口语追问"} items={readAttempts(entry.speakingFollowup)} prompt={speaking?.followup} day={day} date={dates("口语表达")}/>
+    {entry.speakingReview&&<Section title="口语自评"><p>{entry.speakingReview}</p><AttemptFeedback field="speakingReview"/></Section>}
     {(entry.vocabRecall!==undefined || entry.vocabUse) && <Section title="词汇 · 间隔回忆与造句" date={dates("词汇与搭配")}>
       {entry.vocabRecall!==undefined&&<><strong>间隔回忆{entry.vocabRecallCorrect==="1"?" · 答对":entry.vocabRecallCorrect==="0"?" · 需复习":""}</strong>
         {lesson&&<p className="english-text" lang="en">{lesson.recall[0]}</p>}
         <p>你的答案：{entry.vocabRecall}</p>{lesson&&entry.vocabRecallCorrect==="0"&&<p>参考词：{lesson.recall[1]}</p>}</>}
       {entry.vocabUse&&<><strong>原创例句</strong><p className="english-text" lang="en">{entry.vocabUse}</p></>}
+      <AttemptFeedback field="vocabRecall"/><AttemptFeedback field="vocabUse"/>
     </Section>}
     {(["listen","read"] as const).map(stage=>{
       if (entry[stage+"Q0"]===undefined && entry[stage+"Q1"]===undefined) return null;
@@ -123,9 +125,9 @@ export default function EntryHistory({entry,day}:{entry:Entry;day?:number}) {
         {[0,1].map(index=><ChoiceRecord key={index} entry={entry} stage={stage} index={index} item={(listening?lesson?.listening:lesson?.reading)?.[index]}/>)}
       </Section>;
     })}
-    {writingRows.map(([text,title,condition])=>text&&<Section key={title} title={title!+" · "+(text.match(/\S+/g)||[]).length+" 词"}>
-      {condition&&<small className="muted">{condition}</small>}<p className="english-text" lang="en">{text}</p></Section>)}
+    {writingRows.map(([text,title,condition],index)=>text&&<Section key={title} title={title!+" · "+(text.match(/\S+/g)||[]).length+" 词"}>
+      {condition&&<small className="muted">{condition}</small>}<p className="english-text" lang="en">{text}</p><AttemptFeedback field={index===0?"writeOriginal":"writeRevision"}/></Section>)}
     {texts.map(([key,title,submitted])=>entry[key]&&!entry[submitted]&&<Section key={key} title={title}><p className="english-text">{entry[key]}</p></Section>)}
-    {entry.reviewMemo&&<Section title="结课手记"><p>{entry.reviewMemo}</p></Section>}
+    {entry.reviewMemo&&<Section title="结课手记"><p>{entry.reviewMemo}</p><AttemptFeedback field="reviewMemo"/></Section>}
   </>;
 }
