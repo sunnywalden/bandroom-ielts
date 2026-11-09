@@ -2,11 +2,12 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { getExercises, sourceUrl, type Item, type Lesson } from "./curriculum";
 import ListeningPlayer from "./listening-player";
+import VocabularyReview, { learnedWords } from "./vocabulary-review";
 import "./exercise.css";
 
 type Stage = "vocab"|"listen"|"read"|"write";
 type Props = {
-  day:number; account:string; stage:Stage; entry:Record<string,string>;
+  day:number; account:string; stage:Stage; entry:Record<string,string>; completedDays:number[];
   save:(patch:Record<string,string>)=>Promise<boolean>; advance:()=>void;
 };
 const names: Record<Stage,[string,string,string]> = {
@@ -46,14 +47,24 @@ function ResponseBox({label,value,onChange,large=false}:{label:string;value:stri
 function WordList({pairs}:{pairs:[string,string][]}) {
   return <dl className="ex-pairs">{pairs.map(([term,meaning])=><div key={term}><dt lang="en">{term}</dt><dd>{meaning}</dd></div>)}</dl>;
 }
-function Vocabulary({lesson,entry,save,advance,day,account,busy}:Common) {
+function Vocabulary({lesson,entry,save,advance,day,account,busy,completedDays}:Common) {
   const [recall,setRecall] = useDraft(account,"fieldnotes."+day+".vocab.recall",entry.vocabRecallDraft||"");
   const [sentence,setSentence] = useDraft(account,"fieldnotes."+day+".vocab.use",entry.vocabUseDraft||"");
   const normal = (s:string) => s.trim().toLowerCase().replace(/[.!?。]$/,"").trim();
   const result = entry.vocabRecall !== undefined;
   const pageTwo = entry.vocabBatch==="2";
   const done = entry.vocabDone==="1";
+  const [reviewing,setReviewing]=useState(!result&&!pageTwo&&!done);
+  const oldWords=learnedWords(day,completedDays,lesson.recall[1]);
+  if(reviewing) return <>
+    <p className="ex-meta">WORD REVIEW <span>·</span> 练习前热身</p>
+    <h2>先回顾旧词，再开始练习</h2>
+    <VocabularyReview words={oldWords}/>
+    <div className="actions"><Submit disabled={busy} onClick={()=>setReviewing(false)}>{result||pageTwo||done?"返回当前练习":"我复习好了，开始练习"}</Submit></div>
+    <p className="ex-hint">按自己的节奏来。浏览旧词不会提交答案或改变学习进度。</p>
+  </>;
   return <>
+    <div className="ex-review-toolbar"><button type="button" className="secondary" onClick={()=>setReviewing(true)}>回看旧词和含义</button><span>想不起来时，随时看一眼</span></div>
     <p className="ex-meta">ACTIVE RECALL <span>·</span> {pageTwo?"02":"01"} / 02</p>
     {pageTwo?<>
       <h2>让表达进入自己的句子</h2>
@@ -64,7 +75,7 @@ function Vocabulary({lesson,entry,save,advance,day,account,busy}:Common) {
         <Submit disabled={busy||!sentence.trim()} onClick={()=>void save({vocabUse:sentence.trim(),vocabDone:"1"})}>提交例句</Submit>
       </>}
     </>:<>
-      <h2>先做一次间隔回忆</h2>
+      <h2>试着回忆一个词</h2>
       <p className="ex-question" lang="en">{lesson.recall[0]}</p>
       <label className="ex-label">填写一个词<input lang="en" spellCheck={false} autoComplete="off" maxLength={100}
         value={result?entry.vocabRecall:recall} onChange={e=>setRecall(e.target.value)} readOnly={result}/></label>

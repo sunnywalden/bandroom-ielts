@@ -67,6 +67,12 @@ for(const file of readdirSync('drizzle').filter(f=>f.endsWith('.sql')).sort()){
 }
 const id='11111111-1111-4111-8111-111111111111',at=new Date().toISOString(),day=at.slice(0,10);
 const state={version:1,day:12,stage:'speak',finished:false,completed:Array.from({length:11},(_,i)=>i+1),checked:{11:day},started:{11:day,12:day},exam:'未选择',practice:{},entries:{11:{speakingReview:'Preserved fixture feedback'},12:{speakingPart2:JSON.stringify([{at,text:'Preserved fixture Part 2',spoken:true,audio:id}]),speakingPart2Draft:'',speakingPhase:'followup'}}};
+// Opt-in vocabulary entry point for UI acceptance without touching a learner account.
+if(process.env.BANDROOM_FIXTURE_STAGE==='vocab') {
+ state.stage='vocab';
+ Object.assign(state.entries[12],{speakingPhase:'review',speakingComplete:'yes',speakingReview:'让时态前后一致',
+  speakingFollowup:JSON.stringify([{at,text:'Synthetic fixture follow-up answer',spoken:true}])});
+}
 await db.prepare('INSERT INTO learner_states (user_id,revision,state) VALUES (?,?,?)').bind('fixture-browser-only',6,JSON.stringify(state)).run();
 await db.prepare('INSERT INTO teacher_feedback (id,user_id,day,stage,attempt,evidence,feedback,created_at) VALUES (?,?,?,?,?,?,?,?)').bind('fixture-feedback','fixture-browser-only',11,'speak','fixture-earlier','Synthetic evidence','Preserved earlier coach feedback',at).run();
 const sample=execFileSync('ffmpeg',['-v','error','-f','lavfi','-i','sine=frequency=440:duration=0.3','-c:a','libopus','-f','webm','pipe:1']);
