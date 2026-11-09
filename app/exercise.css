@@ -27,10 +27,13 @@
 .ex-card .ex-word-heading h3{margin:10px 0}
 .ex-pronunciation{display:inline-flex;flex-direction:column;align-items:flex-start;gap:3px;max-width:100%;vertical-align:middle}
 .ex-pron-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.ex-pron-ipa{display:inline-flex;align-items:center;gap:7px;min-height:42px;color:#304738;font:18px/1.6 Arial,"Noto Sans",sans-serif;letter-spacing:0;white-space:nowrap;text-decoration:underline dotted #a9bfad;text-underline-offset:4px}
+.ex-pron-ipa-label{font:500 12px/1.4 system-ui,sans-serif;color:#596662}
+.ex-pron-ipa:hover{color:#255843;text-decoration-style:solid}
 .ex-card .ex-pron-button,.ex-card .ex-pron-stop{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:42px;padding:7px 12px;border:1px solid #a9bfad;border-radius:22px;background:#edf4eb;color:#255843;font:600 13px/1.4 system-ui,sans-serif;white-space:nowrap}
 .ex-card .ex-pron-stop{padding-inline:10px;background:transparent;border-color:#ccd7ca}
 .ex-card .ex-pron-button:hover,.ex-card .ex-pron-stop:hover{background:#dcebdd}
-.ex-pron-button:focus-visible,.ex-pron-stop:focus-visible,.ex-pron-source:focus-visible,.ex-pron-link:focus-visible{outline:2px solid #387562;outline-offset:3px}
+.ex-pron-button:focus-visible,.ex-pron-stop:focus-visible,.ex-pron-source:focus-visible,.ex-pron-link:focus-visible,.ex-pron-ipa:focus-visible{outline:2px solid #387562;outline-offset:3px}
 .ex-pron-source,.ex-pron-link{color:#476353;font-size:12px;text-decoration:underline;text-underline-offset:3px}
 .ex-pron-source{display:inline-flex;align-items:center;min-height:40px}
 .ex-card .ex-pron-error,.ex-card .ex-pron-note{font-size:13px;line-height:1.6;max-width:32em;white-space:normal}

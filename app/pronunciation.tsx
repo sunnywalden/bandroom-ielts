@@ -26,6 +26,10 @@ export default function Pronunciation({word}:{word:string}) {
   const loading=state.status==="loading", playing=state.status==="playing", failed=state.status==="error";
   return <span className="ex-pronunciation">
     <span className="ex-pron-actions">
+      <a className="ex-pron-ipa" href={recording.ipaSource} target="_blank" rel="noopener noreferrer"
+        title="美式音标来源：剑桥词典（新窗口）" aria-label={`${word} 的美式音标 ${recording.ipa}，来源：剑桥词典（新窗口）`}>
+        <span className="ex-pron-ipa-label">美式 IPA</span><span lang="en-US">{recording.ipa}</span>
+      </a>
       <button type="button" className="ex-pron-button" aria-label={`${failed?"重试":"播放"} ${word} 的真人美式发音`}
         aria-describedby={failed?messageId:undefined} onClick={()=>player.current?.play()}>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></svg>

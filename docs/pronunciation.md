@@ -7,6 +7,14 @@ was checked against the Merriam-Webster headword pronunciation control and
 its `en_us` metadata on 2026-11-09. `compact` uses the first adjective recording
 (`compac01`), matching the lesson's adjective rather than the noun.
 
+Each of these words also displays the Cambridge Dictionary US IPA transcription
+beside its playback button. The IPA itself links to Cambridge's corresponding
+pronunciation page; this source is separate from the Merriam-Webster recording.
+Transcriptions were checked against the US entries on 2026-11-09, including the
+adjective stress in `compact` and the verb stress in `overlook`. Do not substitute
+Merriam-Webster's dictionary-specific pronunciation spelling for IPA. Add a
+verified US IPA entry and its source along with each new recording.
+
 Merriam-Webster describes its dictionary audio as real English speakers,
 not text-to-speech robots, in its publisher-owned app description:
 https://play.google.com/store/apps/details?id=com.merriamwebster
