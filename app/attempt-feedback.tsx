@@ -30,6 +30,7 @@ function QuickCheck({attempt}:{attempt:ReviewAttempt}) {
   if(field==='vocabUse')return <p className="af-check">例句已保存。教练将核对搭配、语法及是否回应题目。</p>;
   if(field.startsWith('readQ'))return <p className="af-check">选择题已即时核对；你写的证据说明将单独批改。</p>;
   if(field==='speakingPart2'||field==='speakingFollowup')return <p className="af-check">{recordingId?'录音已提交。教练需听到这段录音后，才能评价发音和流利度。':conditions+'。发音和流利度暂不评分。'}</p>;
+  if(field==='speakingReview')return <p className="af-check">口语自评已保存。发给 Work 后，教练可根据你的自评给出下一次口语练习的建议。</p>;
   return <p className="af-check">已保存你的反思。教练将针对下一步练习给出建议。</p>;
 }
 export default function AttemptFeedback({field,index=0}:{field:string;index?:number}) {
@@ -46,9 +47,9 @@ export default function AttemptFeedback({field,index=0}:{field:string;index?:num
     <div aria-live="polite" aria-relevant="additions text">{rows.map(row=><article className="af-review" key={row.id}>
       <p>{row.feedback}</p><details><summary>批改依据与时间</summary><p>{row.evidence}</p><time dateTime={row.createdAt}>{new Date(row.createdAt).toLocaleString('zh-CN')}</time></details>
     </article>)}</div>
-    {!rows.length&&<><p className="af-hint">在当前 Work 会话里说“批改 Day {attempt.day}”，或复制本题请求发给教练。批改完成后，这里会自动显示结果。</p>
+    {!rows.length&&<><p className="af-hint">复制本题请求，粘贴到 Work 会话并发送。Work 写回后，留在这里或稍后重新打开本题都能看到结果。</p>
       <button type="button" className="secondary" onClick={async()=>{
-        try{await navigator.clipboard.writeText(request);setCopyStatus('已复制，请粘贴到当前 Work 会话。');setFallback(false)}
+        try{await navigator.clipboard.writeText(request);setCopyStatus('已复制，请粘贴到 Work 会话并发送。');setFallback(false)}
         catch{setFallback(true);setCopyStatus('请选中下方请求并复制到 Work 会话。')}
       }}>复制本题批改请求</button>
       {fallback&&<label className="af-copy">本题批改请求<textarea readOnly value={request} onFocus={e=>e.target.select()}/></label>}
