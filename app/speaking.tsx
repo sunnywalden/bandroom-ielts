@@ -1,5 +1,6 @@
 "use client";
 
+import AttemptFeedback from "./attempt-feedback";
 import { useEffect, useRef, useState } from "react";
 import "./speaking.css";
 
@@ -289,7 +290,7 @@ function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Pro
     <h2>{day11Part3 ? "为什么有些司机会忽略警示灯？" : isFollow ? "回应一个追问" : "用英语讲一段经历"}</h2>
     <p className="sp-question" lang="en">{day11Part3 ? "Why do some drivers ignore warning lights on their dashboards, even when they know it could be dangerous?" : isFollow ? followup : prompt}</p>
     {!isFollow ? <><p className="sp-help">可以记下三个关键词：情境、你的行动、结果。准备 1 分钟，再自然讲 1–2 分钟。</p><PrepTimer/></> : <p className="sp-help">{day11Part3 ? "用 3–4 句英语回答，给出一个实际原因和一种可能后果。建议 40–60 秒。" : "先直接回答，再用一个理由或例子展开。建议 30–60 秒。"}</p>}
-    {isFollow&&day!==11&&<History items={answers(entry.speakingPart2)} title="已提交的 Part 2 回答 · 点击回听"/>}
+    {isFollow&&day!==11&&<><History items={answers(entry.speakingPart2)} title="已提交的 Part 2 回答 · 点击回听"/>{answers(entry.speakingPart2).map((_,i)=><AttemptFeedback key={i} field="speakingPart2" index={i}/>)}</>}
     <Recorder limit={isFollow ? 60 : 120} clip={voice?.blob??null} disabled={busy||preparing} stopRequestRef={stopRequestRef} onClip={blob=>{
       const draft={id:newRecordingId(),at:new Date().toISOString(),blob};
       const commit=saveOnStop.current;saveOnStop.current=false;
@@ -315,7 +316,7 @@ function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Pro
     </label>
     {!voice && <label className="sp-check"><input type="checkbox" checked={attest} onChange={e=>setAttest(e.target.checked)}/> 我已在页面外开口作答，按自报口练记录。</label>}
     <p className="sp-note">仅有文字或自报记录时，发音、停顿和流利度留待音频评估。</p>
-    <History items={items}/>
+    <History items={items}/>{items.map((_,i)=><AttemptFeedback key={i} field={isFollow?"speakingFollowup":"speakingPart2"} index={i}/>)}
     {message && <p className="sp-message" role="status">{message}</p>}
     <div className="actions sp-actions"><button className="primary" type="button" disabled={busy || preparing || mic==="waiting" || mic==="stopping" || (mic==="idle" && !voice && !attest)} onClick={()=>{
         if(mic==="recording"){if(stopRequestRef.current){saveOnStop.current=true;stopRequestRef.current()} return;}
@@ -334,14 +335,15 @@ export default function Speaking(props:Props) {
   const [focus,setFocus] = useState(entry.speakingReview || "");
   const [busy,setBusy] = useState(false);
   const [error,setError] = useState("");
+  const savingReview = useRef(false);
   const first = answers(entry.speakingPart2), second = answers(entry.speakingFollowup);
   async function finish(){
-    if (!focus || busy || !second.some(a=>a.spoken)) return;
+    if (!focus || savingReview.current || !second.some(a=>a.spoken)) return;
+    savingReview.current=true;
     setBusy(true);setError("");
     try {
-      if (await save({speakingReview:focus,speakingPhase:"review",speakingComplete:"yes"})) advance();
-      else setError("复盘尚未保存，请重试。");
-    } catch {setError("复盘尚未保存，请重试。");} finally {setBusy(false);}
+      if (!await save({speakingReview:focus,speakingPhase:"review",speakingComplete:"yes"})) setError("复盘尚未保存，请重试。");
+    } catch {setError("复盘尚未保存，请重试。");} finally {savingReview.current=false;setBusy(false);}
   }
   if(phase!=="review") return <AnswerTask {...props} key={`${day}-${phase}`} phase={phase} retake={retake!==null} go={()=>setRetake(null)}/>;
   return <section className="card sp-card">
@@ -359,12 +361,17 @@ export default function Speaking(props:Props) {
     </> : <><p className="sp-help">听自己的首答，或回想刚才的口头表达。选择一处下一次可以具体改进的地方。</p><History items={first} title="已提交的 Part 2 回答 · 点击回听"/></>}
     {day!==11 && <History items={second} title="已提交的追问回答 · 点击回听"/>}
     {second.some(a=>a.local) || first.some(a=>a.local) ? <p className="sp-note">本次有录音仅保存于当前浏览器，换设备后请回到录制设备回听。</p>:null}
-    <fieldset className="sp-focus"><legend>下次开口时，我会优先练习</legend>
+    {first.map((_,i)=><AttemptFeedback key={"part2"+i} field="speakingPart2" index={i}/>)}
+    {second.map((_,i)=><AttemptFeedback key={"followup"+i} field="speakingFollowup" index={i}/>)}
+    <fieldset className="sp-focus" disabled={entry.speakingComplete==="yes"}><legend>下次开口时，我会优先练习</legend>
       {priorities.map(p=><label key={p} className={focus===p?"chosen":""}><input type="radio" name="speaking-focus" checked={focus===p} onChange={()=>setFocus(p)}/>{p}</label>)}
     </fieldset>
+    <AttemptFeedback field="speakingReview"/>
     {error && <p className="sp-message" role="status">{error}</p>}
     <div className="actions sp-actions">
-      <button type="button" className="primary" onClick={()=>void finish()} disabled={busy||!focus||!second.some(a=>a.spoken)}>{busy ? "保存中…" : day===11 ? "保存自评，进入打卡" : "保存自评，进入词汇"}</button>
+      {entry.speakingComplete==="yes"
+        ? <button type="button" className="primary" onClick={advance} disabled={busy}>{day===11?"进入打卡":"进入词汇"}</button>
+        : <button type="button" className="primary" onClick={()=>void finish()} disabled={busy||!focus||!second.some(a=>a.spoken)}>{busy?"保存中…":"保存自评，查看反馈"}</button>}
       <button type="button" className="secondary" disabled={busy} onClick={()=>setRetake("followup")}>{day===11 ? "重答 Part 3" : "重答追问"}</button>
       {day!==11 && <button type="button" className="sp-link" disabled={busy} onClick={()=>setRetake("part2")}>重答 Part 2</button>}
     </div>
