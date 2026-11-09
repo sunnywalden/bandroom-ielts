@@ -363,7 +363,7 @@ export default function Speaking(props:Props) {
     {second.some(a=>a.local) || first.some(a=>a.local) ? <p className="sp-note">本次有录音仅保存于当前浏览器，换设备后请回到录制设备回听。</p>:null}
     {first.map((_,i)=><AttemptFeedback key={"part2"+i} field="speakingPart2" index={i}/>)}
     {second.map((_,i)=><AttemptFeedback key={"followup"+i} field="speakingFollowup" index={i}/>)}
-    <fieldset className="sp-focus" disabled={entry.speakingComplete==="yes"}><legend>下次开口时，我会优先练习</legend>
+    <fieldset className="sp-focus" disabled={busy||entry.speakingComplete==="yes"}><legend>下次开口时，我会优先练习</legend>
       {priorities.map(p=><label key={p} className={focus===p?"chosen":""}><input type="radio" name="speaking-focus" checked={focus===p} onChange={()=>setFocus(p)}/>{p}</label>)}
     </fieldset>
     <AttemptFeedback field="speakingReview"/>

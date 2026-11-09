@@ -4,13 +4,15 @@ import {createPronunciationPlayer,type PronunciationState} from "./pronunciation
 import {pronunciations} from "./pronunciations";
 
 export default function Pronunciation({word}:{word:string}) {
+  return <WordPronunciation key={word.trim().toLowerCase()} word={word}/>;
+}
+function WordPronunciation({word}:{word:string}) {
   const key=word.trim().toLowerCase();
   const recording=Object.hasOwn(pronunciations,key)?pronunciations[key]:undefined;
   const audio=useRef<HTMLAudioElement>(null), player=useRef<ReturnType<typeof createPronunciationPlayer>|null>(null);
   const [state,setState]=useState<PronunciationState>({status:"idle"});
   const messageId=useId();
   useEffect(()=>{
-    setState({status:"idle"});
     if(!audio.current||!recording) return;
     // Reapply after effect cleanup (including React Strict Mode's setup check).
     audio.current.src=recording.audio;

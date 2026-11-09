@@ -100,7 +100,7 @@ export async function coachData(userId:string) {
   const [lessons,feedback] = await Promise.all([
     getDb().select({day:teacherLessons.day,lesson:teacherLessons.lesson}).from(teacherLessons).where(eq(teacherLessons.userId,userId)), reviews(userId)
   ]);
-  return {extras:Object.fromEntries(lessons.map(({day,lesson})=>[day,lesson])),feedback};
+  return {account:userId,extras:Object.fromEntries(lessons.map(({day,lesson})=>[day,lesson])),feedback};
 }
 
 class CoachError extends Error {}
@@ -225,8 +225,11 @@ export async function callCoach(userId:string, name:string, args:unknown) {
         }
         const {ledger}=await checkpoint(userId);
         requireStarted(values.day,ledger);
-        if(values.attempt.startsWith('v1:')) {
-          const attempt=(await reviewAttempts(values.day,ledger.entries[values.day]??{})).find(a=>a.id===values.attempt);
+        const attempts=await reviewAttempts(values.day,ledger.entries[values.day]??{});
+        // Descriptive labels are retained only for historical, unstructured records.
+        // A structured submission must always use its exact ID, regardless of prefix.
+        if(values.attempt.startsWith('v1:')||attempts.some(a=>a.stage===values.stage)) {
+          const attempt=attempts.find(a=>a.id===values.attempt);
           if(!attempt||attempt.stage!==values.stage)throw new CoachError('This exact submitted attempt is unavailable or has changed. Read study_session again and use its current reviewAttempts ID.');
           if(recordingId&&attempt.recordingId!==recordingId)throw new CoachError('The recording does not belong to this exact attempt.');
         }

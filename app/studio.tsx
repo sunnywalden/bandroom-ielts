@@ -1,6 +1,6 @@
 'use client'
 import {useEffect,useRef,useState} from 'react'
-import {Activity,ArrowLeft,ArrowRight,ArrowUpRight,AudioLines,BookMarked,BookOpen,CalendarDays,Check,CheckCheck,ChevronDown,ChevronRight,Clock3,Cloud,CloudOff,Disc3,FileText,Flag,Headphones,Layers3,LayoutDashboard,ListChecks,LockKeyhole,Mic,NotebookPen,PenLine,RefreshCw,SlidersHorizontal,Target} from 'lucide-react'
+import {Activity,ArrowLeft,ArrowRight,ArrowUpRight,AudioLines,BookOpen,Check,CheckCheck,ChevronDown,ChevronRight,Clock3,Cloud,CloudOff,Disc3,FileText,Flag,Layers3,LayoutDashboard,NotebookPen,RefreshCw,SlidersHorizontal,Target} from 'lucide-react'
 import {FieldArt,Mark} from './art'
 import {targets,overallTarget} from './goals'
 import {brief,budgets,dayStamp,english,initial,labels,notes,oldOrder,oldResults,part3,stages,writings,type Entry,type Ledger,type Stage} from './ledger'
@@ -11,12 +11,12 @@ import EntryHistory from './entry-history'
 import ReviewRequest from './review-request'
 import BackupPanel from './backup-panel'
 import Reports, { type ReportState } from './reports'
-import AttemptFeedback,{FeedbackProvider,UnmatchedFeedback} from './attempt-feedback'
+import AttemptFeedback,{FeedbackProvider,UnmatchedFeedback,FeedbackIdentificationStatus} from './attempt-feedback'
 import {requestJSON} from './request-json'
+import {useDraft} from './use-draft'
 
 const tabs=[['home','今日练习',LayoutDashboard],['history','学习档案',BookOpen],['notes','错题手记',NotebookPen],['report','阶段评估',Activity]] as const
 type Tab=typeof tabs[number][0]|'lesson'|'settings'
-const icons={speak:Mic,vocab:BookMarked,listen:Headphones,read:FileText,write:PenLine,review:ListChecks}
 const titles:Record<Tab,[string,string,string]>={home:['Study desk','今日练习','从上次停下的地方继续，每次专注一道题。'],lesson:['Practice room','练习室',''],history:['Learning archive','学习档案','查阅每一课的提交记录、独立首稿与修订。'],notes:['Correction notebook','错题手记','用一个新句子，检验容易反复出现的表达。'],report:['Progress review','阶段评估','按实际学习日期回看证据，每七天一个观察窗口。'],settings:['Study preferences','训练设置','确认考试类型，查看课程的预算和评估规则。']}
 type Feedback={id:string;day:number;stage:string;evidence:string;attempt:string;feedback:string;createdAt:string}
 type Snapshot=ReportState
@@ -29,20 +29,24 @@ export default function Studio(){
  const [tab,setTab]=useState<Tab>('home'),[sync,setSync]=useState<'load'|'ok'|'write'|'fail'|'conflict'|'auth'>('load'),[error,setError]=useState(''),[pending,setPending]=useState(false)
  const [account,setAccount]=useState(''),[locked,setLocked]=useState(false),[refreshKey,setRefreshKey]=useState(0)
  const [historyDay,setHistoryDay]=useState(11),[feedback,setFeedback]=useState<Feedback[]>([]),[coachError,setCoachError]=useState(false)
- const [note,setNote]=useState(0),[reply,setReply]=useState(''),[result,setResult]=useState<boolean|null>(null),[check,setCheck]=useState(false),[memo,setMemo]=useState(''),[showPacket,setShowPacket]=useState(false)
+ const [note,setNote]=useState(0),[reply,setReply]=useState(''),[result,setResult]=useState<boolean|null>(null),[check,setCheck]=useState(false),[showPacket,setShowPacket]=useState(false)
  const navigate=(page:Tab)=>{setTab(page);setCheck(false);setShowPacket(false);if(typeof window!=='undefined')window.scrollTo({top:0,behavior:'instant'})}
- const revisionAtRead=useRef<number|null>(null), activeAccount=useRef('')
+ const revisionAtRead=useRef<number|null>(null), activeAccount=useRef(''),accessLocked=useRef(false)
  const coachRead=useRef(0),coachBusy=useRef(false)
  const requiresLogin=(response:Response)=>response.status===401||response.status===403||response.type==='opaqueredirect'
+ function lockAccess(message='登录已过期。请重新登录，再读取进度。'){
+  accessLocked.current=true;setLocked(true);setSync('auth');setError(message)
+ }
  async function refreshCoach(){
   if(coachBusy.current||!activeAccount.current)return
   coachBusy.current=true
   const read=++coachRead.current,owner=activeAccount.current
   try{
-   const {response:res,data:c}=await requestJSON<{extras:Record<string,Lesson>;feedback:Feedback[]}>('/api/coach',{cache:'no-store',redirect:'manual'})
+   const {response:res,data:c}=await requestJSON<{account:string;extras:Record<string,Lesson>;feedback:Feedback[]}>('/api/coach',{cache:'no-store',redirect:'manual'})
    if(read!==coachRead.current||owner!==activeAccount.current)return
-   if(requiresLogin(res)){setLocked(true);setSync('auth');return}
+   if(requiresLogin(res)){lockAccess();return}
    if(!res.ok)throw Error()
+   if(c?.account!==owner){lockAccess('登录账号已改变。请重新读取进度，核对当前账号。');return}
    if(!c||!c.extras||typeof c.extras!=='object'||!Array.isArray(c.feedback)||c.feedback.some(f=>!f||typeof f.id!=='string'||typeof f.attempt!=='string'||typeof f.feedback!=='string'))throw Error()
    registerExtraLessons(c.extras||{});setFeedback(c.feedback||[]);setCoachError(false)
   }catch{if(read===coachRead.current&&owner===activeAccount.current)setCoachError(true)}finally{coachBusy.current=false}
@@ -52,7 +56,7 @@ export default function Studio(){
   busy.current=true;setSync('load');setError('')
   try{
    const {response:res,data}=await requestJSON<{account:string;revision:number;state:Snapshot|null}>('/api/state',{cache:'no-store',redirect:'manual'})
-   if(!res.ok){if(requiresLogin(res))setLocked(true);setSync(requiresLogin(res)?'auth':'fail');return}
+   if(!res.ok){if(requiresLogin(res))lockAccess();else setSync('fail');return}
    if(!data?.account||!Number.isSafeInteger(data.revision)||data.revision<0||(data.state&&data.state.version!==1))throw Error()
    const next:Snapshot=data.state??initial()
    const switched=activeAccount.current!==data.account, changed=rev.current!==data.revision
@@ -63,10 +67,10 @@ export default function Studio(){
    const differentLesson=next.day!==previous.day||next.stage!==previous.stage||
      next.finished!==previous.finished||JSON.stringify(next.entries[next.day])!==JSON.stringify(previous.entries[previous.day])
    if(switched||(changed&&differentLesson)){
-    setMemo(next.entries[next.day]?.reviewMemo||'');setCheck(false);setRefreshKey(k=>k+1)
+    setCheck(false);setRefreshKey(k=>k+1)
    }
    live.current=next;rev.current=data.revision;activeAccount.current=data.account;revisionAtRead.current=data.revision
-   setAccount(data.account);setS(next);setLocked(false);setSync('ok');void refreshCoach()
+   accessLocked.current=false;setAccount(data.account);setS(next);setLocked(false);setSync('ok');void refreshCoach()
   }catch{setSync('fail')}finally{busy.current=false}
  }
  // Initial subscription to the external, authenticated checkpoint.
@@ -85,7 +89,7 @@ export default function Studio(){
  // eslint-disable-next-line react-hooks/exhaustive-deps
  },[account,locked])
  async function persist(make:(prev:Snapshot)=>Snapshot){
-  if(busy.current||revisionAtRead.current===null||!activeAccount.current||sync==='conflict'||sync==='auth'||sync==='load')return false
+  if(accessLocked.current||busy.current||revisionAtRead.current===null||!activeAccount.current||sync==='conflict'||sync==='auth'||sync==='load')return false
   busy.current=true;setPending(true);setError('');setSync('write')
   try {
    const next=make(live.current)
@@ -96,19 +100,21 @@ export default function Studio(){
    try{result=await requestJSON('/api/state',request)}catch{result=await requestJSON('/api/state',request)}
    const {response:r,data}=result
    if(!r.ok){
-    if(r.status===409||r.status===428){if(r.status===428)setLocked(true);setSync('conflict');setError('云端记录或登录账号已经更新。请先保留当前草稿，再读取最新进度。')}
-    else if(requiresLogin(r)){setLocked(true);setSync('auth');setError('登录已过期。请在新标签页重新登录，再回来读取进度。')}
-    else{setSync('fail');setError(r.status===422?
+    if(r.status===428)lockAccess('登录账号已经更新。请重新读取进度，核对当前账号。')
+    else if(requiresLogin(r))lockAccess()
+    else if(r.status===409){if(!accessLocked.current)setSync('conflict');setError('云端记录已经更新。请先保留当前草稿，再读取最新进度。')}
+    else{if(!accessLocked.current)setSync('fail');setError(r.status===422?
       (data?.error==='recording_not_found'?'录音尚未在云端找到。请保留录音并重新提交。':data?.error==='recording_question_mismatch'?'录音与本题或已有回答不符。请保留录音并读取最新进度。':'此提交与当前课程记录不符。请保留草稿，并读取最新进度。'):
       `进度保存失败（${r.status}），录音和草稿已保留，请重试。`)}
     return false
    }
    if(!data||!Number.isSafeInteger(data.revision)||data.revision!==expectedRevision)throw Error('Invalid save acknowledgement')
-   live.current=next;rev.current=data.revision;setS(next);setSync('ok');return true
-  }catch{setSync('conflict');setError('保存结果尚未确认。请保留草稿，再读取云端记录以核对。');return false}
+   live.current=next;rev.current=data.revision;setS(next);if(!accessLocked.current)setSync('ok');return true
+  }catch{if(!accessLocked.current)setSync('conflict');setError('保存结果尚未确认。请保留草稿，再读取云端记录以核对。');return false}
   finally{busy.current=false;setPending(false)}
  }
  const entry=s.entries[s.day]||{}, topic=getLesson(s.day),stage=s.stage,order=s.day===11?oldOrder:stages
+ const [memo,setMemo]=useDraft(account,"fieldnotes."+s.day+".review.memo",entry.reviewMemo||'')
  const mins=budgets(s.day,s.started[s.day]||dayStamp(),getExercises(s.day)?.fullEssay), cap=Object.values(mins).reduce((a,b)=>a+b,0)
  const stageDone=(st:Stage,e:Entry=entry)=>s.finished||(s.day===11&&['vocab','listen','read','write'].includes(st))||(st==='speak'?e.speakingComplete==='yes':e[st+'Done']==='1')
  const save=async(patch:Entry)=>{
@@ -125,22 +131,23 @@ export default function Studio(){
  }
  const advance=async()=>{const prev=live.current, current=prev.entries[prev.day]||{};if(!stageDone(prev.stage,current))return;const to=order[order.indexOf(prev.stage)+1];if(to)await persist(p=>({...p,stage:to}))}
  async function start(){const next=s.day+1;if(!s.finished||next>62||!hasLesson(next))return
- if(await persist(p=>({...p,day:next,stage:'speak',finished:false,started:{...p.started,[next]:dayStamp()}}))){setMemo('');navigate('lesson')}}
+ if(await persist(p=>({...p,day:next,stage:'speak',finished:false,started:{...p.started,[next]:dayStamp()}}))){navigate('lesson')}}
  async function finish(){if(!check||s.stage!=='review'||!order.filter(st=>st!=='review').every(x=>stageDone(x)))return
- if(await persist(p=>({...p,finished:true,completed:[...new Set([...p.completed,p.day])],checked:{...p.checked,[p.day]:dayStamp()},entries:{...p.entries,[p.day]:{...p.entries[p.day],reviewMemo:memo.trim()}}}))){navigate('home')}}
+ if(await persist(p=>({...p,finished:true,completed:[...new Set([...p.completed,p.day])],checked:{...p.checked,[p.day]:dayStamp()},entries:{...p.entries,[p.day]:{...p.entries[p.day],reviewMemo:entry.reviewMemo??memo.trim()}}}))){navigate('home')}}
  function archive(d:number){setHistoryDay(d);navigate('history')}
- const done=s.completed.length, menu=tabs.find(x=>x[0]===tab),tabLabel=menu?.[1]||titles[tab][1], StageIcon=icons[stage]
+ const done=s.completed.length, menu=tabs.find(x=>x[0]===tab),tabLabel=menu?.[1]||titles[tab][1]
  const statuses={ok:'进度已同步',write:'正在保存',load:'读取进度',conflict:'发现新版进度',fail:'连接待恢复',auth:'需要登录'}
  const nextReady=hasLesson(s.day+1)
  const loginGate=<section className="card pad" role="status" style={{maxWidth:540,margin:'12vh auto',lineHeight:1.7}}>
   <div className="eyebrow"><Emblem small/> Bandroom · IELTS Study Studio</div>
   <h1 style={{margin:'12px 0'}}>{sync==='auth'?'登录学习空间':sync==='load'?'正在读取学习进度':'重新连接学习空间'}</h1>
+  {error&&<p role="status">{error}</p>}
   <p>{sync==='auth'?'在新标签页使用本站所属的 ChatGPT 账号登录，再返回此页继续。':sync==='load'?'正在核对你的课程和最近一次提交。':'暂时无法核对云端记录。恢复连接后即可继续。'}</p>
   <div className="actions" style={{marginTop:16}}>{sync==='auth'&&<a className="primary" href="/signin-with-chatgpt?return_to=%2F" target="_blank" rel="noopener noreferrer">登录 ChatGPT</a>}
   {sync!=='load'&&<button className="secondary" onClick={()=>void refresh()}>重新读取进度</button>}</div></section>
  if(!account)return <main>{loginGate}</main>
  const feedbackDay=tab==='history'?historyDay:s.day
- return <FeedbackProvider key={account} day={feedbackDay} entry={s.entries[feedbackDay]||{}} feedback={feedback.filter(f=>f.day===feedbackDay)} error={coachError} refresh={()=>void refreshCoach()}>{locked&&<main>{loginGate}</main>}<div className="app-shell">
+ return <FeedbackProvider key={account} day={feedbackDay} entry={s.entries[feedbackDay]||{}} feedback={feedback.filter(f=>f.day===feedbackDay)} error={coachError} refresh={()=>void refreshCoach()}>{locked&&<main>{loginGate}</main>}<div className="app-shell" hidden={locked} inert={locked} style={locked?{display:'none'}:undefined}>
  <aside className="side"><button className="brand" onClick={()=>navigate('home')}><Emblem/><span><b>Bandroom</b><small>IELTS STUDY STUDIO</small></span></button>
  <div className="nav-label">WORKSPACE</div><nav>{tabs.map(([id,title,Icon])=><button key={id} className={'nav-item '+((tab===id||(tab==='lesson'&&id==='home'))?'selected':'')} onClick={()=>navigate(id)}><Icon size={18}/>{title}</button>)}</nav>
  <div className="sidebar-bottom"><div className="sidebar-target"><span>MY PROGRAMME</span><b>IELTS <em>{overallTarget.toFixed(1)}</em></b><small>62 课时学习计划</small></div><button className={'nav-item '+(tab==='settings'?'selected':'')} onClick={()=>navigate('settings')}><SlidersHorizontal size={17}/>训练设置</button><div className="profile"><span>HZ</span><div><b>Henry</b><small>个人学习空间</small></div></div></div>
@@ -148,6 +155,7 @@ export default function Studio(){
  <div className="main-column"><header className="topbar"><span className="crumb"><span>学习工作台</span><ChevronRight size={13}/><b>{tabLabel}</b></span><span className="mobile-brand"><Emblem small/>Bandroom</span><button className="sync" onClick={()=>void refresh()} disabled={pending||sync==='load'} title="重新读取进度与教练反馈">{sync==='ok'?<Cloud size={15}/>:<RefreshCw size={14}/>} {statuses[sync]}</button></header>
  <nav className="mobile-nav">{[...tabs,['settings','设置',SlidersHorizontal] as const].map(([id,title,I])=><button key={id} className={(tab===id||(id==='home'&&tab==='lesson'))?'selected':''} onClick={()=>navigate(id)}><I size={15}/>{title}</button>)}</nav>
  <main id="main">
+ <FeedbackIdentificationStatus/>
  {(sync==='auth'||sync==='fail'||sync==='conflict'||error)&&<div role="status" className="alert"><CloudOff size={17}/><span>{error||(sync==='auth'?'请使用此站点所属的 ChatGPT 账号登录，以保存作答。':'暂时无法读取你的云端进度。请在继续练习前重试。')}</span>{sync==='auth'?<a href="/signin-with-chatgpt?return_to=%2F" target="_blank" rel="noopener noreferrer">登录</a>:<button onClick={()=>void refresh()}>重新读取</button>}</div>}
  {coachError&&sync==='ok'&&<div className="alert"><span>反馈同步暂时失败；答案和已有评语仍保留，恢复连接后会自动重试。</span><button onClick={()=>void refreshCoach()}>重试</button></div>}
  {tab!=='lesson'&&<div className="page-intro"><div><div className="eyebrow"><span className="kicker-line"/>{titles[tab][0]}</div><h1>{titles[tab][1]}</h1><p>{titles[tab][2]}</p></div>{tab==='home'&&<div className="edition"><Disc3 size={15}/> PERSONAL EDITION</div>}</div>}
@@ -155,11 +163,11 @@ export default function Studio(){
  <button className="hero-btn" onClick={()=>s.finished?archive(s.day):navigate('lesson')}>{s.finished?'查看本课记录':stage==='speak'?'继续口语练习':'继续当前练习'}<ArrowRight size={17}/></button></div><FieldArt/><div className="hero-rule"/><div className="hero-foot"><span><Clock3 size={14}/> {s.finished?'已确认打卡':s.day===11&&stage==='speak'?'本题约 40–60 秒':labels[stage]}</span><span><Layers3 size={14}/> Day {s.day} · {english[stage]}</span></div></section>
  {s.finished&&s.day<62&&<section className="card nextbox"><div><div className="eyebrow">NEXT LESSON</div><h3>Day {s.day+1} · {nextReady?'从口语开始':'等待新课包'}</h3><p>{nextReady?'准备好再开始，开启后才会记录新课。':'可请 ChatGPT 教练为下一课添加新材料。'}</p></div>{nextReady&&<button className="primary" onClick={()=>void start()} disabled={pending}>开始 Day {s.day+1}<ArrowRight size={16}/></button>}{!nextReady&&<a className="secondary" target="_blank" rel="noreferrer" href="https://chatgpt.com/c/6adc0a0c-e9a4-83ec-96a3-ddef0fe89edd">打开教练对话<ArrowUpRight size={15}/></a>}</section>}
  <section className="card itinerary"><div className="section-head"><div><div className="eyebrow">Session plan</div><h2>本课路线</h2></div><span className="time-tag"><Clock3 size={14}/>{cap} 分钟预算</span></div>
- <div className="route-rows">{order.map((k,i)=>{const I=icons[k],finished=stageDone(k),active=!s.finished&&k===stage;return <button key={k} disabled={!finished&&!active} onClick={()=>active?navigate('lesson'):archive(s.day)} className={'route-row '+(active?'active ':'')+(finished?'done':'')}><span className="route-mark">{finished?<Check size={15}/>:active?<AudioLines size={16}/>:String(i+1).padStart(2,'0')}</span><span className="route-name">{labels[k]} <small>{english[k]}</small></span><span className="route-status">{active?'当前':finished?'已完成':'待进行'}</span><span className="route-time">{mins[k]} min</span>{active?<ChevronRight size={16}/>:<span className="end-dot"/>}</button>})}</div></section>
+ <div className="route-rows">{order.map((k,i)=>{const finished=stageDone(k),active=!s.finished&&k===stage;return <button key={k} disabled={!finished&&!active} onClick={()=>active?navigate('lesson'):archive(s.day)} className={'route-row '+(active?'active ':'')+(finished?'done':'')}><span className="route-mark">{finished?<Check size={15}/>:active?<AudioLines size={16}/>:String(i+1).padStart(2,'0')}</span><span className="route-name">{labels[k]} <small>{english[k]}</small></span><span className="route-status">{active?'当前':finished?'已完成':'待进行'}</span><span className="route-time">{mins[k]} min</span>{active?<ChevronRight size={16}/>:<span className="end-dot"/>}</button>})}</div></section>
  </div><aside className="desk-aside"><section className="card progress-card"><div className="section-head"><div className="eyebrow">Programme</div><Flag size={16}/></div><h2>课程进度</h2><div className="big-count">{done}<small> / 62</small></div><div className="prog-track"><div style={{width:done/62*100+'%'}}/></div><div className="metric-note"><span>已打卡课时</span><b>{(done/62*100).toFixed(1)}%</b></div><div className="goal-split"/><div className="tiny-label"><Target size={15}/> 我的目标分数</div><Goals/></section>
  <section className="card focus-card"><div className="eyebrow"><span className="coral-dot"/>Coach’s note</div><h2>口语练习重点</h2><p>回答原因类问题时，先说出一个具体原因，再说明它可能带来什么后果。</p><div className="phrase">“One reason is that …”</div><button className="text-btn" onClick={()=>navigate('notes')}>打开错题手记 <ArrowUpRight size={14}/></button></section></aside></div>}
  {tab==='lesson'&&<><button className="back" onClick={()=>navigate('home')}><ArrowLeft size={16}/>今日练习</button><div className="page-intro"><div><div className="eyebrow"><span className="kicker-line"/>{dayName(s)} / {english[stage]}</div><h1>{labels[stage]}</h1><p>{s.day===11?'预警信号与判断':topic.theme}</p></div>{pill(s.finished?'已打卡':'进行中',!s.finished)}</div>
- {s.finished?<section className="card pad"><h2>本课已打卡</h2><button className="secondary" onClick={()=>archive(s.day)}>查看档案</button></section>:stage==='speak'?<Speaking account={account} key={account+"-"+s.day+"-"+refreshKey} day={s.day} entry={entry} prompt={topic.speaking} followup={s.day===11?part3:topic.followup} save={save} advance={()=>void advance()}/>:stage!=='review'?<Exercise key={account+"-"+s.day+stage+"-"+refreshKey} account={account} day={s.day} stage={stage} entry={entry} completedDays={s.completed} save={save} advance={()=>void advance()}/>:<section className="card pad check-card"><div className="eyebrow">Final check-in</div><h2>给 Day {s.day} 收个尾</h2><p>回想一个下次能独立用出的表达，或一个仍需练习的问题。</p><label>一句复盘 <small>可选；保存后可请 Work 教练给建议</small><textarea readOnly={entry.reviewMemo!==undefined} value={memo} onChange={e=>setMemo(e.target.value)} placeholder="下次我想试着……"/></label>{entry.reviewMemo===undefined?<button className="secondary" disabled={pending||!memo.trim()} onClick={()=>void save({reviewMemo:memo.trim()})}>保存复盘，交给 Work 教练</button>:<AttemptFeedback field="reviewMemo"/>}<p className="muted">保存复盘和查看反馈不会完成本课；最终打卡由你确认。</p><label className="checkbox"><input type="checkbox" checked={check} onChange={e=>setCheck(e.target.checked)}/>我已完成本课核心练习，确认打卡 Day {s.day}。</label><button className="primary" disabled={!check||pending} onClick={()=>void finish()}>确认完成 Day {s.day}<CheckCheck size={17}/></button></section>}
+ {s.finished?<section className="card pad"><h2>本课已打卡</h2><button className="secondary" onClick={()=>archive(s.day)}>查看档案</button></section>:stage==='speak'?<Speaking account={account} key={account+"-"+s.day+"-"+refreshKey} day={s.day} entry={entry} prompt={topic.speaking} followup={s.day===11?part3:topic.followup} save={save} advance={()=>void advance()}/>:stage!=='review'?<Exercise key={account+"-"+s.day+stage+"-"+refreshKey} account={account} day={s.day} stage={stage} entry={entry} completedDays={s.completed} save={save} advance={()=>void advance()}/>:<section className="card pad check-card"><div className="eyebrow">Final check-in</div><h2>给 Day {s.day} 收个尾</h2><p>回想一个下次能独立用出的表达，或一个仍需练习的问题。</p><label>一句复盘 <small>可选；保存后可请 Work 教练给建议</small><textarea readOnly={pending||entry.reviewMemo!==undefined} value={entry.reviewMemo??memo} onChange={e=>setMemo(e.target.value)} placeholder="下次我想试着……"/></label>{entry.reviewMemo===undefined?<button className="secondary" disabled={pending||!memo.trim()} onClick={()=>void save({reviewMemo:memo.trim()})}>保存复盘，交给 Work 教练</button>:<AttemptFeedback field="reviewMemo"/>}<p className="muted">保存复盘和查看反馈不会完成本课；最终打卡由你确认。</p><label className="checkbox"><input type="checkbox" checked={check} onChange={e=>setCheck(e.target.checked)}/>我已完成本课核心练习，确认打卡 Day {s.day}。</label><button className="primary" disabled={!check||pending} onClick={()=>void finish()}>确认完成 Day {s.day}<CheckCheck size={17}/></button></section>}
  <div className="lesson-foot"><Clock3 size={14}/><span>当前模块预算 {mins[stage]} 分钟 · 本课总预算 {cap} 分钟</span><button onClick={()=>navigate('home')}>返回工作台</button></div></>}
  {tab==='history'&&<div className="archive-grid"><div className="card archive-list">{Array.from({length:s.day},(_,i)=>s.day-i).map(d=><button key={d} className={d===historyDay?'selected':''} onClick={()=>{setHistoryDay(d);setShowPacket(false)}}><span>Day {String(d).padStart(2,'0')}</span>{s.completed.includes(d)?<Check size={15}/>:<i/>}</button>)}</div><div className="card pad history-detail"><div className="eyebrow">Lesson record / {String(historyDay).padStart(2,'0')}</div><h2>{brief[historyDay]||getLesson(historyDay).theme}</h2>{pill(s.completed.includes(historyDay)?'已打卡':'进行中',!s.completed.includes(historyDay))}<div className="record-list">{(oldResults[historyDay]||[]).map(([a,b])=><div key={a}><span>{a}</span><b>{b}</b></div>)}</div>
  {writings[historyDay]?.map((t,i)=><details key={i}><summary>{i?'写作修订稿':'写作独立首稿'}<ChevronDown size={15}/></summary><p className="english-text">{t}</p></details>)}

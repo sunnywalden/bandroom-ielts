@@ -63,12 +63,14 @@ assert.equal(session.reviewAttempts.find(a=>a.id===original.id).status,'reviewed
 assert.equal(session.reviewAttempts.find(a=>a.field==='writeRevision').status,'awaiting_coach');check();
 const response=await http.GET();assert.equal(response.status,200);
 assert.match(response.headers.get('Cache-Control'),/no-store/);
-assert.deepEqual((await response.json()).feedback,session.feedback);check();
+const coachResponse=await response.json();
+assert.equal(coachResponse.account,user.userId);
+assert.deepEqual(coachResponse.feedback,session.feedback);check();
 assert.equal(feedbackFor(original,session.feedback).length,1);
 assert.equal(feedbackFor(attempts.find(a=>a.field==='writeRevision'),session.feedback).length,0);check();
 for(const patch of [
  {stage:'read'},{attempt:original.id.slice(0,-1)+(original.id.endsWith('a')?'b':'a')},
- {day:13},{recordingId:audioId},
+ {day:13},{recordingId:audioId},{attempt:'descriptive label bypass'},{attempt:'v2:unknown'},
  {stage:'speak',attempt:attempts.find(a=>a.field==='speakingFollowup').id,recordingId:audioId}
 ]){assert.equal((await call('add_coach_feedback',{...feedback,...patch})).isError,true);check();}
 assert.equal((await call('read_study_session',{day:13})).isError,true);check();
