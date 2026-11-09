@@ -13,7 +13,11 @@ const media=new Map()
 globalThis.testCloud={
   DB:{prepare(q){const stmt=db.prepare(q);stmt.setReturnArrays(true);return {bind:(...v)=>({raw:async()=>stmt.all(...v),run:async()=>stmt.run(...v)})}}},
   BUCKET:{
-    async put(key,b,meta){media.set(key,{bytes:Buffer.from(b),httpMetadata:meta.httpMetadata,etag:'test-etag',size:b.length})},
+    async put(key,b,meta){
+      if(meta.onlyIf?.etagDoesNotMatch==='*'&&media.has(key))return null;
+      const file={bytes:Buffer.from(b),httpMetadata:meta.httpMetadata,customMetadata:meta.customMetadata,etag:'test-etag',size:b.length};
+      media.set(key,file);return file;
+    },
     async head(key){return media.get(key)||null},
     async get(key,opts){const f=media.get(key);if(!f)return null
       let b=f.bytes;const range=opts?.range;if(range)b=b.subarray(range.offset,range.offset+range.length)
@@ -137,5 +141,56 @@ globalThis.user={userId:'other'}
 assert.equal((await play(webm)).status,404);assert.equal((await readAudio(webm)).isError,true)
 insert.run('other',JSON.stringify(state));assert.equal((await readAudio(webm,{mode:'bytes'})).isError,true) // forged cross-user ID still denied
 assert.deepEqual((await (await read.GET()).json()).feedback,[])
+// Exercise the two separate speaking submissions with actual uploaded, playable blobs.
+// The UI saves an empty transcript, moves Part 2 to the follow-up, then opens self-review.
+{
+  const checkpoints=await load('app/api/state/route.ts'), account='day12/fixture';
+  globalThis.user={userId:account};
+  const starting=initial();
+  Object.assign(starting,{day:12,stage:'speak',completed:[...starting.completed,11],started:{...starting.started,12:'2026-11-09'},checked:{...starting.checked,11:'2026-11-09'}});
+  insert.run(account,JSON.stringify(starting));
+  const fetchState=async()=>(await checkpoints.GET()).json();
+  const send=async(revision,state)=>checkpoints.PUT(req('/api/state','PUT',{'content-type':'application/json',origin:url,'X-Bandroom-Account':account},JSON.stringify({revision,state})));
+  let committed=await fetchState();
+  let part2;
+  for(const [idx,key,phase] of [[0,'speakingPart2','followup'],[1,'speakingFollowup','review']]){
+    const [type,bytes]=samples[idx], context={origin:url,'content-type':type,'X-Bandroom-Account':account,
+      'X-Bandroom-Day':'12','X-Bandroom-Phase':idx?'followup':'part2','X-Bandroom-Attempt':crypto.randomUUID()};
+    const created=await audio.POST(req('/api/audio','POST',context,bytes));
+    assert.equal(created.status,201);
+    const {id}=await created.json(),next=structuredClone(committed.state);
+    const retry=await audio.POST(req('/api/audio','POST',context,bytes));
+    assert.equal(retry.status,200);assert.deepEqual(await retry.json(),{id});
+
+    const answer={at:new Date().toISOString(),text:'',spoken:true,audio:id};
+    next.entries[12]={...next.entries[12],[key]:JSON.stringify([answer]),[key+'Draft']:'',speakingPhase:phase};
+    const mismatch=structuredClone(next);
+    mismatch.entries[12].speakingPhase=idx?'followup':'review';
+    assert.equal((await send(committed.revision,mismatch)).status,422);
+    if(idx){
+      // It is not safe to adopt the already-saved Part 2 recording as evidence of the follow-up.
+      const reused=structuredClone(next);
+      reused.entries[12][key]=JSON.stringify([{...answer,audio:part2}]);
+      assert.equal((await send(committed.revision,reused)).status,422);
+    }
+    const foreign=structuredClone(next), foreignId=crypto.randomUUID();
+    await testCloud.BUCKET.put('speaking/'+encodeURIComponent(account)+'/'+foreignId,bytes,{httpMetadata:{contentType:type.split(';')[0]},customMetadata:{purpose:'speaking',phase:idx?'followup':'part2',day:'13'}});
+    foreign.entries[12][key]=JSON.stringify([{...answer,audio:foreignId}]);
+    assert.equal((await send(committed.revision,foreign)).status,422);
+    const prior=committed.revision;
+    assert.equal((await send(prior,next)).status,200);
+    assert.equal((await send(prior,next)).status,200); // same response lost and retried
+    committed=await fetchState();
+    assert.equal(committed.revision,prior+1);
+    assert.deepEqual(committed.state.entries[12],next.entries[12]);
+    const session=result(await call('read_study_session',{day:12}));
+    assert.equal(session.entry.speakingPhase,phase);
+    assert.equal(session.nextTask,idx?'Choose one speaking improvement to take into the next answer.':lesson.followup);
+    assert.equal(committed.state.stage,'speak');assert.equal(committed.state.finished,false);
+    assert.deepEqual(Buffer.from(await (await play(id)).arrayBuffer()),bytes);
+    if(!idx)part2=id;else assert.notEqual(id,part2);
+  }
+  assert.deepEqual(Buffer.from(await (await play(part2)).arrayBuffer()),samples[0][1]);
+}
 globalThis.user=null;assert.equal((await rpc('tools/call',{name:'read_speaking_recording',arguments:{day:11,recordingId:webm}})).status,401)
 console.log('PASS: 4 FFmpeg codecs; range, size, auth and account boundaries; byte-perfect private chunk reconstruction and PCM decode; coach assessment append/read/replay; plugin lesson schema, compatibility and publishing duplicate protection.')

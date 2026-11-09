@@ -87,7 +87,18 @@ export default function Studio(){
  const entry=s.entries[s.day]||{}, topic=getLesson(s.day),stage=s.stage,order=s.day===11?oldOrder:stages
  const mins=budgets(s.day,s.started[s.day]||dayStamp(),getExercises(s.day)?.fullEssay), cap=Object.values(mins).reduce((a,b)=>a+b,0)
  const stageDone=(st:Stage,e:Entry=entry)=>s.finished||(s.day===11&&['vocab','listen','read','write'].includes(st))||(st==='speak'?e.speakingComplete==='yes':e[st+'Done']==='1')
- const save=(patch:Entry)=>persist(prev=>{const d=prev.day,e=prev.entries[d]||{},p={...patch};for(const k of ['vocabRecall','vocabUse','listenQ0','listenQ1','readQ0','readQ1','writeOriginal','writeRevision'])if(p[k]!==undefined&&e[k]===undefined)p['_date_'+k]=dayStamp();const doneKey=stage==='speak'?'speakingComplete':stage+'Done';if(p[doneKey]&&!e[doneKey])p['_date_'+labels[stage]]=dayStamp();return {...prev,entries:{...prev.entries,[d]:{...e,...p}}}})
+ const save=async(patch:Entry)=>{
+  // Recording uploads finish asynchronously. A late response belongs to the account and exercise that started it.
+  if(activeAccount.current!==account || live.current.day!==s.day || live.current.stage!==stage || live.current.finished)return false
+  return persist(prev=>{
+   const d=prev.day,e=prev.entries[d]||{},p={...patch}
+   for(const k of ['vocabRecall','vocabUse','listenQ0','listenQ1','readQ0','readQ1','writeOriginal','writeRevision'])
+    if(p[k]!==undefined&&e[k]===undefined)p['_date_'+k]=dayStamp()
+   const doneKey=stage==='speak'?'speakingComplete':stage+'Done'
+   if(p[doneKey]&&!e[doneKey])p['_date_'+labels[stage]]=dayStamp()
+   return {...prev,entries:{...prev.entries,[d]:{...e,...p}}}
+  })
+ }
  const advance=async()=>{const prev=live.current, current=prev.entries[prev.day]||{};if(!stageDone(prev.stage,current))return;const to=order[order.indexOf(prev.stage)+1];if(to)await persist(p=>({...p,stage:to}))}
  async function start(){const next=s.day+1;if(!s.finished||next>62||!hasLesson(next))return
  if(await persist(p=>({...p,day:next,stage:'speak',finished:false,started:{...p.started,[next]:dayStamp()}}))){setMemo('');navigate('lesson')}}

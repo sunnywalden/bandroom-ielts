@@ -1,10 +1,9 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "@/app/chatgpt-auth";
 import { crossOrigin, json, limitedBody } from "../shared";
+import { uuid } from "@/lib/recording-recovery";
 
 export const dynamic = "force-dynamic";
-
-const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
 function audioFormat(type: string, bytes: Uint8Array) {
   if(bytes.length<32)return false;
@@ -35,8 +34,21 @@ export async function POST(request: Request) {
   const bytes = await limitedBody(request, 12 * 1024 * 1024);
   if (bytes instanceof Response) return bytes;
   if (!audioFormat(type, bytes)) return json({ error: "unsupported_audio" }, 415);
+  const day=request.headers.get("X-Bandroom-Day"),phase=request.headers.get("X-Bandroom-Phase"),attempt=request.headers.get("X-Bandroom-Attempt");
+  if(day!==null||phase!==null||attempt!==null){
+    if(!day||!/^\d{2}$/.test(day)||Number(day)<11||Number(day)>62||(phase!=="part2"&&phase!=="followup")||!attempt||!uuid.test(attempt))
+      return json({error:"invalid_recording_context"},400);
+    const digest=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",bytes)),x=>x.toString(16).padStart(2,"0")).join("");
+    const key=audioKey(user.userId,attempt);
+    const stored=await env.BUCKET.put(key,bytes,{onlyIf:{etagDoesNotMatch:"*"},httpMetadata:{contentType:type},customMetadata:{purpose:"speaking",day,phase,digest}});
+    if(stored)return json({id:attempt},201);
+    const old=await env.BUCKET.head(key),m=old?.customMetadata;
+    if(m?.purpose==="speaking"&&m.day===day&&m.phase===phase&&m.digest===digest&&old?.httpMetadata?.contentType===type)return json({id:attempt},200);
+    return json({error:"recording_id_conflict"},409);
+  }
   const id = crypto.randomUUID();
-  await env.BUCKET.put(audioKey(user.userId, id), bytes, { httpMetadata: { contentType: type } });
+  const assessment=request.headers.get("X-Bandroom-Purpose")==="assessment";
+  await env.BUCKET.put(audioKey(user.userId, id), bytes, { httpMetadata: { contentType: type }, ...(assessment?{customMetadata:{purpose:"assessment"}}:{}) });
   return json({ id }, 201);
 }
 

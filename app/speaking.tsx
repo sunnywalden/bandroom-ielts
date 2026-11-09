@@ -3,14 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import "./speaking.css";
 
-type Phase = "part2" | "followup" | "review";
-type Answer = {
-  at: string;
-  text: string;
-  spoken: boolean;
-  audio?: string;
-  local?: string;
-};
+import {answers,changeDraft,currentPhase,discardIfMatch,draftKey as recordingKey,submitted,uploadDraft,newRecordingId,type Answer,type QuestionPhase,type RecordingDraft} from './speaking-draft';
+import SpeakingRecovery from './speaking-recovery';
+
 type Props = {
   account:string;
   day: number;
@@ -20,13 +15,6 @@ type Props = {
   save: (patch: Record<string, string>) => Promise<boolean>;
   advance: () => void;
 };
-
-function answers(raw?: string): Answer[] {
-  try {
-    const value = JSON.parse(raw || "[]");
-    return Array.isArray(value) ? value.filter(a => a && typeof a.text === "string" && typeof a.at === "string") : [];
-  } catch { return []; }
-}
 
 function clock(n: number) {
   return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`;
@@ -41,17 +29,17 @@ function Wave({ live = false }: { live?: boolean }) {
   </span>;
 }
 
-async function localClip(key: string, data?: Blob): Promise<Blob | undefined> {
+async function localClip(key: string): Promise<Blob | undefined> {
   return new Promise((resolve, reject) => {
     const open = indexedDB.open("ielts-speaking-audio", 1);
     open.onupgradeneeded = () => open.result.createObjectStore("clips");
     open.onerror = () => reject(open.error);
     open.onsuccess = () => {
       const db = open.result;
-      const tx = db.transaction("clips", data ? "readwrite" : "readonly");
+      const tx = db.transaction("clips", "readonly");
       const store = tx.objectStore("clips");
-      const req = data ? store.put(data, key) : store.get(key);
-      tx.oncomplete = () => { db.close(); resolve(data || req.result as Blob | undefined); };
+      const req = store.get(key);
+      tx.oncomplete = () => { db.close(); resolve(req.result as Blob | undefined); };
       tx.onerror = tx.onabort = () => { db.close(); reject(tx.error); };
     };
   });
@@ -107,8 +95,8 @@ function PrepTimer() {
   </div>;
 }
 
-function Recorder({limit,clip,onClip,onActive}:{
-  limit:number;clip:Blob|null;onClip:(blob:Blob|null)=>void;onActive:(busy:boolean)=>void;
+function Recorder({limit,clip,disabled,stopRequest,onClip,onActive}:{
+  limit:number;clip:Blob|null;disabled:boolean;stopRequest:{current:(()=>void)|null};onClip:(blob:Blob)=>void;onActive:(mode:"idle"|"waiting"|"recording")=>void;
 }) {
   const [mode,setMode] = useState<"idle"|"waiting"|"recording">("idle");
   const [duration,setDuration] = useState(0);
@@ -118,10 +106,12 @@ function Recorder({limit,clip,onClip,onActive}:{
   const activeStream = useRef<MediaStream | null>(null);
   const mounted = useRef(true);
   const started = useRef(0);
+  const onFinalized=useRef(onClip);onFinalized.current=onClip;
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      stopRequest.current=null;
       if (recorder.current?.state === "recording") recorder.current.stop();
       activeStream.current?.getTracks().forEach(t => t.stop());
     };
@@ -141,11 +131,11 @@ function Recorder({limit,clip,onClip,onActive}:{
     return () => clearInterval(id);
   },[limit,mode]);
   async function record() {
-    if (mode !== "idle") return;
+    if (mode !== "idle" || disabled) return;
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
       setNotice("此浏览器无法录音。你可以在页面外开口练习并记录要点。"); return;
     }
-    setNotice(""); setMode("waiting"); onActive(true);
+    setNotice(""); setMode("waiting"); onActive("waiting");
     let stream:MediaStream | undefined;
     try {
       stream = await navigator.mediaDevices.getUserMedia({audio:true});
@@ -157,37 +147,38 @@ function Recorder({limit,clip,onClip,onActive}:{
       const parts:Blob[] = [];
       rec.ondataavailable = event => { if (event.data.size) parts.push(event.data); };
       rec.onstop = () => {
+        stopRequest.current=null;
         stream?.getTracks().forEach(t => t.stop());
+        if (parts.length) onFinalized.current(new Blob(parts,{type:rec.mimeType || preferred || "audio/webm"}));
         if (!mounted.current) return;
-        if (parts.length) onClip(new Blob(parts,{type:rec.mimeType || preferred || "audio/webm"}));
-        else setNotice("没有录到声音，请重试或记录口头练习。");
-        setMode("idle"); onActive(false);
+        if (!parts.length) setNotice("没有录到声音，请重试或记录口头练习。");
+        setMode("idle"); onActive("idle");
       };
       rec.onerror = () => {
         stream?.getTracks().forEach(t => t.stop());
-        if (mounted.current) {setNotice("录音中断，请检查麦克风。");setMode("idle");onActive(false);}
+        if (mounted.current) {setNotice("录音中断，请检查麦克风。");setMode("idle");onActive("idle");}
       };
-      rec.start(); started.current = Date.now(); setDuration(0); setMode("recording");
+      rec.start();stopRequest.current=()=>{if(rec.state==="recording")rec.stop()};onActive("recording"); started.current = Date.now(); setDuration(0); setMode("recording");
     } catch {
       stream?.getTracks().forEach(t => t.stop());
-      if (mounted.current) { setNotice("麦克风未能开启。请检查浏览器权限，或改用页面外口头练习。");setMode("idle");onActive(false); }
+      if (mounted.current) { setNotice("麦克风未能开启。请检查浏览器权限，或改用页面外口头练习。");setMode("idle");onActive("idle"); }
     }
   }
   return <div className="sp-recorder">
     <div className="sp-rec-main"><button type="button" className={`sp-mic ${mode === "recording" ? "sp-recording" : ""}`}
-      disabled={mode==="waiting"} aria-label={mode==="recording"?"停止录音":"开始录音"}
+      disabled={mode==="waiting" || (disabled && mode!=="recording")} aria-label={mode==="recording"?"停止录音":"开始录音"}
       onClick={() => mode === "recording" ? recorder.current?.stop() : void record()}>
       {mode === "recording" ? <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg> : <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6"><rect x="8.5" y="2.5" width="7" height="13" rx="3.5"/><path d="M5.5 11v1.5a6.5 6.5 0 0 0 13 0V11M12 19v3m-3 0h6"/></svg>}
     </button><div><strong>{mode==="recording"?"正在录音":mode==="waiting"?"正在请求麦克风":clip?"重新录制本次草稿":"录下你的回答"}</strong><small>{mode==="recording" ? `${clock(duration)} / ${clock(limit)} · 点击停止` : `最多 ${clock(limit)} · 手动开始`}</small></div>
     <Wave live={mode==="recording"}/></div>
-    {url && <div className="sp-play"><audio controls src={url} aria-label="试听本次录音"/><a href={url} download={clip?.type.includes("mp4")?"speaking.m4a":clip?.type.includes("ogg")?"speaking.ogg":"speaking.webm"}>下载本次录音</a></div>}
+    {url && <div className="sp-play"><audio controls src={url} aria-label="试听本次录音"/><a href={url} download={clip?.type.includes("mp4")?"speaking.m4a":clip?.type.includes("ogg")?"speaking.ogg":clip?.type.includes("wav")?"speaking.wav":"speaking.webm"}>下载本次录音</a></div>}
     {notice && <p role="status" className="sp-message">{notice}</p>}
   </div>;
 }
 
-function History({items}: {items:Answer[]}) {
+function History({items,title="查看已保存的回答"}: {items:Answer[];title?:string}) {
   if (!items.length) return null;
-  return <details className="sp-history"><summary>查看已保存的回答（{items.length}）</summary>
+  return <details className="sp-history"><summary>{title}（{items.length}）</summary>
     {items.map((a,i) => <div className="sp-hist-item" key={a.at}>
       <b>{i>0 ? "练习重答" : "首次回答"} {i+1}</b>
       <small>{a.audio || a.local ? "录音" : a.spoken ? "本人确认口头作答" : "文字草稿"}</small>
@@ -195,81 +186,118 @@ function History({items}: {items:Answer[]}) {
     </div>)}</details>;
 }
 
-function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Props & {phase:"part2"|"followup";go:(p:Phase)=>void;retake:boolean}) {
+function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Props & {phase:QuestionPhase;go:()=>void;retake:boolean}) {
   const key = phase === "part2" ? "speakingPart2" : "speakingFollowup";
-  const items = answers(entry[key]);
+  const items = answers(entry[key]), scope=recordingKey(account,day,phase);
   const draftKey = `${key}Draft`;
   const [text,setText] = useState(entry[draftKey] || "");
-  const [clip,setClip] = useState<Blob|null>(null);
+  const [voice,setVoice] = useState<RecordingDraft|null>(null);
   const [attest,setAttest] = useState(false);
-  const [recording,setRecording] = useState(false);
-  const [busy,setBusy] = useState(false);
+  const [mic,setMic]=useState<"idle"|"waiting"|"recording">("idle");
+  const recording=mic!=="idle";
+  const stopRequest=useRef<(()=>void)|null>(null), saveOnStop=useRef(false);
+  const [busy,setBusy] = useState(false),[preparing,setPreparing]=useState(true);
   const [message,setMessage] = useState("");
-  const pendingAudio = useRef<{blob:Blob;reference:Partial<Answer>} | null>(null);
+  const mounted=useRef(false), submitting=useRef(false);
   const isFollow = phase === "followup";
   const day11Part3 = day === 11 && isFollow;
-  async function submit(draft:boolean) {
-    if (busy || recording) return;
-    setBusy(true);setMessage("");
+  useEffect(()=>{
+    let active=true;mounted.current=true;
+    changeDraft(scope).then(d=>{
+      if(!active||!d)return;
+      if(submitted(d,items)){void changeDraft(scope,discardIfMatch(d.id)).catch(()=>{});return;}
+      setVoice(d);setMessage("已找回本机未提交的录音，可先试听再保存。");
+    }).catch(()=>{if(active)setMessage("本机录音草稿存储不可用。请在离开页面前下载录音。");})
+      .finally(()=>{if(active)setPreparing(false)});
+    return ()=>{active=false;mounted.current=false};
+    // Each question is keyed by day/phase/account; submissions are reloaded by Studio on remote conflicts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[scope]);
+  async function keep(draft:RecordingDraft){
+    if(mounted.current){setVoice(draft);setPreparing(true);setMessage("正在保留录音草稿…");}
+    try{
+      await changeDraft(scope,()=>draft);
+      if(mounted.current)setMessage("录音草稿已保存在本机，可试听后提交。");
+    }catch{if(mounted.current)setMessage("本机存储不足或不可用，请在离开页面前下载录音。");}
+    finally{if(mounted.current)setPreparing(false)}
+  }
+  async function submit(draft:boolean,readyVoice=voice) {
+    if (submitting.current) return;
+    submitting.current=true;setBusy(true);setMessage("");
     try {
       if (draft) {
         if (await save({[draftKey]:text.trim()})) setMessage("文字草稿已保存，可稍后接续。");
-        else setMessage("草稿保存失败，请保留页面后重试。");
+        else setMessage("文字草稿保存失败，请在连接恢复后重试。");
         return;
       }
-      if (!clip && !attest) {setMessage("请录音，或在页面外作答后勾选口头练习记录。");return;}
-      let ref:Partial<Answer> = {};
-      if (clip) {
-        if (pendingAudio.current?.blob === clip) ref = pendingAudio.current.reference;
-        else {
-          try {
-            const res = await fetch("/api/audio",{method:"POST",headers:{"Content-Type":clip.type || "audio/webm","X-Bandroom-Account":account},body:clip});
-            if(res.status===401||res.status===403||res.status===428){setMessage("当前登录已失效。先下载录音，再登录原账号后提交。");return;}
-            if(res.status===413||res.status===415){setMessage("未能接收本次录音文件。请先下载并保留原件，再重新录制。");return;}
-            if (!res.ok) throw new Error("upload failed");
-            const result = await res.json();
-            if (!result || typeof result !== "object" || !("id" in result) || typeof result.id !== "string" || !result.id) throw new Error("missing id");
-            ref = {audio:result.id};
-          } catch {
-            const id = crypto.randomUUID();
-            await localClip(id,clip);
-            ref = {local:id};
-          }
-          pendingAudio.current = {blob:clip,reference:ref};
-        }
+      if (!readyVoice && !attest) {setMessage("请录音，或在页面外作答后勾选口头练习记录。");return;}
+      let audio=readyVoice?.audio;
+      if (readyVoice && !audio) {
+        try { audio=await uploadDraft(readyVoice,account,day,phase); }
+        catch(error){if(mounted.current)setMessage(error instanceof TypeError?'连接中断，录音仍可试听。恢复连接后请重试。':error instanceof Error?error.message:'上传失败，请重试。');return;}
+        if(mounted.current)setVoice({...readyVoice,audio});
+        await changeDraft(scope,old=>old?.id===readyVoice.id?{...old,audio}:old).catch(()=>{});
       }
-      const next = isFollow || retake ? "review" : "followup";
-      const answer:Answer = {at:new Date().toISOString(),text:text.trim(),spoken:!!clip || attest,...ref};
-      const ok = await save({[key]:JSON.stringify([...items,answer]),[draftKey]:"",speakingPhase:next});
-      if (ok) go(next); else setMessage("回答记录未保存。请保留页面并重试。");
-    } catch {setMessage("无法保存本次回答。可以先下载录音，再重试。");}
-    finally {setBusy(false);}
+      if(!mounted.current)return;
+      const answer:Answer={at:readyVoice?.at||new Date().toISOString(),text:text.trim(),spoken:true,...(audio?{audio}:{})};
+      const next=isFollow||retake?'review':'followup';
+      if (!await save({[key]:JSON.stringify([...items,answer]),[draftKey]:"",speakingPhase:next})){
+        if(mounted.current)setMessage(audio?"录音已上传，作答记录尚未确认。可保留录音并重试保存。":"作答尚未确认，请重试保存。");
+        return;
+      }
+      if(readyVoice)void changeDraft(scope,discardIfMatch(readyVoice.id)).catch(()=>{});
+      go();
+    } catch {if(mounted.current)setMessage("保存未完成。请保留录音，恢复连接后再次提交。");}
+    finally {submitting.current=false;if(mounted.current)setBusy(false);}
   }
   return <section className="card sp-card">
     <div className="sp-top"><span className="eyebrow">{day11Part3 ? "SPEAKING PART 3" : isFollow ? "FOLLOW-UP" : "SPEAKING PART 2"}</span><span className="sp-tag">{retake ? "自主加练" : isFollow ? "追问" : "独立陈述"}</span></div>
+    {isFollow&&day!==11&&<p className="sp-note">第 2 / 2 题 · Part 2 已保存。本题完成后进入口语自评。</p>}
     <h2>{day11Part3 ? "为什么有些司机会忽略警示灯？" : isFollow ? "回应一个追问" : "用英语讲一段经历"}</h2>
     <p className="sp-question" lang="en">{day11Part3 ? "Why do some drivers ignore warning lights on their dashboards, even when they know it could be dangerous?" : isFollow ? followup : prompt}</p>
     {!isFollow ? <><p className="sp-help">可以记下三个关键词：情境、你的行动、结果。准备 1 分钟，再自然讲 1–2 分钟。</p><PrepTimer/></> : <p className="sp-help">{day11Part3 ? "用 3–4 句英语回答，给出一个实际原因和一种可能后果。建议 40–60 秒。" : "先直接回答，再用一个理由或例子展开。建议 30–60 秒。"}</p>}
-    <Recorder limit={isFollow ? 60 : 120} clip={clip} onClip={setClip} onActive={setRecording}/>
+    {isFollow&&day!==11&&<History items={answers(entry.speakingPart2)} title="已提交的 Part 2 回答 · 点击回听"/>}
+    <Recorder limit={isFollow ? 60 : 120} clip={voice?.blob??null} disabled={busy||preparing} stopRequest={stopRequest} onClip={blob=>{
+      const draft={id:newRecordingId(),at:new Date().toISOString(),blob};
+      const commit=saveOnStop.current;saveOnStop.current=false;
+      void keep(draft).then(()=>{if(commit&&mounted.current)void submit(false,draft)});
+    }} onActive={mode=>{if(mode==="waiting"||mode==="idle")saveOnStop.current=false;setMic(mode)}}/>
+    {voice?.audio&&!voice.blob&&<Playback answer={{audio:voice.audio,at:voice.at,text:'',spoken:true}}/>}
+    {!voice&&<details className="sp-history"><summary>使用已保存的录音文件</summary>
+      <label className="sp-label">选择本题录音（WebM、M4A、OGG 或 WAV，最多 12 MiB）
+        <input type="file" accept="audio/webm,audio/mp4,audio/ogg,audio/wav,.webm,.m4a,.mp4,.ogg,.oga,.wav" disabled={busy||preparing||recording}
+          onChange={e=>{
+            const file=e.currentTarget.files?.[0];e.currentTarget.value='';if(!file)return;
+            const extension=file.name.split('.').pop()?.toLowerCase()||'';
+            const types:Record<string,string>={webm:'audio/webm',m4a:'audio/mp4',mp4:'audio/mp4',ogg:'audio/ogg',oga:'audio/ogg',wav:'audio/wav'};
+            const type=types[extension]||file.type.split(';')[0];
+            if(!file.size||file.size>12*1024*1024||!Object.values(types).includes(type)){setMessage('请选择 12 MiB 以内的 WebM、M4A、OGG 或 WAV 录音。');return;}
+            void keep({id:newRecordingId(),at:new Date().toISOString(),blob:file.slice(0,file.size,type)});
+          }}/>
+      </label>
+    </details>}
+    {!voice&&<SpeakingRecovery day={day} account={account} phase={phase} disabled={busy||preparing||recording} onChoose={({id,at})=>{void keep({id,at,audio:id})}}/>}
     <label className="sp-label">文字草稿或口述要点 <span>选填</span>
       <textarea rows={3} value={text} onChange={e => setText(e.target.value)} disabled={busy} maxLength={3500} placeholder="Jot down a few ideas in English…"/>
     </label>
-    {!clip && <label className="sp-check"><input type="checkbox" checked={attest} onChange={e=>setAttest(e.target.checked)}/> 我已在页面外开口作答，按自报口练记录。</label>}
+    {!voice && <label className="sp-check"><input type="checkbox" checked={attest} onChange={e=>setAttest(e.target.checked)}/> 我已在页面外开口作答，按自报口练记录。</label>}
     <p className="sp-note">仅有文字或自报记录时，发音、停顿和流利度留待音频评估。</p>
     <History items={items}/>
     {message && <p className="sp-message" role="status">{message}</p>}
-    <div className="actions sp-actions"><button className="primary" type="button" disabled={busy || recording || (!clip && !attest)} onClick={()=>void submit(false)}>{busy ? "保存中…" : !isFollow && !retake ? "保存回答，进入追问" : "保存回答，进入自评"}</button>
-      <button className="secondary" type="button" disabled={busy || recording || !text.trim()} onClick={()=>void submit(true)}>保存文字草稿</button>
-      {retake && <button className="sp-link" type="button" disabled={busy||recording} onClick={()=>go("review")}>返回自评</button>}
+    <div className="actions sp-actions"><button className="primary" type="button" disabled={busy || preparing || mic==="waiting" || (mic==="idle" && !voice && !attest)} onClick={()=>{
+        if(mic==="recording"){if(stopRequest.current){saveOnStop.current=true;stopRequest.current()} return;}
+        void submit(false);
+      }}>{busy ? "保存中…" : mic==="recording" ? "停止录音并保存回答" : !isFollow && !retake ? "保存回答，进入追问" : "保存回答，进入自评"}</button>
+      <button className="secondary" type="button" disabled={busy || preparing || recording || !text.trim()} onClick={()=>void submit(true)}>保存文字草稿</button>
+      {retake && <button className="sp-link" type="button" disabled={busy||recording} onClick={go}>返回自评</button>}
     </div>
   </section>;
 }
 
 export default function Speaking(props:Props) {
   const {day,entry,save,advance} = props;
-  const stored = entry.speakingPhase;
-  const [phase,setPhase] = useState<Phase>(stored==="followup" || stored==="review" || stored==="part2" ? stored : day===11 ? "followup" : "part2");
-  const [retake,setRetake] = useState(false);
+  const [retake,setRetake] = useState<QuestionPhase|null>(null);
+  const phase=retake??currentPhase(day,entry);
   const [focus,setFocus] = useState(entry.speakingReview || "");
   const [busy,setBusy] = useState(false);
   const [error,setError] = useState("");
@@ -282,7 +310,7 @@ export default function Speaking(props:Props) {
       else setError("复盘尚未保存，请重试。");
     } catch {setError("复盘尚未保存，请重试。");} finally {setBusy(false);}
   }
-  if(phase!=="review") return <AnswerTask {...props} key={`${day}-${phase}`} phase={phase} retake={retake} go={setPhase}/>;
+  if(phase!=="review") return <AnswerTask {...props} key={`${day}-${phase}`} phase={phase} retake={retake!==null} go={()=>setRetake(null)}/>;
   return <section className="card sp-card">
     <div className="sp-top"><span className="eyebrow">SPEAKING REVIEW</span><span className="sp-tag">口语自评</span></div>
     <h2>{day===11 ? "回顾刚才的 Part 3 回答" : "回听与自评"}</h2>
@@ -295,8 +323,8 @@ export default function Speaking(props:Props) {
         <small>根据转录推测的表达：用 <b>if I got …, I’d …</b> 说明假设情境下的行动。</small>
       </div>
       <p>下方保留之前假设情境追问的文字转录。</p><blockquote lang="en">If there comes the same type pressure warning. Are there with it immediately</blockquote><p>转录中的个别词可能有偏差。现有记录支持语言反馈，尚无可回放原音或口语分数。</p></details>
-    </> : <><p className="sp-help">听自己的首答，或回想刚才的口头表达。选择一处下一次可以具体改进的地方。</p><History items={first}/></>}
-    {day!==11 && <History items={second}/>}
+    </> : <><p className="sp-help">听自己的首答，或回想刚才的口头表达。选择一处下一次可以具体改进的地方。</p><History items={first} title="已提交的 Part 2 回答 · 点击回听"/></>}
+    {day!==11 && <History items={second} title="已提交的追问回答 · 点击回听"/>}
     {second.some(a=>a.local) || first.some(a=>a.local) ? <p className="sp-note">本次有录音仅保存于当前浏览器，换设备后请回到录制设备回听。</p>:null}
     <fieldset className="sp-focus"><legend>下次开口时，我会优先练习</legend>
       {priorities.map(p=><label key={p} className={focus===p?"chosen":""}><input type="radio" name="speaking-focus" checked={focus===p} onChange={()=>setFocus(p)}/>{p}</label>)}
@@ -304,8 +332,8 @@ export default function Speaking(props:Props) {
     {error && <p className="sp-message" role="status">{error}</p>}
     <div className="actions sp-actions">
       <button type="button" className="primary" onClick={()=>void finish()} disabled={busy||!focus||!second.some(a=>a.spoken)}>{busy ? "保存中…" : day===11 ? "保存自评，进入打卡" : "保存自评，进入词汇"}</button>
-      <button type="button" className="secondary" disabled={busy} onClick={()=>{setRetake(true);setPhase("followup");}}>{day===11 ? "重答 Part 3" : "重答追问"}</button>
-      {day!==11 && <button type="button" className="sp-link" disabled={busy} onClick={()=>{setRetake(true);setPhase("part2");}}>重答 Part 2</button>}
+      <button type="button" className="secondary" disabled={busy} onClick={()=>setRetake("followup")}>{day===11 ? "重答 Part 3" : "重答追问"}</button>
+      {day!==11 && <button type="button" className="sp-link" disabled={busy} onClick={()=>setRetake("part2")}>重答 Part 2</button>}
     </div>
   </section>;
 }

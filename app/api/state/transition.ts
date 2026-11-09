@@ -80,6 +80,12 @@ function validEntry(day:number, stage:Stage, before:Entry, after:Entry, lesson?:
       if(k==="speakingFollowup" && day!==11 && !attempts(before.speakingPart2)?.length)return false;
     } else if(before[k]!==undefined && !(k.endsWith("Draft") || k==="speakingPhase"))return false;
   }
+  if(stage==="speak" && changed.some(k=>k==="speakingPart2" || k==="speakingFollowup" || k==="speakingPhase")){
+    const hasFollowup=Boolean(attempts(after.speakingFollowup)?.length);
+    const hasPart2=Boolean(attempts(after.speakingPart2)?.length);
+    const expectedPhase=hasFollowup?"review":day===11||hasPart2?"followup":"part2";
+    if(after.speakingPhase!==expectedPhase)return false;
+  }
   if(stage==="vocab" && changed.length){
     if(!lesson)return false;
     if(changed.includes("vocabBatch") && (after.vocabBatch!=="2"||!before.vocabRecall))return false;

@@ -103,7 +103,7 @@ function TestForm({s,persist,pending,account}:{account:string;s:State;persist:Pr
         if(cachedAudio.current?.file===file)audio=cachedAudio.current.id;
         else {
           const mime=file.type==="audio/x-m4a"||/\.m4a$/i.test(file.name)?"audio/mp4":file.type;
-          const resp=await fetch("/api/audio",{method:"POST",headers:{"Content-Type":mime,"X-Bandroom-Account":account},body:file});
+          const resp=await fetch("/api/audio",{method:"POST",headers:{"Content-Type":mime,"X-Bandroom-Account":account,"X-Bandroom-Purpose":"assessment"},body:file});
           if(resp.status===401||resp.status===428){setInfo("登录状态已变化。请重新登录原账号后再上传。");return;}
           if(!resp.ok){setInfo("录音上传失败。请确认文件格式与网络后重试。");return;}
           const result=await resp.json() as {id?:string};if(!result.id)throw Error();audio=result.id;cachedAudio.current={file,id:result.id};

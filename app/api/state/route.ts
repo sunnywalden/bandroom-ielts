@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { getChatGPTUser } from "@/app/chatgpt-auth";
 import { getDb } from "@/db";
 import { learnerStates, teacherLessons } from "@/db/schema";
+import { linkedRecordings } from "@/lib/recording-recovery";
 import { crossOrigin, json, limitedBody } from "../shared";
 
 import { env } from "cloudflare:workers";
@@ -53,19 +54,25 @@ export async function PUT(request: Request) {
     .where(and(eq(teacherLessons.userId,user.userId),eq(teacherLessons.day,state.day))).get())?.lesson;
   if (state.day>=12&&!lesson) return json({error:"lesson_unavailable"},422);
   if (!validTransition(prior?.state,state,lesson)) return json({error:"invalid_transition"},422);
-  const previous=prior?.state as typeof state|undefined, refs:string[]=[];
+  const previous=prior?.state as typeof state|undefined, refs:{id:string;phase:string}[]=[];
   const entry=state.entries[state.day]??{}, old=previous?.entries?.[state.day]??{};
   for (const key of ["speakingPart2","speakingFollowup"]) {
     if (entry[key]===old[key]||!entry[key]) continue;
     const last=JSON.parse(entry[key]).at(-1);
-    if (last?.audio) refs.push(last.audio);
+    if (last?.audio) refs.push({id:last.audio,phase:key==="speakingPart2"?"part2":"followup"});
   }
   if ((state.fullTests?.length??0)>(previous?.fullTests?.length??0) && state.fullTests.at(-1)?.audio)
-    refs.push(state.fullTests.at(-1).audio);
-  for (const id of refs) {
+    refs.push({id:state.fullTests.at(-1).audio,phase:"assessment"});
+  const linked=refs.length&&previous?linkedRecordings(previous):new Set<string>();
+  for (const {id,phase} of refs) {
     if (!env.BUCKET) return json({error:"recordings_unavailable"},503);
-    if (!await env.BUCKET.head(`speaking/${encodeURIComponent(user.userId)}/${id}`))
+    const object=await env.BUCKET.head(`speaking/${encodeURIComponent(user.userId)}/${id}`);
+    if (!object)
       return json({error:"recording_not_found"},422);
+    const m=object.customMetadata;
+    if(linked.has(id)||(m?.purpose==="assessment"&&phase!=="assessment")||(m?.purpose==="speaking"&&(m.day!==String(state.day)||m.phase!==phase)))
+      return json({error:"recording_question_mismatch"},422);
+    linked.add(id);
   }
   if (prior&&same(prior.state,state)) return json({revision:prior.revision});
   const returning = { revision: learnerStates.revision };

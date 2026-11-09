@@ -5,6 +5,7 @@ import { getDb } from "@/db";
 import { learnerStates, teacherFeedback, teacherLessons } from "@/db/schema";
 import { getExercises, type Lesson } from "@/app/curriculum";
 import { targets, overallTarget } from "@/app/goals";
+import { listRecoverable } from "./recording-recovery";
 import { initial, oldResults, part3, writings, type Ledger } from "@/app/ledger";
 
 const text = (max: number, description: string) => z.string().trim().min(1).max(max).describe(description);
@@ -55,7 +56,7 @@ function compatibleLesson(value:unknown):unknown {
 }
 const dayNumber = z.number().int().min(1).max(62);
 const stageName = z.enum(["speak","vocab","listen","read","write","review"]);
-const readSpec = z.strictObject({ day: dayNumber.optional().describe("Day to inspect; defaults to the current day. Only started days are accessible.") });
+const readSpec = z.strictObject({ inspectUnlinkedRecordings:z.boolean().optional().describe("Check for this account’s uploaded but unlinked audio for the active question. Legacy matches are time-window candidates requiring learner audition."), day: dayNumber.optional().describe("Day to inspect; defaults to the current day. Only started days are accessible.") });
 const feedbackSpec = z.strictObject({
   day: dayNumber, stage: stageName, feedback: text(6000, "Specific coaching feedback addressed to the learner."),
   evidence: text(2000, "Identify the submitted text or audible sample, its conditions, and evidence used. No pronunciation assessment from text."),
@@ -140,14 +141,20 @@ function question(ledger:Ledger,lesson:Lesson|undefined) {
   return { ...(stage==="read" ? {passage:lesson.passage} : {source: "https://learnenglish.britishcouncil.org/free-resources/listening/c1/"+lesson.slug}),prompt:item.prompt,choices:item.choices};
 }
 
-async function studySession(userId:string, selected?:number) {
+async function studySession(userId:string, selected?:number, inspect=false) {
   const {revision, ledger} = await checkpoint(userId);
   const day = selected ?? ledger.day;
   requireStarted(day,ledger);
   const lesson = getExercises(ledger.day) ??
     (await getDb().select({lesson:teacherLessons.lesson}).from(teacherLessons)
       .where(and(eq(teacherLessons.userId,userId),eq(teacherLessons.day,ledger.day))).get())?.lesson;
-  return {revision, targets:{...targets,Overall:overallTarget}, checkpoint:{day:ledger.day,stage:ledger.stage,finished:ledger.finished,
+  const phase=ledger.entries[day]?.speakingPhase || (day===11?"followup":"part2");
+  let recovery;
+  if(inspect&&day===ledger.day&&ledger.stage==="speak"&&!ledger.finished&&(phase==="part2"||phase==="followup")){
+    try{if(!env.BUCKET)throw Error();recovery=await listRecoverable(env.BUCKET,userId,ledger,day,phase);}
+    catch{recovery={phase,items:[],complete:false,error:"lookup_unavailable"};}
+  }
+  return {...(recovery?{recordingRecovery:recovery}:{}),revision, targets:{...targets,Overall:overallTarget}, checkpoint:{day:ledger.day,stage:ledger.stage,finished:ledger.finished,
     completed:ledger.completed,started:ledger.started,checked:ledger.checked,exam:ledger.exam}, day,
     entry:ledger.entries[day]??{}, history:oldResults[day]??[],
     ...writings[day] && {writingSamples:{original:writings[day][0],revision:writings[day][1]}},
@@ -179,7 +186,7 @@ async function encoded(file:R2ObjectBody) {
 export async function callCoach(userId:string, name:string, args:unknown) {
   try {
     switch(name) {
-      case "read_study_session": return content(await studySession(userId,readSpec.parse(args).day));
+      case "read_study_session": {const q=readSpec.parse(args);return content(await studySession(userId,q.day,q.inspectUnlinkedRecordings));}
       case "add_coach_feedback": {
         const {recordingId,pronunciation,...values}=feedbackSpec.parse(args);
         if(pronunciation&&!recordingId)throw new CoachError("A pronunciation rating requires a submitted recording you actually heard. For text or self-report, leave pronunciation unassessed.");
