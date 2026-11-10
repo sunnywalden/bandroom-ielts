@@ -23,8 +23,14 @@ const d1={prepare:(query)=>statement(query),async batch(statements){
   catch(error){sql.exec('ROLLBACK');throw error}
 }};
 globalThis.testDb={$client:d1};
+const recordingBytes=Buffer.from('0123456789abcdef');
+globalThis.testBucket={
+  async head(){return {size:recordingBytes.length,customMetadata:{digest:'d'.repeat(64)},httpMetadata:{contentType:'audio/webm'}}},
+  async get(key,options){const offset=options?.range?.offset??0,length=options?.range?.length??recordingBytes.length;const slice=recordingBytes.subarray(offset,offset+length);return {arrayBuffer:async()=>slice.buffer.slice(slice.byteOffset,slice.byteOffset+slice.byteLength)}},
+};
 registerHooks({resolve(specifier,context,next){
   if(specifier==='@/db')return {url:'data:text/javascript,export function getDb(){return globalThis.testDb}',shortCircuit:true};
+  if(specifier==='cloudflare:workers')return {url:'data:text/javascript,export const env={get BUCKET(){return globalThis.testBucket}}',shortCircuit:true};
   if(specifier.startsWith('./')&&!specifier.endsWith('.ts')&&context.parentURL?.endsWith('.ts'))
     return {url:new URL(specifier+'.ts',context.parentURL).href,shortCircuit:true};
   return next(specifier,context);
@@ -106,6 +112,12 @@ eq(text(foreign).code ?? text(foreign).error,'task_not_found','other completion 
 reset();
 const speakingJob=insertJob({kind:'speaking',recordingId:randomUUID(),stage:'speak'});
 await callReviewTool(owner,'claim_review_tasks',{limit:1,clientRunId:'run-speak'});
+const chunk=text(await callReviewTool(owner,'read_review_recording',{taskId:speakingJob.taskId,fence:1,offset:0,length:4}));
+eq([chunk.offset,chunk.length,chunk.total,chunk.nextOffset],[0,4,16,4],'recording range');
+eq(chunk.base64,Buffer.from('0123').toString('base64'),'recording base64');
+eq(chunk.sha256,'d'.repeat(64),'recording digest');
+eq((await callReviewTool(owner,'read_review_recording',{taskId:speakingJob.taskId,fence:2,offset:0,length:4})).isError,true,'stale fence recording');
+eq((await callReviewTool(other,'read_review_recording',{taskId:speakingJob.taskId,fence:1,offset:0,length:4})).isError,true,'other owner recording');
 const missing=await callReviewTool(owner,'complete_review_task',{
   taskId:speakingJob.taskId,fence:1,feedback:'Speech',evidence:'Speech',
 });

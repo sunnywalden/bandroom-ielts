@@ -1,4 +1,5 @@
 import { z } from "zod/v4";
+import { env } from "cloudflare:workers";
 import { getDb } from "@/db";
 import {
   claimReviewTasks, completeReviewTask, failReviewTask, getReviewTask, readReviewReceipt,
@@ -53,6 +54,11 @@ const completeSpec = z.strictObject({
   pronunciation: pronunciationSpec.optional(),
   payload: z.record(z.string(), z.unknown()).optional(),
 });
+const recordingSpec = z.strictObject({
+  taskId, fence,
+  offset: z.number().int().min(0).max(12 * 1024 * 1024),
+  length: z.number().int().min(1).max(256 * 1024).optional(),
+});
 const receiptSpec = z.strictObject({ taskId });
 const heartbeatSpec = z.strictObject({
   automationId: z.string().trim().min(1).max(200),
@@ -80,6 +86,9 @@ export const reviewTools = [
   },
   {
     name: "complete_review_task", description: "Complete one claimed task and write the feedback plus an immutable receipt. Bind to the task's exact attempt and current fence. Replaying the same output returns the original receipt; different output is rejected.", schema: completeSpec, readOnly: false,
+  },
+  {
+    name: "read_review_recording", description: "Read one bounded byte range of the original recording bound to a claimed speaking task. Verifies owner, fence, lease and R2 digest; never returns a public URL.", schema: recordingSpec, readOnly: true,
   },
   {
     name: "read_review_receipt", description: "Read the immutable completion receipt for one owner task, if it exists.", schema: receiptSpec, readOnly: true,
@@ -189,6 +198,35 @@ export async function callReviewTool(userId: string, name: string, args: unknown
         return { content: [{ type: "text", text: JSON.stringify({
           receiptId: completed.receipt.id, feedbackId: completed.receipt.feedbackId,
           createdAt: completed.receipt.createdAt, duplicate: completed.duplicate,
+        }) }] };
+      }
+      case "read_review_recording": {
+        const input = recordingSpec.parse(args);
+        const task = await getReviewTask(db, userId, input.taskId);
+        if (!task) throw new ReviewTaskError("task_not_found", "The task is not available to this account.");
+        if (task.kind !== "speaking" || !task.recordingId)
+          throw new ReviewTaskError("not_speaking", "Only speaking tasks with a submitted recording expose audio.");
+        if (task.state !== "running" || task.fence !== input.fence || (task.leaseUntil ?? 0) <= Date.now())
+          throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
+        const bucket = env.BUCKET;
+        if (!bucket) throw new ReviewTaskError("recordings_unavailable", "Private recording storage is unavailable.");
+        const key = `speaking/${encodeURIComponent(userId)}/${task.recordingId}`;
+        const metadata = await bucket.head(key);
+        if (!metadata) throw new ReviewTaskError("recording_missing", "The original recording is unavailable.");
+        if (input.offset >= metadata.size) throw new ReviewTaskError("range_invalid", "The byte offset exceeds the recording.");
+        const length = Math.min(input.length ?? 128 * 1024, metadata.size - input.offset);
+        const file = await bucket.get(key, { range: { offset: input.offset, length } });
+        if (!file) throw new ReviewTaskError("recording_missing", "The original recording is unavailable.");
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        let binary = "";
+        for (let index = 0; index < bytes.length; index += 8192)
+          binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
+        return { content: [{ type: "text", text: JSON.stringify({
+          taskId: task.id, recordingId: task.recordingId, offset: input.offset, length: bytes.length,
+          total: metadata.size, nextOffset: input.offset + bytes.length < metadata.size ? input.offset + bytes.length : null,
+          sha256: metadata.customMetadata?.digest ?? null,
+          mimeType: metadata.httpMetadata?.contentType ?? "application/octet-stream",
+          base64: btoa(binary),
         }) }] };
       }
       case "read_review_receipt": {
