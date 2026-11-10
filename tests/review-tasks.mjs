@@ -19,19 +19,19 @@ function statement(query,args=[]){
     bind:(...values)=>statement(query,[...args,...values]),
     async first(){const s=sql.prepare(query);const row=s.all(...args)[0];return row?{...row}:null},
     async all(){const s=sql.prepare(query);return {results:s.all(...args).map(row=>({...row}))}},
-    async run(){const s=sql.prepare(query);const info=s.run(...args);return {meta:{changes:Number(info.changes)}}},
+    run(){const s=sql.prepare(query);const results=s.all(...args);return {results,meta:{changes:Number(sql.prepare("SELECT changes() AS n").get().n)}}},
   };
 }
 const d1={
   prepare:(query)=>statement(query),
   async batch(statements){
     sql.exec('BEGIN');
-    try{const results=[];for(const s of statements)results.push(await s.run());sql.exec('COMMIT');return results}
+    try{const results=statements.map(statement=>statement.run());sql.exec('COMMIT');return results}
     catch(error){sql.exec('ROLLBACK');throw error}
   },
 };
 
-const {claimReviewTasks,renewReviewLease,saveReviewCheckpoint,failReviewTask,completeReviewTask,
+const {claimReviewTasks,renewReviewLease,saveReviewCheckpoint,readReviewCheckpoint,failReviewTask,completeReviewTask,
   readReviewReceipt,listReviewTasks,recordAnalysisEvent,reportSchedulerHeartbeat,createReviewTaskStatement,
   ReviewTaskError}=await import('../lib/review-tasks.ts');
 
@@ -80,6 +80,8 @@ function reset(){sql.exec('DELETE FROM review_tasks; DELETE FROM review_jobs; DE
   eq(await claimReviewTasks(d1,owner,{now:1_000_000,limit:1,clientRunId:'run-2'}),[],'lease prevents duplicate claim');
   const renewed=await renewReviewLease(d1,owner,task.taskId,1,{now:1_000_000,extendMs:600_000});
   eq(renewed.leaseUntil,1_600_000,'renewed lease');
+  eq((await renewReviewLease(d1,owner,task.taskId,1,{now:1_000_001,extendMs:30_000})).leaseUntil,
+    1_600_000,'shorter heartbeat cannot reduce the current lease');
   await code(renewReviewLease(d1,owner,task.taskId,9,{now:1_000_000}),'stale_lease','old fence renew');
   await code(saveReviewCheckpoint(d1,owner,{taskId:task.taskId,fence:9,analysisVersion:'v1',stage:'decode',chunkIndex:0,inputSha256:'i',artifactSha256:'a',bytes:10}),'stale_lease','old fence checkpoint');
 }
@@ -105,6 +107,41 @@ function reset(){sql.exec('DELETE FROM review_tasks; DELETE FROM review_jobs; DE
   eq(exhausted.attempts,4,'attempts retained');
   eq(await claimReviewTasks(d1,owner,{now:2_000_000,limit:1,clientRunId:'run-3'}),[],'budget prevents claim');
   eq(row('SELECT state,last_error FROM review_tasks WHERE id=?',task.taskId),{state:'needs_attention',last_error:'processing_budget_exhausted'},'budget state');
+}
+
+// A failed pointer write rolls back the artifact. Replays preserve the latest
+// pointer and a new lease can recover both the latest and an earlier chunk.
+{
+  reset();
+  const task=insertTask(insertJob());
+  const now=1_000_000;
+  const key={taskId:task.taskId,fence:1,now};
+  const first={...key,analysisVersion:'v1',stage:'decode',chunkIndex:0,inputSha256:'input',artifactSha256:'first',bytes:10,payload:{offset:10}};
+  await claimReviewTasks(d1,owner,{now,limit:1,clientRunId:'run-a'});
+  eq(await readReviewCheckpoint(d1,owner,key),null,'empty checkpoint');
+  sql.exec("CREATE TRIGGER interrupt_pointer BEFORE UPDATE OF checkpoint_sha256 ON review_tasks BEGIN SELECT RAISE(ABORT,'interrupted'); END");
+  await assert.rejects(saveReviewCheckpoint(d1,owner,first),/interrupted/);
+  sql.exec('DROP TRIGGER interrupt_pointer');
+  eq(row('SELECT COUNT(*) n FROM analysis_artifacts WHERE task_id=?',task.taskId).n,0,'atomic rollback removes artifact');
+  const concurrent=await Promise.all([saveReviewCheckpoint(d1,owner,first),saveReviewCheckpoint(d1,owner,first)]);
+  eq(concurrent.map(result=>result.duplicate),[false,true],'concurrent replay creates one artifact');
+  const second={...first,chunkIndex:1,artifactSha256:'second',payload:{offset:20}};
+  await saveReviewCheckpoint(d1,owner,second);
+  eq((await saveReviewCheckpoint(d1,owner,first)).checkpointSha256,'second','old duplicate does not regress pointer');
+  await code(saveReviewCheckpoint(d1,owner,{...first,bytes:11}),'artifact_conflict','wrong size');
+  await code(saveReviewCheckpoint(d1,owner,{...first,inputSha256:'different'}),'artifact_conflict','wrong input hash');
+  await code(saveReviewCheckpoint(d1,owner,{...first,payload:{offset:99}}),'artifact_conflict','wrong payload under same hash');
+  await code(saveReviewCheckpoint(d1,owner,{...first,objectRef:'other'}),'artifact_conflict','wrong object reference under same hash');
+  await code(readReviewCheckpoint(d1,other,key),'stale_lease','checkpoint owner isolation');
+  const later=1_300_001;
+  await code(failReviewTask(d1,owner,{...key,now:later,code:'too_late',retryable:true}),'stale_lease','expired run cannot fail task');
+  await claimReviewTasks(d1,owner,{now:later,limit:1,clientRunId:'run-b'});
+  await code(readReviewCheckpoint(d1,owner,{...key,now:later}),'stale_lease','old fence cannot read checkpoint');
+  const resumed={...key,fence:2,now:later};
+  eq((await readReviewCheckpoint(d1,owner,resumed)).payload,{offset:20},'new run resumes latest checkpoint');
+  eq((await readReviewCheckpoint(d1,owner,{...resumed,stage:'decode',chunkIndex:0})).payload,{offset:10},'new run can read earlier chunk');
+  sql.prepare('UPDATE review_tasks SET checkpoint_sha256=NULL, analysis_version=NULL WHERE id=?').run(task.taskId);
+  eq(await saveReviewCheckpoint(d1,owner,{...second,...resumed}),{saved:true,duplicate:true,checkpointSha256:'second'},'matching replay repairs legacy partial write');
 }
 
 // expiry reclaim and completion idempotency/conflict
