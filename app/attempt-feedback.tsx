@@ -1,6 +1,8 @@
 'use client';
 import {createContext,useContext,useEffect,useState,type ReactNode} from 'react';
 import {feedbackFor,reviewAttempts,reviewRequest,type CoachFeedback,type ReviewAttempt,type ReviewLink,type ReviewTaskStatus} from './feedback-model';
+import {displayPhone} from './phonemes';
+import RecordingClipPlayer from './recording-clip-player';
 import './feedback.css';
 
 type Context = {attempts:ReviewAttempt[];feedback:CoachFeedback[];tasks:ReviewTaskStatus[];error:boolean;refresh:()=>void;ready:boolean;identificationFailed:boolean;retry:()=>void};
@@ -61,6 +63,24 @@ function taskBadge(task:ReviewTaskStatus|undefined) {
   return '后台排队';
 }
 
+const kindLabel:Record<string,string>={substitution:'替换',deletion:'漏音',addition:'添音'};
+function PronunciationErrors({analysis,recordingId}:{analysis:NonNullable<CoachFeedback['analysis']>;recordingId?:string}) {
+  const errors=analysis.errors??[];
+  if(!errors.length)return null;
+  return <div className="af-errors" aria-label="发音错误与回听">
+    {errors.map((error,index)=>{
+      const label=error.word??`词 ${error.wordIndex??index}`;
+      return <article className="af-error-card" key={`${index}:${error.wordIndex}:${error.phoneIndex}:${error.kind}:${error.target}:${error.actual}`}>
+        <div className="af-error-head"><strong>{label}</strong><span>{kindLabel[error.kind]??error.kind}</span></div>
+        <p className="af-error-ipa">目标 /{displayPhone(error.target)}/ · 实际 {error.actual==='∅'?'漏音':`/${displayPhone(error.actual)}/`}</p>
+        {error.probability!=null&&<small>校准后置信度 {Math.round(error.probability*100)}%</small>}
+        {recordingId
+          ? <RecordingClipPlayer recordingId={recordingId} startMs={error.startMs??error.anchorMs??0} endMs={error.endMs} anchorMs={error.anchorMs} label={label}/>
+          : <p className="af-hint">原录音引用不可用，无法定位回听。</p>}
+      </article>;
+    })}
+  </div>;
+}
 export default function AttemptFeedback({field,index=0}:{field:string;index?:number}) {
   const {attempts,feedback,tasks,error,refresh}=useContext(FeedbackContext);
   const attempt=attempts.find(a=>a.field===field&&a.index===index);
@@ -75,7 +95,9 @@ export default function AttemptFeedback({field,index=0}:{field:string;index?:num
     {!rows.length&&<QuickCheck attempt={attempt}/>}
     {!rows.length&&task&&<TaskState task={task}/>}
     <div aria-live="polite" aria-relevant="additions text">{rows.map(row=><article className="af-review" key={row.id}>
-      <p>{row.feedback}</p><details><summary>批改依据与时间</summary><p>{row.evidence}</p><time dateTime={row.createdAt}>{new Date(row.createdAt).toLocaleString('zh-CN')}</time></details>
+      <p>{row.feedback}</p>
+      {row.analysis&&<PronunciationErrors analysis={row.analysis} recordingId={attempt.recordingId}/>}
+      <details><summary>批改依据与时间</summary><p>{row.evidence}</p><time dateTime={row.createdAt}>{new Date(row.createdAt).toLocaleString('zh-CN')}</time></details>
     </article>)}</div>
     {!rows.length&&!task&&<><p className="af-hint">复制本题请求，粘贴到 Work 会话并发送。Work 写回后，留在这里或稍后重新打开本题都能看到结果。</p>
       <button type="button" className="secondary" onClick={async()=>{

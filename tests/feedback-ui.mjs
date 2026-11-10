@@ -16,6 +16,7 @@ window.scrollTo=()=>{};globalThis.IS_REACT_ACT_ENVIRONMENT=true;
 // JSDOM does not implement media playback; these tests inspect saved attempts.
 dom.window.HTMLMediaElement.prototype.pause=()=>{};
 dom.window.HTMLMediaElement.prototype.load=()=>{};
+dom.window.HTMLMediaElement.prototype.play=async()=>{};
 const {createElement,act}=await import('react'),{createRoot}=await import('react-dom/client');
 const {default:Studio}=await import('../.sites-runtime/tests/feedback-studio.mjs');
 const realInterval=globalThis.setInterval,realClear=globalThis.clearInterval;
@@ -249,4 +250,41 @@ test('automatic task status replaces the manual copy prompt until feedback arriv
  await tick();
  assert.match(section().textContent,/Automatic task correction/);
  assert.match(section().textContent,/批改已返回/);
+});
+
+test('completed acoustic feedback renders IPA, error kind and the exact clip window',async()=>{
+ state.entries[12].writeOriginal='Independent answer with a clear /s/ for think.';
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='writeOriginal');
+ assert.ok(source);
+ feedback=[{id:'fb-acoustic',day:12,stage:'write',attempt:source.id,evidence:'Acoustic fixture',feedback:'注意 think 的词首音。',createdAt:'2026-11-09T01:00:00Z',analysis:{errors:[{wordIndex:0,phoneIndex:0,kind:'substitution',target:'TH',actual:'S',word:'think',startMs:1000,endMs:1100,probability:.92}]}}];
+ await mount();
+ const section=document.querySelector('[aria-label="写作首稿反馈"]');
+ assert.ok(section);
+ assert.ok(section.querySelector('[aria-label="发音错误与回听"]'));
+ assert.match(section.textContent,/think/);
+ assert.match(section.textContent,/θ/);
+ assert.match(section.textContent,/替换/);
+ assert.match(section.textContent,/92%/);
+ assert.match(section.textContent,/原录音引用不可用/);
+});
+
+test('speaking acoustic card seeks the original recording window',async()=>{
+ const audioId='22222222-2222-4222-8222-222222222222';
+ state.stage='speak';
+ state.entries[12]={speakingPhase:'review',speakingComplete:'yes',
+  speakingPart2:JSON.stringify([{at:'2026-11-09T01:00:00Z',text:'Fixture Part 2',spoken:true,audio:audioId}]),
+  speakingFollowup:JSON.stringify([{at:'2026-11-09T01:02:00Z',text:'Fixture follow-up',spoken:true}])};
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='speakingPart2');
+ assert.ok(source);
+ feedback=[{id:'fb-speak',day:12,stage:'speak',attempt:source.id,evidence:'Acoustic speaking fixture',feedback:'回听这一处词首音。',createdAt:'2026-11-09T01:00:00Z',analysis:{errors:[{wordIndex:0,phoneIndex:0,kind:'substitution',target:'TH',actual:'S',word:'think',startMs:1000,endMs:1100,probability:.9}]}}];
+ await mount();
+ const section=document.querySelector('[aria-label="口语 Part 2 · 首次回答反馈"]');
+ assert.ok(section);
+ const play=button('回听 think');assert.ok(play);
+ await click(play);
+ const audio=section.querySelector('audio');
+ assert.ok(audio);assert.match(audio.src,/\/api\/audio\?id=/);
+ assert.equal(audio.currentTime,.5);
+ audio.currentTime=2;await act(async()=>audio.dispatchEvent(new Event('timeupdate')));
+ assert.equal(audio.currentTime,1.6);
 });

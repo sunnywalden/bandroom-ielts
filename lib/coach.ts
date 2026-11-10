@@ -93,14 +93,18 @@ const reviewToolNames = new Set(reviewTools.map(tool => tool.name));
 export const coachTools = [...coachingTools, ...reviewTools];
 
 const feedbackColumns = {id:teacherFeedback.id,day:teacherFeedback.day,stage:teacherFeedback.stage,
-  feedback:teacherFeedback.feedback,evidence:teacherFeedback.evidence,pronunciation:teacherFeedback.pronunciation,attempt:teacherFeedback.attempt,createdAt:teacherFeedback.createdAt};
+  feedback:teacherFeedback.feedback,evidence:teacherFeedback.evidence,pronunciation:teacherFeedback.pronunciation,analysisJson:teacherFeedback.analysisJson,attempt:teacherFeedback.attempt,createdAt:teacherFeedback.createdAt};
 
 async function reviews(userId:string, day?:number) {
   const rows=await getDb().select(feedbackColumns).from(teacherFeedback)
     .where(day === undefined ? eq(teacherFeedback.userId,userId)
       : and(eq(teacherFeedback.userId,userId),eq(teacherFeedback.day,day)))
     .orderBy(desc(teacherFeedback.createdAt),desc(teacherFeedback.id));
-  return rows.map(row=>row.pronunciation?{...row,evidence:row.evidence+` · 发音专项暂定 ${row.pronunciation.band.toFixed(1)}/9（本次录音）· ${row.pronunciation.observation}`}:row);
+  return rows.map(({analysisJson,...row})=>({
+    ...row,
+    ...(row.pronunciation?{evidence:row.evidence+` · 发音专项暂定 ${row.pronunciation.band.toFixed(1)}/9（本次录音）· ${row.pronunciation.observation}`}:{}),
+    ...(analysisJson?{analysis:analysisJson}:{}),
+  }));
 }
 export async function coachData(userId:string) {
   const [lessons,feedback,jobs,tasks] = await Promise.all([
