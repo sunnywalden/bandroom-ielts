@@ -10,6 +10,7 @@ import { frozenReviews } from "./review-jobs";
 import { reviewContext } from "./review-context";
 import { listRecoverable } from "./recording-recovery";
 import { initial, oldResults, part3, writings, type Ledger } from "@/app/ledger";
+import { callReviewTool, reviewTools } from "./review-tools";
 
 const text = (max: number, description: string) => z.string().trim().min(1).max(max).describe(description);
 const term = text(160, "English word, phrase or collocation.");
@@ -80,13 +81,16 @@ const recordingSpec = z.strictObject({
 
 });
 
-export const coachTools = [
+const coachingTools = [
   {name:"read_study_session",description:"Read canonical reviewAttempts IDs, question context and pending reviews, plus the learner's checkpoint and selected day's saved answers and available original/revised writing, historical results, coach feedback and current small task. Audio references require read_speaking_recording. Never start or complete a day.",schema:readSpec,readOnly:true},
   {name:"add_coach_feedback",description:"Append a private, evidence-based review using its exact reviewAttempts[].id; the page automatically displays it beside that answer. Review one identified attempt for a started day. First use read_study_session or inspect the learner's actual submitted evidence. Never infer pronunciation from a transcript. Existing attempts and scores remain intact; identical retries are deduplicated.",schema:feedbackSpec,readOnly:false},
   {name:"publish_lesson",description:"Add one complete new lesson to this learner's private catalogue for Day 17–62. Verify the British Council source audio, transcript and q/a; use original reading material. Match the learner's exam pathway and budget. Use only after the learner requests preparation or expansion; this does not start the day. A published day cannot be replaced.",schema:publishSpec,readOnly:false},
   {name:"read_recording_bytes",description:"Code-capable clients: retrieve one bounded byte range of the learner's submitted recording, before decoding audio locally. Never display base64. Supply offset=0 for the first block and use nextOffset until null. Use this when an older read_speaking_recording schema lacks bytes mode.",schema:z.strictObject({day:dayNumber,recordingId:z.uuidv4(),offset:z.number().int().min(0).max(12*1024*1024),length:z.number().int().min(1).max(24576).optional()}),readOnly:true},
   {name:"read_speaking_recording",description:"Read a submitted recording. Use audio mode first. If the client omits the sound, retrieve metadata then bytes and reconstruct privately in a supported audio decoder. Technical verification or text alone cannot justify pronunciation or fluency ratings. Device-only recordings can be played in the recording browser.",schema:recordingSpec,readOnly:true},
 ].map(({schema,readOnly,...tool})=>({...tool,inputSchema:z.toJSONSchema(schema),annotations:{readOnlyHint:readOnly,destructiveHint:false}}));
+
+const reviewToolNames = new Set(reviewTools.map(tool => tool.name));
+export const coachTools = [...coachingTools, ...reviewTools];
 
 const feedbackColumns = {id:teacherFeedback.id,day:teacherFeedback.day,stage:teacherFeedback.stage,
   feedback:teacherFeedback.feedback,evidence:teacherFeedback.evidence,pronunciation:teacherFeedback.pronunciation,attempt:teacherFeedback.attempt,createdAt:teacherFeedback.createdAt};
@@ -291,7 +295,9 @@ export async function callCoach(userId:string, name:string, args:unknown) {
         if(!file)throw new CoachError("Recording unavailable.");
         return {content:[{type:"text",text:JSON.stringify({...info,guidance:"If this client omits the audio block, use bytes mode in code tools to decode privately. Do not infer pronunciation from metadata."})},{type:"audio",data:await encoded(file),mimeType}]};
       }
-      default: return toolError("Unknown coaching tool.");
+      default:
+        if (reviewToolNames.has(name)) return callReviewTool(userId, name, args);
+        return toolError("Unknown coaching tool.");
     }
   } catch(error) {
     if (error instanceof z.ZodError) return toolError(error.issues.slice(0,5).map(i=>i.path.join(".")+" "+i.message).join(" | "));
