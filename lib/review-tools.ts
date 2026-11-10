@@ -4,7 +4,7 @@ import { getDb } from "@/db";
 import { createAnalysisBundleGrant } from "./analysis-bundle";
 import { validateSpeakingAnalysis } from "./speaking-analysis";
 import {
-  claimReviewTasks, completeReviewTask, failReviewTask, getReviewTask, readReviewReceipt,
+  claimReviewTasks, completeReviewTask, failReviewTask, getReviewTask, readReviewCheckpoint, readReviewReceipt,
   recordAnalysisEvent, renewReviewLease, reportSchedulerHeartbeat, saveReviewCheckpoint,
   ReviewTaskError, type ReviewTask, type ReviewTaskDb,
 } from "./review-tasks";
@@ -22,11 +22,13 @@ const renewSpec = z.strictObject({
   taskId, fence,
   extendMs: z.number().int().min(30_000).max(15 * 60_000).optional(),
 });
+const checkpointStage = z.enum(["read_input", "decode", "vad", "chunk", "acoustic", "align", "detect", "validate", "explain"]);
+const checkpointChunkIndex = z.number().int().min(0).max(100_000);
 const checkpointSpec = z.strictObject({
   taskId, fence,
   analysisVersion: z.string().trim().min(1).max(120),
-  stage: z.enum(["read_input", "decode", "vad", "chunk", "acoustic", "align", "detect", "validate", "explain"]),
-  chunkIndex: z.number().int().min(0).max(100_000),
+  stage: checkpointStage,
+  chunkIndex: checkpointChunkIndex,
   inputSha256: hex64,
   artifactSha256: hex64,
   bytes: z.number().int().min(0).max(64 * 1024 * 1024),
@@ -34,6 +36,12 @@ const checkpointSpec = z.strictObject({
   objectRef: z.string().trim().max(500).nullable().optional(),
   payload: z.record(z.string(), z.unknown()).optional(),
 });
+const checkpointReadSpec = z.strictObject({
+  taskId, fence,
+  stage: checkpointStage.optional(),
+  chunkIndex: checkpointChunkIndex.optional(),
+}).refine(input => (input.stage === undefined) === (input.chunkIndex === undefined),
+  "Provide both stage and chunkIndex to retrieve a specific checkpoint.");
 const failSpec = z.strictObject({
   taskId, fence,
   code: z.string().trim().min(1).max(120),
@@ -62,7 +70,7 @@ const recordingSpec = z.strictObject({
   offset: z.number().int().min(0).max(12 * 1024 * 1024),
   length: z.number().int().min(1).max(256 * 1024).optional(),
 });
-const receiptSpec = z.strictObject({ taskId });
+const receiptSpec = z.strictObject({ taskId, clientRunId: clientRunId.optional() });
 const heartbeatSpec = z.strictObject({
   automationId: z.string().trim().min(1).max(200),
   generation: z.number().int().min(0),
@@ -85,6 +93,9 @@ export const reviewTools = [
     name: "save_review_checkpoint", description: "Persist one analyzer-versioned checkpoint artifact for a claimed task. The same chunk and version are idempotent; a different digest is rejected.", schema: checkpointSpec, readOnly: false,
   },
   {
+    name: "read_review_checkpoint", description: "Read the current durable checkpoint for a claimed task, or supply stage and chunkIndex to read a specific checkpoint. Requires the current lease and fence. Verify artifact hashes before reuse.", schema: checkpointReadSpec, readOnly: true,
+  },
+  {
     name: "fail_review_task", description: "Record a classified failure. retryable=true moves the task to retry_wait with a persisted next time; false moves it to blocked. Never use this to hide missing acoustic evidence.", schema: failSpec, readOnly: false,
   },
   {
@@ -94,7 +105,7 @@ export const reviewTools = [
     name: "get_analysis_bundle", description: "Issue a short-lived, task/fence-bound URL for the fixed acoustic analysis bundle. The URL is private, expiring and must not be logged or shared; verify the SHA after download.", schema: bundleSpec, readOnly: true,
   },
   {
-    name: "read_review_recording", description: "Read one bounded byte range of the original recording bound to a claimed speaking task. Verifies owner, fence, lease and R2 digest; never returns a public URL.", schema: recordingSpec, readOnly: true,
+    name: "read_review_recording", description: "Read one bounded byte range of the original recording bound to a claimed speaking task. Verify the reassembled SHA-256 before analysis. If a transient read failure persists, call fail_review_task with its error code and retryable=true.", schema: recordingSpec, readOnly: true,
   },
   {
     name: "read_review_receipt", description: "Read the immutable completion receipt for one owner task, if it exists.", schema: receiptSpec, readOnly: true,
@@ -120,8 +131,12 @@ async function snapshotFor(db: ReviewTaskDb, userId: string, task: ReviewTask) {
 }
 
 function toolError(error: unknown) {
-  if (error instanceof ReviewTaskError)
-    return { content: [{ type: "text", text: JSON.stringify({ error: error.code }) }], isError: true };
+  if (error instanceof ReviewTaskError) {
+    const payload = error.code === "recording_read_failed" || error.code === "recording_range_truncated"
+      ? { error: error.code, retryable: true }
+      : { error: error.code };
+    return { content: [{ type: "text", text: JSON.stringify(payload) }], isError: true };
+  }
   throw error;
 }
 
@@ -157,16 +172,29 @@ export async function callReviewTool(userId: string, name: string, args: unknown
         });
         await recordAnalysisEvent(db, {
           taskId: input.taskId, fence: input.fence, event: "save_review_checkpoint",
-          stage: input.stage, outcome: "ok", metadata: { chunkIndex: input.chunkIndex, analysisVersion: input.analysisVersion },
+          stage: input.stage, outcome: saved.duplicate ? "duplicate" : "ok",
+          metadata: { chunkIndex: input.chunkIndex, analysisVersion: input.analysisVersion,
+            inputSha256: input.inputSha256, artifactSha256: input.artifactSha256, bytes: input.bytes },
         });
         return { content: [{ type: "text", text: JSON.stringify(saved) }] };
+      }
+      case "read_review_checkpoint": {
+        const input = checkpointReadSpec.parse(args);
+        const checkpoint = await readReviewCheckpoint(db, userId, input);
+        await recordAnalysisEvent(db, {
+          taskId: input.taskId, fence: input.fence, event: "read_review_checkpoint",
+          stage: checkpoint?.stage, outcome: checkpoint ? "ok" : "missing",
+          metadata: checkpoint ? { chunkIndex: checkpoint.chunkIndex, analysisVersion: checkpoint.analysisVersion,
+            inputSha256: checkpoint.inputSha256, artifactSha256: checkpoint.artifactSha256, bytes: checkpoint.bytes } : null,
+        });
+        return { content: [{ type: "text", text: JSON.stringify({ checkpoint }) }] };
       }
       case "fail_review_task": {
         const input = failSpec.parse(args);
         const task = await failReviewTask(db, userId, input);
         await recordAnalysisEvent(db, {
           taskId: input.taskId, fence: input.fence, event: "fail_review_task", stage: task.stage,
-          outcome: input.retryable ? "retry_wait" : "blocked", metadata: { code: input.code },
+          outcome: task.state, metadata: { code: input.code, nextAt: task.nextAt },
         });
         return { content: [{ type: "text", text: JSON.stringify(task) }] };
       }
@@ -216,7 +244,7 @@ export async function callReviewTool(userId: string, name: string, args: unknown
         });
         await recordAnalysisEvent(db, {
           taskId: input.taskId, fence: input.fence, event: "complete_review_task", stage: "finalize",
-          outcome: completed.duplicate ? "duplicate" : "completed",
+          outcome: completed.duplicate ? "duplicate" : "ok",
           metadata: { receiptId: completed.receipt.id, feedbackId: completed.receipt.feedbackId },
         });
         return { content: [{ type: "text", text: JSON.stringify({
@@ -240,20 +268,44 @@ export async function callReviewTool(userId: string, name: string, args: unknown
         const bucket = env.BUCKET;
         if (!bucket) throw new ReviewTaskError("recordings_unavailable", "Private recording storage is unavailable.");
         const key = `speaking/${encodeURIComponent(userId)}/${task.recordingId}`;
-        const metadata = await bucket.head(key);
-        if (!metadata) throw new ReviewTaskError("recording_missing", "The original recording is unavailable.");
-        if (input.offset >= metadata.size) throw new ReviewTaskError("range_invalid", "The byte offset exceeds the recording.");
-        const length = Math.min(input.length ?? 128 * 1024, metadata.size - input.offset);
-        const file = await bucket.get(key, { range: { offset: input.offset, length } });
-        if (!file) throw new ReviewTaskError("recording_missing", "The original recording is unavailable.");
-        const bytes = new Uint8Array(await file.arrayBuffer());
+        const read = async () => {
+          const metadata = await bucket.head(key);
+          if (!metadata) throw new ReviewTaskError("recording_missing", "The original recording is unavailable.");
+          if (input.offset >= metadata.size) throw new ReviewTaskError("range_invalid", "The byte offset exceeds the recording.");
+          const length = Math.min(input.length ?? 128 * 1024, metadata.size - input.offset);
+          const file = await bucket.get(key, { range: { offset: input.offset, length } });
+          if (!file) throw new ReviewTaskError("recording_missing", "The original recording is unavailable.");
+          const sha256 = metadata.customMetadata?.digest ?? null;
+          if (file.etag && metadata.etag && file.etag !== metadata.etag)
+            throw new ReviewTaskError("recording_changed", "The original recording changed while it was being read.");
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          if (bytes.length !== length)
+            throw new ReviewTaskError("recording_range_truncated", "The private store returned an incomplete byte range.");
+          return { metadata, sha256, bytes };
+        };
+        const { metadata, sha256, bytes } = await read().catch(async error => {
+          const failure = error instanceof ReviewTaskError ? error :
+            new ReviewTaskError("recording_read_failed", "The private recording could not be read. Retry this byte range.");
+          await recordAnalysisEvent(db, {
+            taskId: task.id, fence: input.fence, event: "read_review_recording", stage: "read_input", outcome: "error",
+            metadata: { code: failure.code, offset: input.offset },
+          });
+          throw failure;
+        });
+        const current = await getReviewTask(db, userId, input.taskId);
+        if (!current || current.state !== "running" || current.fence !== input.fence || (current.leaseUntil ?? 0) <= Date.now())
+          throw new ReviewTaskError("stale_lease", "The task lease expired while reading the recording.");
+        await recordAnalysisEvent(db, {
+          taskId: task.id, fence: input.fence, event: "read_review_recording", stage: "read_input", outcome: "ok",
+          metadata: { recordingId: task.recordingId, offset: input.offset, length: bytes.length, total: metadata.size, sha256 },
+        });
         let binary = "";
         for (let index = 0; index < bytes.length; index += 8192)
           binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
         return { content: [{ type: "text", text: JSON.stringify({
           taskId: task.id, recordingId: task.recordingId, offset: input.offset, length: bytes.length,
           total: metadata.size, nextOffset: input.offset + bytes.length < metadata.size ? input.offset + bytes.length : null,
-          sha256: metadata.customMetadata?.digest ?? null,
+          sha256,
           mimeType: metadata.httpMetadata?.contentType ?? "application/octet-stream",
           base64: btoa(binary),
         }) }] };
@@ -261,6 +313,13 @@ export async function callReviewTool(userId: string, name: string, args: unknown
       case "read_review_receipt": {
         const input = receiptSpec.parse(args);
         const receipt = await readReviewReceipt(db, userId, input.taskId);
+        if (receipt && input.clientRunId) {
+          const task = await getReviewTask(db, userId, input.taskId);
+          await recordAnalysisEvent(db, {
+            taskId: input.taskId, fence: task?.fence, event: "read_review_receipt", stage: "finalize",
+            clientRunId: input.clientRunId, outcome: "ok", metadata: { receiptId: receipt.id, feedbackId: receipt.feedbackId },
+          });
+        }
         return { content: [{ type: "text", text: JSON.stringify(receipt) }] };
       }
       case "report_scheduler_heartbeat": {

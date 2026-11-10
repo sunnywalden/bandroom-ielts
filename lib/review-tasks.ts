@@ -164,7 +164,7 @@ export async function renewReviewLease(db: D1Like, userId: string, taskId: strin
 } = {}) {
   const now = options.now ?? Date.now();
   const extendMs = Math.max(30_000, options.extendMs ?? LEASE_MS);
-  const row = await db.prepare(`UPDATE review_tasks SET lease_until=?, updated_at=?
+  const row = await db.prepare(`UPDATE review_tasks SET lease_until=MAX(lease_until, ?), updated_at=?
     WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?
     RETURNING lease_until AS leaseUntil`)
     .bind(now + extendMs, now, taskId, userId, fence, now).first<{ leaseUntil: number }>();
@@ -178,45 +178,81 @@ export async function saveReviewCheckpoint(db: D1Like, userId: string, input: {
   objectRef?: string | null; payload?: Record<string, unknown>; now?: number;
 }) {
   const now = input.now ?? Date.now();
-  const task = await db.prepare(`SELECT ${taskColumns} FROM review_tasks
-    WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?`)
-    .bind(input.taskId, userId, input.fence, now).first<Record<string, unknown>>();
-  const current = toTask(task);
+  const lease = [input.taskId, userId, input.fence, now];
+  const key = [input.taskId, input.stage, input.chunkIndex, input.analysisVersion];
+  const objectRef = input.objectRef ?? null;
+  const payloadJson = JSON.stringify(input.payload ?? {});
+  const active = "id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?";
+  const artifact = "task_id=? AND stage=? AND chunk_index=? AND analyzer_version=?";
+  const [insert, , readback] = await db.batch([
+    db.prepare(`INSERT INTO analysis_artifacts
+      (task_id, stage, chunk_index, analyzer_version, input_sha256, artifact_sha256, bytes, object_ref, payload_json, created_at)
+      SELECT ?,?,?,?,?,?,?,?,?,? WHERE EXISTS (
+        SELECT 1 FROM review_tasks WHERE ${active} AND (analysis_version IS NULL OR analysis_version=?)
+      )
+      ON CONFLICT(task_id, stage, chunk_index, analyzer_version) DO NOTHING`)
+      .bind(...key, input.inputSha256, input.artifactSha256, input.bytes,
+        objectRef, payloadJson, now, ...lease, input.analysisVersion),
+    // A matching replay can repair an old artifact whose task pointer was never written.
+    db.prepare(`UPDATE review_tasks
+      SET stage=?, checkpoint_sha256=?, coverage=COALESCE(?, coverage),
+          analysis_version=COALESCE(analysis_version, ?), lease_until=MAX(lease_until, ?), updated_at=?
+      WHERE ${active} AND (analysis_version IS NULL OR analysis_version=?)
+        AND (changes()=1 OR (checkpoint_sha256 IS NULL AND EXISTS (
+          SELECT 1 FROM analysis_artifacts WHERE ${artifact} AND input_sha256=? AND artifact_sha256=? AND bytes=?
+            AND object_ref IS ? AND payload_json=?
+        )))`)
+      .bind(input.stage, input.artifactSha256, input.coverage ?? null, input.analysisVersion,
+        now + LEASE_MS, now, ...lease, input.analysisVersion, ...key,
+        input.inputSha256, input.artifactSha256, input.bytes, objectRef, payloadJson),
+    db.prepare(`SELECT analysis_version AS analysisVersion, checkpoint_sha256 AS checkpointSha256,
+        a.input_sha256 AS inputSha256, a.artifact_sha256 AS artifactSha256, a.bytes,
+        a.object_ref AS objectRef, a.payload_json AS payloadJson
+      FROM review_tasks LEFT JOIN analysis_artifacts a
+        ON a.task_id=review_tasks.id AND a.stage=? AND a.chunk_index=? AND a.analyzer_version=?
+      WHERE review_tasks.id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?`)
+      .bind(input.stage, input.chunkIndex, input.analysisVersion, ...lease),
+  ]) as [
+    { meta?: { changes?: number } },
+    unknown,
+    { results?: Array<{
+      analysisVersion: string | null; checkpointSha256: string | null;
+      inputSha256: string | null; artifactSha256: string | null; bytes: number | null;
+      objectRef: string | null; payloadJson: string | null;
+    }> },
+  ];
+  const current = readback.results?.[0];
   if (!current) throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
-  if (current.analysisVersion && current.analysisVersion !== input.analysisVersion)
+  if (current.analysisVersion !== null && current.analysisVersion !== input.analysisVersion)
     throw new ReviewTaskError("analysis_version_mismatch", "Checkpoints cannot mix analyzer versions.");
+  if (current.inputSha256 !== input.inputSha256 || current.artifactSha256 !== input.artifactSha256 ||
+      current.bytes !== input.bytes || current.objectRef !== objectRef || current.payloadJson !== payloadJson)
+    throw new ReviewTaskError("artifact_conflict", "A different artifact already exists for this chunk.");
+  return { saved: true, duplicate: insert.meta?.changes !== 1, checkpointSha256: current.checkpointSha256 };
+}
 
-  const existing = await db.prepare(`SELECT artifact_sha256 AS artifactSha256, bytes
-    FROM analysis_artifacts WHERE task_id=? AND stage=? AND chunk_index=? AND analyzer_version=?`)
-    .bind(input.taskId, input.stage, input.chunkIndex, input.analysisVersion)
-    .first<{ artifactSha256: string; bytes: number }>();
-  if (existing) {
-    if (existing.artifactSha256 !== input.artifactSha256)
-      throw new ReviewTaskError("artifact_conflict", "A different artifact already exists for this chunk.");
-    return { saved: true, duplicate: true, checkpointSha256: current.checkpointSha256 ?? existing.artifactSha256 };
-  }
-
-  const inserted = await db.prepare(`INSERT INTO analysis_artifacts
-    (task_id, stage, chunk_index, analyzer_version, input_sha256, artifact_sha256, bytes, object_ref, payload_json, created_at)
-    SELECT ?,?,?,?,?,?,?,?,?,?
-    WHERE EXISTS (SELECT 1 FROM review_tasks WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?)`)
-    .bind(input.taskId, input.stage, input.chunkIndex, input.analysisVersion, input.inputSha256,
-      input.artifactSha256, input.bytes, input.objectRef ?? null, JSON.stringify(input.payload ?? {}),
-      now, input.taskId, userId, input.fence, now).run();
-  if (!(inserted.meta?.changes === 1)) throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
-
-  const updated = await db.prepare(`UPDATE review_tasks
-    SET stage=?, checkpoint_sha256=?, coverage=COALESCE(?, coverage),
-        analysis_version=COALESCE(analysis_version, ?), lease_until=?, updated_at=?
-    WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?
-      AND (analysis_version IS NULL OR analysis_version=?)
-    RETURNING ${taskColumns}`)
-    .bind(input.stage, input.artifactSha256, input.coverage ?? null, input.analysisVersion,
-      now + LEASE_MS, now, input.taskId, userId, input.fence, now, input.analysisVersion)
-    .first<Record<string, unknown>>();
-  const next = toTask(updated);
-  if (!next) throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
-  return { saved: true, duplicate: false, checkpointSha256: next.checkpointSha256 };
+export async function readReviewCheckpoint(db: D1Like, userId: string, input: {
+  taskId: string; fence: number; stage?: string; chunkIndex?: number; now?: number;
+}) {
+  const now = input.now ?? Date.now();
+  const current = input.stage === undefined;
+  const row = await db.prepare(`SELECT a.stage, a.chunk_index AS chunkIndex, a.analyzer_version AS analysisVersion,
+        a.input_sha256 AS inputSha256, a.artifact_sha256 AS artifactSha256, a.bytes,
+        a.object_ref AS objectRef, a.payload_json AS payloadJson
+      FROM review_tasks t LEFT JOIN analysis_artifacts a
+        ON a.task_id=t.id AND t.analysis_version=a.analyzer_version
+        AND ${current ? "a.stage=t.stage AND a.artifact_sha256=t.checkpoint_sha256" : "a.stage=? AND a.chunk_index=?"}
+      WHERE t.id=? AND t.user_id=? AND t.fence=? AND t.state='running' AND t.lease_until>?
+      ORDER BY a.created_at DESC, a.chunk_index DESC LIMIT 1`)
+    .bind(...(current ? [] : [input.stage, input.chunkIndex]), input.taskId, userId, input.fence, now)
+    .first<{
+      stage: string; chunkIndex: number; analysisVersion: string; inputSha256: string;
+      artifactSha256: string; bytes: number; objectRef: string | null; payloadJson: string | null;
+    }>();
+  if (!row) throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
+  if (row.payloadJson === null) return null;
+  const { payloadJson, ...checkpoint } = row;
+  return { ...checkpoint, payload: JSON.parse(payloadJson) as Record<string, unknown> };
 }
 
 export async function failReviewTask(db: D1Like, userId: string, input: {
@@ -227,9 +263,9 @@ export async function failReviewTask(db: D1Like, userId: string, input: {
   const nextAt = input.retryable ? (input.nextAt ?? now + 5 * 60_000) : now;
   const row = await db.prepare(`UPDATE review_tasks
     SET state=?, last_error=?, next_at=?, lease_until=NULL, updated_at=?
-    WHERE id=? AND user_id=? AND fence=? AND state='running'
+    WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?
     RETURNING ${taskColumns}`)
-    .bind(state, input.code, nextAt, now, input.taskId, userId, input.fence)
+    .bind(state, input.code, nextAt, now, input.taskId, userId, input.fence, now)
     .first<Record<string, unknown>>();
   const task = toTask(row);
   if (!task) throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
@@ -349,9 +385,13 @@ export async function recordAnalysisEvent(db: D1Like, input: {
 }) {
   await db.prepare(`INSERT INTO analysis_events
     (at, task_id, fence, event, stage, outcome, client_run_id, request_id, metadata_json)
-    VALUES (?,?,?,?,?,?,?,?,?)`)
+    VALUES (?,?,?,?,?,?,COALESCE(?,(
+      SELECT client_run_id FROM analysis_events WHERE task_id=? AND fence=? AND event='claim_review_tasks'
+      ORDER BY id DESC LIMIT 1
+    )),?,?)`)
     .bind(input.at ?? Date.now(), input.taskId ?? null, input.fence ?? null, input.event,
-      input.stage ?? null, input.outcome, input.clientRunId ?? null, input.requestId ?? null,
+      input.stage ?? null, input.outcome, input.clientRunId ?? null,
+      input.taskId ?? null, input.fence ?? null, input.requestId ?? null,
       input.metadata == null ? null : JSON.stringify(input.metadata)).run();
 }
 

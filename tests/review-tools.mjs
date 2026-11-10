@@ -14,7 +14,7 @@ function statement(query,args=[]){
     bind:(...values)=>statement(query,[...args,...values]),
     async first(){const s=sql.prepare(query);const row=s.all(...args)[0];return row?{...row}:null},
     async all(){const s=sql.prepare(query);return {results:s.all(...args).map(row=>({...row}))}},
-    async run(){const s=sql.prepare(query);const info=s.run(...args);return {meta:{changes:Number(info.changes)}}},
+    async run(){const s=sql.prepare(query);const results=s.all(...args);return {results,meta:{changes:Number(sql.prepare("SELECT changes() AS n").get().n)}}},
   };
 }
 const d1={prepare:(query)=>statement(query),async batch(statements){
@@ -87,6 +87,11 @@ const checkpoint=text(await callReviewTool(owner,'save_review_checkpoint',{
   inputSha256:'a'.repeat(64),artifactSha256:'b'.repeat(64),bytes:12,coverage:1,
 }));
 eq(checkpoint.saved,true,'checkpoint saved');
+const restored=text(await callReviewTool(owner,'read_review_checkpoint',{taskId:textJob.taskId,fence:1}));
+eq(restored.checkpoint.artifactSha256,'b'.repeat(64),'checkpoint readback digest');
+await assert.rejects(callReviewTool(owner,'read_review_checkpoint',{taskId:textJob.taskId,fence:1,stage:'read_input'}),/Provide both stage and chunkIndex/);
+const checkpointTrace=sql.prepare("SELECT client_run_id,metadata_json FROM analysis_events WHERE task_id=? AND event='read_review_checkpoint'").get(textJob.taskId);
+eq([checkpointTrace.client_run_id,JSON.parse(checkpointTrace.metadata_json).artifactSha256],['run-1','b'.repeat(64)],'checkpoint event bound to claim');
 
 // text cannot claim acoustic evidence
 const badText=await callReviewTool(owner,'complete_review_task',{
@@ -107,8 +112,9 @@ const replay=text(await callReviewTool(owner,'complete_review_task',{
   taskId:textJob.taskId,fence:1,feedback:'Text correction',evidence:'Text evidence',
 }));
 eq([replay.receiptId,replay.duplicate],[completed.receiptId,true],'replay same receipt');
-const receipt=text(await callReviewTool(owner,'read_review_receipt',{taskId:textJob.taskId}));
+const receipt=text(await callReviewTool(owner,'read_review_receipt',{taskId:textJob.taskId,clientRunId:'readback-run'}));
 eq(receipt.id,completed.receiptId,'read receipt');
+eq(sql.prepare("SELECT client_run_id FROM analysis_events WHERE task_id=? AND event='read_review_receipt'").get(textJob.taskId).client_run_id,'readback-run','explicit receipt run correlation');
 eq(sql.prepare('SELECT COUNT(*) n FROM teacher_feedback WHERE review_task_id=?').get(textJob.taskId).n,1,'one feedback');
 eq(sql.prepare('SELECT COUNT(*) n FROM review_receipts WHERE task_id=?').get(textJob.taskId).n,1,'one receipt');
 eq(sql.prepare('SELECT revision FROM learner_states WHERE user_id=?').get(owner).revision,21,'progress unchanged');
@@ -141,6 +147,18 @@ const chunk=text(await callReviewTool(owner,'read_review_recording',{taskId:spea
 eq([chunk.offset,chunk.length,chunk.total,chunk.nextOffset],[0,4,16,4],'recording range');
 eq(chunk.base64,Buffer.from('0123').toString('base64'),'recording base64');
 eq(chunk.sha256,'c'.repeat(64),'recording digest');
+const readRange={taskId:speakingJob.taskId,fence:1,offset:4,length:4};
+const originalGet=globalThis.testBucket.get;
+globalThis.testBucket.get=async()=>({arrayBuffer:async()=>new ArrayBuffer(1)});
+eq(text(await callReviewTool(owner,'read_review_recording',readRange)),{error:'recording_range_truncated',retryable:true},'reject truncated storage response');
+globalThis.testBucket.get=async()=>{throw new Error('R2 transient error');};
+eq(text(await callReviewTool(owner,'read_review_recording',readRange)),{error:'recording_read_failed',retryable:true},'classify transient storage response');
+globalThis.testBucket.get=originalGet;
+eq(text(await callReviewTool(owner,'read_review_recording',readRange)).base64,Buffer.from('4567').toString('base64'),'retry same range');
+const reads=sql.prepare("SELECT client_run_id,outcome,metadata_json FROM analysis_events WHERE task_id=? AND event='read_review_recording' ORDER BY id").all(speakingJob.taskId);
+eq(reads.map(row=>[row.client_run_id,row.outcome,JSON.parse(row.metadata_json).offset]),[
+  ['run-speak','ok',0],['run-speak','error',4],['run-speak','error',4],['run-speak','ok',4],
+],'range attempts correlated to exact claim');
 eq((await callReviewTool(owner,'read_review_recording',{taskId:speakingJob.taskId,fence:2,offset:0,length:4})).isError,true,'stale fence recording');
 eq((await callReviewTool(other,'read_review_recording',{taskId:speakingJob.taskId,fence:1,offset:0,length:4})).isError,true,'other owner recording');
 const missing=await callReviewTool(owner,'complete_review_task',{
