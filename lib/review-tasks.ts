@@ -321,6 +321,11 @@ export async function completeReviewTask(db: D1Like, userId: string, input: {
   return { receipt, duplicate: false };
 }
 
+export async function getReviewTask(db: D1Like, userId: string, taskId: string) {
+  return toTask(await db.prepare(`SELECT ${taskColumns} FROM review_tasks WHERE id=? AND user_id=?`)
+    .bind(taskId, userId).first<Record<string, unknown>>());
+}
+
 export async function readReviewReceipt(db: D1Like, userId: string, taskId: string) {
   return toReceipt(await db.prepare(`SELECT id, task_id AS taskId, user_id AS userId,
       attempt_id AS attemptId, attempt_revision AS attemptRevision, recording_sha256 AS recordingSha256,
