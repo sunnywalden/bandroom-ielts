@@ -1,4 +1,4 @@
-import { reviewAttempts, feedbackFor, type ReviewAttempt } from "@/app/feedback-model";
+import { reviewAttempts, feedbackFor } from "@/app/feedback-model";
 import { env } from "cloudflare:workers";
 import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod/v4";
