@@ -268,7 +268,7 @@ test('completed acoustic feedback renders IPA, error kind and the exact clip win
  assert.match(section.textContent,/原录音引用不可用/);
 });
 
-test('speaking acoustic card seeks the original recording window',async()=>{
+test('speaking acoustic card seeks, stops and retries the original recording window',async()=>{
  const audioId='22222222-2222-4222-8222-222222222222';
  state.stage='speak';
  state.entries[12]={speakingPhase:'review',speakingComplete:'yes',
@@ -280,11 +280,28 @@ test('speaking acoustic card seeks the original recording window',async()=>{
  await mount();
  const section=document.querySelector('[aria-label="口语 Part 2 · 首次回答反馈"]');
  assert.ok(section);
- const play=button('回听 think');assert.ok(play);
- await click(play);
  const audio=section.querySelector('audio');
- assert.ok(audio);assert.match(audio.src,/\/api\/audio\?id=/);
+ assert.ok(audio);
+ assert.equal(new URL(audio.src).searchParams.get('id'),audioId);
+ assert.equal(audio.preload,'none');
+ let starts=0,stops=0;
+ audio.play=async()=>{
+  starts++;
+  if(starts===1)throw new Error('fixture playback unavailable');
+ };
+ audio.pause=()=>{stops++};
+ await click(button('回听 think'));
+ assert.match(section.textContent,/原录音暂时无法播放/);
+ await click(button('重试回听 think'));
  assert.equal(audio.currentTime,.5);
+ await click(button('停止回听'));
+ assert.equal(starts,2);
+ assert.equal(stops,1);
+ await click(button('回听 think'));
+ assert.equal(starts,3);
  audio.currentTime=2;await act(async()=>audio.dispatchEvent(new Event('timeupdate')));
  assert.equal(audio.currentTime,1.6);
+ assert.equal(stops,2);
+ assert.ok(button('回听 think'));
+ assert.equal(puts().length,0);
 });
