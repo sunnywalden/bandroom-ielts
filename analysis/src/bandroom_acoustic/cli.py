@@ -41,6 +41,8 @@ def build_analysis(audio: str, *, analysis_version: str, ffmpeg: str = "ffmpeg")
     limitations = list(outcome.limitations)
     if state == "completed" and not chunks:
         state, reason = "failed", "chunk_plan_empty"
+    if decoded.priming_ms is None:
+        limitations.append("AAC priming is not independently measured; compare containerDurationMs with decodedDurationMs.")
     return {
         "schemaVersion": 1,
         "analysisVersion": analysis_version,
