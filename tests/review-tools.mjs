@@ -27,7 +27,7 @@ const recordingBytes=Buffer.from('0123456789abcdef');
 const bundleBytes=Buffer.from('analysis-bundle');
 const bundleManifest={version:'v1',bundleSha256:'e'.repeat(64),bytes:bundleBytes.length};
 globalThis.testBucket={
-  async head(key){const size=key.endsWith('manifest.json')?JSON.stringify(bundleManifest).length:key.includes('bundle.tar.zst')?bundleBytes.length:recordingBytes.length;return {size,customMetadata:{digest:'d'.repeat(64)},httpMetadata:{contentType:'audio/webm'}}},
+  async head(key){const size=key.endsWith('manifest.json')?JSON.stringify(bundleManifest).length:key.includes('bundle.tar.zst')?bundleBytes.length:recordingBytes.length;return {size,customMetadata:{digest:'c'.repeat(64)},httpMetadata:{contentType:'audio/webm'}}},
   async get(key,options){
     if(key.endsWith('manifest.json'))return {text:async()=>JSON.stringify(bundleManifest)};
     const source=key.includes('bundle.tar.zst')?bundleBytes:recordingBytes;
@@ -36,7 +36,7 @@ globalThis.testBucket={
     return {arrayBuffer:async()=>slice.buffer.slice(slice.byteOffset,slice.byteOffset+slice.byteLength),body:new Response(slice).body};
   },
 };
-globalThis.testEnv={BUCKET:globalThis.testBucket,ANALYSIS_SIGNING_KEY:'s'.repeat(32),ANALYSIS_BUNDLE_VERSION:'v1',BANDROOM_PUBLIC_ORIGIN:'https://fixture.example'};
+globalThis.testEnv={BUCKET:globalThis.testBucket,ANALYSIS_SIGNING_KEY:'s'.repeat(32),ANALYSIS_BUNDLE_VERSION:'v1',ANALYSIS_RELEASED_VERSIONS:'analysis-v1',BANDROOM_PUBLIC_ORIGIN:'https://fixture.example'};
 registerHooks({resolve(specifier,context,next){
   if(specifier==='@/db')return {url:'data:text/javascript,export function getDb(){return globalThis.testDb}',shortCircuit:true};
   if(specifier==='cloudflare:workers')return {url:'data:text/javascript,export const env=globalThis.testEnv',shortCircuit:true};
@@ -140,7 +140,7 @@ globalThis.testEnv.ANALYSIS_SIGNING_KEY='s'.repeat(32);
 const chunk=text(await callReviewTool(owner,'read_review_recording',{taskId:speakingJob.taskId,fence:1,offset:0,length:4}));
 eq([chunk.offset,chunk.length,chunk.total,chunk.nextOffset],[0,4,16,4],'recording range');
 eq(chunk.base64,Buffer.from('0123').toString('base64'),'recording base64');
-eq(chunk.sha256,'d'.repeat(64),'recording digest');
+eq(chunk.sha256,'c'.repeat(64),'recording digest');
 eq((await callReviewTool(owner,'read_review_recording',{taskId:speakingJob.taskId,fence:2,offset:0,length:4})).isError,true,'stale fence recording');
 eq((await callReviewTool(other,'read_review_recording',{taskId:speakingJob.taskId,fence:1,offset:0,length:4})).isError,true,'other owner recording');
 const missing=await callReviewTool(owner,'complete_review_task',{
@@ -150,6 +150,18 @@ eq(missing.isError,true,'speaking missing analysis');
 eq(text(missing).code ?? text(missing).error,'analysis_required','speaking analysis code');
 const baseAnalysis={schemaVersion:1,analysisVersion:'analysis-v1',inputSha256:'c'.repeat(64),
   decoded:{sampleRateHz:16000,sampleCount:16000},coverage:{analyzedSamples:[[0,16000]],fraction:1},state:'completed',errors:[]};
+const unreleased=await callReviewTool(owner,'complete_review_task',{
+  taskId:speakingJob.taskId,fence:1,feedback:'Speech',evidence:'Speech',
+  analysisVersion:'analysis-v2',recordingSha256:'c'.repeat(64),
+  analysis:{...baseAnalysis,analysisVersion:'analysis-v2'},
+});
+eq(unreleased.isError,true,'unreleased analysis rejected');eq(text(unreleased).error,'analysis_not_released','release gate code');
+const wrongRecording=await callReviewTool(owner,'complete_review_task',{
+  taskId:speakingJob.taskId,fence:1,feedback:'Speech',evidence:'Speech',
+  analysisVersion:'analysis-v1',recordingSha256:'e'.repeat(64),
+  analysis:{...baseAnalysis,inputSha256:'e'.repeat(64)},
+});
+eq(wrongRecording.isError,true,'wrong recording rejected');eq(text(wrongRecording).error,'recording_mismatch','recording digest code');
 const invalidCoverage=await callReviewTool(owner,'complete_review_task',{
   taskId:speakingJob.taskId,fence:1,feedback:'Speech',evidence:'Speech',
   analysisVersion:'analysis-v1',recordingSha256:'c'.repeat(64),
