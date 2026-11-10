@@ -2,6 +2,7 @@ import { z } from "zod/v4";
 import { env } from "cloudflare:workers";
 import { getDb } from "@/db";
 import { createAnalysisBundleGrant } from "./analysis-bundle";
+import { validateSpeakingAnalysis } from "./speaking-analysis";
 import {
   claimReviewTasks, completeReviewTask, failReviewTask, getReviewTask, readReviewReceipt,
   recordAnalysisEvent, renewReviewLease, reportSchedulerHeartbeat, saveReviewCheckpoint,
@@ -177,6 +178,14 @@ export async function callReviewTool(userId: string, name: string, args: unknown
           throw new ReviewTaskError("analysis_required", "A speaking task needs structured acoustic evidence and the original recording SHA-256.");
         if (task.kind === "text" && input.analysis)
           throw new ReviewTaskError("analysis_not_allowed", "Text-only tasks cannot claim acoustic evidence.");
+        const analysisVersion = input.analysisVersion ?? task.analysisVersion;
+        if (task.kind === "speaking") {
+          if (!analysisVersion) throw new ReviewTaskError("analysis_version_required", "A speaking completion needs an analysis version.");
+          const validation = validateSpeakingAnalysis(input.analysis, {
+            recordingSha256: input.recordingSha256!, analysisVersion,
+          });
+          if (!validation.ok) throw new ReviewTaskError("invalid_analysis", validation.errors.join("; "));
+        }
         const snapshot = await snapshotFor(db, userId, task);
         const attempt = snapshot.attempt as Record<string, unknown> | undefined;
         if (!attempt || typeof attempt.stage !== "string")
@@ -191,7 +200,7 @@ export async function callReviewTool(userId: string, name: string, args: unknown
           },
           receipt: {
             recordingSha256: input.recordingSha256 ?? null,
-            analysisVersion: input.analysisVersion ?? task.analysisVersion,
+            analysisVersion,
             payload: { ...input.payload, taskId: task.id, fence: input.fence },
           },
         });

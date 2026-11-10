@@ -148,9 +148,23 @@ const missing=await callReviewTool(owner,'complete_review_task',{
 });
 eq(missing.isError,true,'speaking missing analysis');
 eq(text(missing).code ?? text(missing).error,'analysis_required','speaking analysis code');
+const baseAnalysis={schemaVersion:1,analysisVersion:'analysis-v1',inputSha256:'c'.repeat(64),
+  decoded:{sampleRateHz:16000,sampleCount:16000},coverage:{analyzedSamples:[[0,16000]],fraction:1},state:'completed',errors:[]};
+const invalidCoverage=await callReviewTool(owner,'complete_review_task',{
+  taskId:speakingJob.taskId,fence:1,feedback:'Speech',evidence:'Speech',
+  analysisVersion:'analysis-v1',recordingSha256:'c'.repeat(64),
+  analysis:{...baseAnalysis,coverage:{analyzedSamples:[[0,8000]],fraction:0.5}},
+});
+eq(invalidCoverage.isError,true,'incomplete coverage rejected');eq(text(invalidCoverage).error,'invalid_analysis','coverage error code');
+const blockedAnalysis=await callReviewTool(owner,'complete_review_task',{
+  taskId:speakingJob.taskId,fence:1,feedback:'Speech',evidence:'Speech',
+  analysisVersion:'analysis-v1',recordingSha256:'c'.repeat(64),
+  analysis:{...baseAnalysis,state:'blocked',reason:'qualified_analyzer_unavailable'},
+});
+eq(blockedAnalysis.isError,true,'blocked analysis rejected');eq(text(blockedAnalysis).error,'invalid_analysis','blocked analysis code');
 const speaking=text(await callReviewTool(owner,'complete_review_task',{
   taskId:speakingJob.taskId,fence:1,feedback:'Speech',evidence:'Speech',
-  analysisVersion:'analysis-v1',recordingSha256:'c'.repeat(64),analysis:{errors:[]},
+  analysisVersion:'analysis-v1',recordingSha256:'c'.repeat(64),analysis:baseAnalysis,
 }));
 eq(speaking.duplicate,false,'speaking completion');
 
