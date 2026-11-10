@@ -24,19 +24,30 @@ const d1={prepare:(query)=>statement(query),async batch(statements){
 }};
 globalThis.testDb={$client:d1};
 const recordingBytes=Buffer.from('0123456789abcdef');
+const bundleBytes=Buffer.from('analysis-bundle');
+const bundleManifest={version:'v1',bundleSha256:'e'.repeat(64),bytes:bundleBytes.length};
 globalThis.testBucket={
-  async head(){return {size:recordingBytes.length,customMetadata:{digest:'d'.repeat(64)},httpMetadata:{contentType:'audio/webm'}}},
-  async get(key,options){const offset=options?.range?.offset??0,length=options?.range?.length??recordingBytes.length;const slice=recordingBytes.subarray(offset,offset+length);return {arrayBuffer:async()=>slice.buffer.slice(slice.byteOffset,slice.byteOffset+slice.byteLength)}},
+  async head(key){const size=key.endsWith('manifest.json')?JSON.stringify(bundleManifest).length:key.includes('bundle.tar.zst')?bundleBytes.length:recordingBytes.length;return {size,customMetadata:{digest:'d'.repeat(64)},httpMetadata:{contentType:'audio/webm'}}},
+  async get(key,options){
+    if(key.endsWith('manifest.json'))return {text:async()=>JSON.stringify(bundleManifest)};
+    const source=key.includes('bundle.tar.zst')?bundleBytes:recordingBytes;
+    const offset=options?.range?.offset??0,length=options?.range?.length??source.length;
+    const slice=source.subarray(offset,offset+length);
+    return {arrayBuffer:async()=>slice.buffer.slice(slice.byteOffset,slice.byteOffset+slice.byteLength),body:new Response(slice).body};
+  },
 };
+globalThis.testEnv={BUCKET:globalThis.testBucket,ANALYSIS_SIGNING_KEY:'s'.repeat(32),ANALYSIS_BUNDLE_VERSION:'v1',BANDROOM_PUBLIC_ORIGIN:'https://fixture.example'};
 registerHooks({resolve(specifier,context,next){
   if(specifier==='@/db')return {url:'data:text/javascript,export function getDb(){return globalThis.testDb}',shortCircuit:true};
-  if(specifier==='cloudflare:workers')return {url:'data:text/javascript,export const env={get BUCKET(){return globalThis.testBucket}}',shortCircuit:true};
+  if(specifier==='cloudflare:workers')return {url:'data:text/javascript,export const env=globalThis.testEnv',shortCircuit:true};
+  if(specifier.startsWith('@/'))return {url:new URL('../'+specifier.slice(2)+'.ts',import.meta.url).href,shortCircuit:true};
   if(specifier.startsWith('./')&&!specifier.endsWith('.ts')&&context.parentURL?.endsWith('.ts'))
     return {url:new URL(specifier+'.ts',context.parentURL).href,shortCircuit:true};
   return next(specifier,context);
 }});
 
 const {callReviewTool,reviewTools}=await import('../lib/review-tools.ts');
+const {GET:bundleGet}=await import('../app/api/analysis-bundle/route.ts');
 const owner='tool-owner',other='tool-other';
 let checks=0;
 function eq(actual,expected,label){assert.deepEqual(actual,expected,label);checks++}
@@ -112,6 +123,20 @@ eq(text(foreign).code ?? text(foreign).error,'task_not_found','other completion 
 reset();
 const speakingJob=insertJob({kind:'speaking',recordingId:randomUUID(),stage:'speak'});
 await callReviewTool(owner,'claim_review_tasks',{limit:1,clientRunId:'run-speak'});
+const grant=text(await callReviewTool(owner,'get_analysis_bundle',{taskId:speakingJob.taskId,fence:1}));
+eq([grant.version,grant.bytes],[ 'v1',bundleBytes.length],'bundle grant');
+const bundleUrl=new URL(grant.url);
+const full=await bundleGet(new Request(bundleUrl));
+eq(full.status,200,'bundle download');
+eq(await full.text(),'analysis-bundle','bundle body');
+const ranged=await bundleGet(new Request(bundleUrl,{headers:{Range:'bytes=0-3'}}));
+eq(ranged.status,206,'bundle range status');eq(await ranged.text(),'anal','bundle range body');
+eq((await bundleGet(new Request(bundleUrl,{headers:{Origin:'https://evil.example'}}))).status,403,'bundle origin rejected');
+eq((await bundleGet(new Request('https://fixture.example/api/analysis-bundle?token=abc.def'))).status,403,'invalid token rejected');
+globalThis.testEnv.ANALYSIS_SIGNING_KEY='';
+const unsigned=await callReviewTool(owner,'get_analysis_bundle',{taskId:speakingJob.taskId,fence:1});
+eq(unsigned.isError,true,'missing signing key');eq(text(unsigned).error,'bundle_signing_unavailable','signing error code');
+globalThis.testEnv.ANALYSIS_SIGNING_KEY='s'.repeat(32);
 const chunk=text(await callReviewTool(owner,'read_review_recording',{taskId:speakingJob.taskId,fence:1,offset:0,length:4}));
 eq([chunk.offset,chunk.length,chunk.total,chunk.nextOffset],[0,4,16,4],'recording range');
 eq(chunk.base64,Buffer.from('0123').toString('base64'),'recording base64');

@@ -1,6 +1,7 @@
 import { z } from "zod/v4";
 import { env } from "cloudflare:workers";
 import { getDb } from "@/db";
+import { createAnalysisBundleGrant } from "./analysis-bundle";
 import {
   claimReviewTasks, completeReviewTask, failReviewTask, getReviewTask, readReviewReceipt,
   recordAnalysisEvent, renewReviewLease, reportSchedulerHeartbeat, saveReviewCheckpoint,
@@ -54,6 +55,7 @@ const completeSpec = z.strictObject({
   pronunciation: pronunciationSpec.optional(),
   payload: z.record(z.string(), z.unknown()).optional(),
 });
+const bundleSpec = z.strictObject({ taskId, fence });
 const recordingSpec = z.strictObject({
   taskId, fence,
   offset: z.number().int().min(0).max(12 * 1024 * 1024),
@@ -86,6 +88,9 @@ export const reviewTools = [
   },
   {
     name: "complete_review_task", description: "Complete one claimed task and write the feedback plus an immutable receipt. Bind to the task's exact attempt and current fence. Replaying the same output returns the original receipt; different output is rejected.", schema: completeSpec, readOnly: false,
+  },
+  {
+    name: "get_analysis_bundle", description: "Issue a short-lived, task/fence-bound URL for the fixed acoustic analysis bundle. The URL is private, expiring and must not be logged or shared; verify the SHA after download.", schema: bundleSpec, readOnly: true,
   },
   {
     name: "read_review_recording", description: "Read one bounded byte range of the original recording bound to a claimed speaking task. Verifies owner, fence, lease and R2 digest; never returns a public URL.", schema: recordingSpec, readOnly: true,
@@ -199,6 +204,11 @@ export async function callReviewTool(userId: string, name: string, args: unknown
           receiptId: completed.receipt.id, feedbackId: completed.receipt.feedbackId,
           createdAt: completed.receipt.createdAt, duplicate: completed.duplicate,
         }) }] };
+      }
+      case "get_analysis_bundle": {
+        const input = bundleSpec.parse(args);
+        const grant = await createAnalysisBundleGrant(db, userId, input.taskId, input.fence);
+        return { content: [{ type: "text", text: JSON.stringify(grant) }] };
       }
       case "read_review_recording": {
         const input = recordingSpec.parse(args);
