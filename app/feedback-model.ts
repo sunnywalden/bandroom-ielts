@@ -7,6 +7,10 @@ export type ReviewAttempt = {
   evidence:string; recordingId?:string; at?:string; localOnly?:boolean;
 };
 export type ReviewLink = { id: string; sourceId: string; day: number };
+export type ReviewTaskStatus = {
+  id: string; attemptId: string; kind: 'text'|'speaking'; state: string; stage: string;
+  nextAt: number; lastError: string|null; updatedAt: number;
+};
 type Candidate = Omit<ReviewAttempt,'id'>;
 export async function reviewAttempts(day:number, entry:Record<string,string>):Promise<ReviewAttempt[]> {
   const candidates:Candidate[]=[];
