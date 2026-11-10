@@ -1,6 +1,17 @@
 // Shared by the Work tools and the page. An ID binds feedback to the exact
 // submitted content, conditions, day and attempt; drafts never enter this list.
-export type CoachFeedback = {id:string;day:number;stage:string;attempt:string;evidence:string;feedback:string;createdAt:string};
+export type PronunciationError = {
+  wordIndex?: number; phoneIndex?: number; kind: 'substitution'|'deletion'|'addition';
+  target: string; actual: string; word?: string;
+  startMs?: number; endMs?: number; anchorMs?: number;
+  probability?: number; suggestion?: string;
+};
+export type CoachAnalysis = {
+  analysisVersion?: string; recordingSha256?: string;
+  errors?: PronunciationError[];
+  coverage?: {analyzedSamples?: Array<[number,number]>; fraction?: number};
+};
+export type CoachFeedback = {id:string;day:number;stage:string;attempt:string;evidence:string;feedback:string;createdAt:string;analysis?:CoachAnalysis};
 export type ReviewAttempt = {
   id:string; day:number; field:string; index:number; stage:'speak'|'vocab'|'listen'|'read'|'write'|'review';
   title:string; kind:'objective'|'subjective'; response:string; conditions:string;
