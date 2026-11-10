@@ -181,6 +181,16 @@ export async function callReviewTool(userId: string, name: string, args: unknown
         const analysisVersion = input.analysisVersion ?? task.analysisVersion;
         if (task.kind === "speaking") {
           if (!analysisVersion) throw new ReviewTaskError("analysis_version_required", "A speaking completion needs an analysis version.");
+          const released = (env.ANALYSIS_RELEASED_VERSIONS ?? "").split(",").map(value => value.trim()).filter(Boolean);
+          if (!released.includes(analysisVersion))
+            throw new ReviewTaskError("analysis_not_released", "That analysis version has not passed the release gate.");
+          const bucket = env.BUCKET;
+          if (!bucket) throw new ReviewTaskError("recordings_unavailable", "Private recording storage is unavailable.");
+          const metadata = await bucket.head(`speaking/${encodeURIComponent(userId)}/${task.recordingId}`);
+          const digest = metadata?.customMetadata?.digest;
+          if (!metadata || !digest) throw new ReviewTaskError("recording_digest_unavailable", "The original recording digest is unavailable.");
+          if (digest !== input.recordingSha256)
+            throw new ReviewTaskError("recording_mismatch", "The recording digest differs from the original object.");
           const validation = validateSpeakingAnalysis(input.analysis, {
             recordingSha256: input.recordingSha256!, analysisVersion,
           });
