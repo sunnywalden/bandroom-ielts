@@ -23,7 +23,7 @@ let poll;
 globalThis.setInterval=(fn,ms,...args)=>[3000,10000].includes(ms)?(poll=fn,'feedback-poll'):realInterval(fn,ms,...args);
 globalThis.clearInterval=id=>id==='feedback-poll'?poll=undefined:realClear(id);
 const response=(status,data)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}});
-let root,state,revision,feedback,reviewLinks,calls,coachFault,stateFault;
+let root,state,revision,feedback,reviewLinks,reviewTasks,calls,coachFault,stateFault;
 async function receipt(payload){
  if(!payload.submissionKey)return response(200,{revision});
  const id='v2:'+payload.submissionKey;
@@ -49,11 +49,11 @@ async function row(field,message){
  return {id:crypto.randomUUID(),day:12,stage:attempt.stage,attempt:reviewLinks.find(link=>link.sourceId===attempt.id)?.id??attempt.id,evidence:'Synthetic submitted evidence',feedback:message,createdAt:'2026-11-09T01:00:00Z'};
 }
 beforeEach(()=>{
- localStorage.clear();calls=[];feedback=[];reviewLinks=[];coachFault=stateFault=null;revision=21;
+ localStorage.clear();calls=[];feedback=[];reviewLinks=[];reviewTasks=[];coachFault=stateFault=null;revision=21;
  state={version:1,day:12,stage:'write',finished:false,completed:Array.from({length:11},(_,i)=>i+1),checked:{11:'2026-11-09'},started:{11:'2026-11-02',12:'2026-11-09'},exam:'未选择',practice:{},entries:{11:{speakingReview:'Preserved older feedback'},12:{writeOriginal:'Independent original answer.',writeCondition:'独立 · 未计时'}}};
  globalThis.fetch=async(url,init={})=>{
   calls.push([url,init]);
-  if(url==='/api/coach')return coachFault?coachFault(init):response(200,{account:'fixture-feedback-ui',extras:{},feedback:structuredClone(feedback),reviewLinks:structuredClone(reviewLinks)});
+  if(url==='/api/coach')return coachFault?coachFault(init):response(200,{account:'fixture-feedback-ui',extras:{},feedback:structuredClone(feedback),reviewLinks:structuredClone(reviewLinks),reviewTasks:structuredClone(reviewTasks)});
   if(url==='/api/state'&&!init.method)return response(200,{account:'fixture-feedback-ui',revision,state:structuredClone(state)});
   if(url==='/api/state'){
    if(stateFault)return stateFault(init);
@@ -230,4 +230,23 @@ test('failed feedback identification is explicit, retryable and never mislabels 
  digest.mock.restore();await click(button('重试定位反馈'));
  assert.match(document.querySelector('[aria-label="写作首稿反馈"]').textContent,/Exact review preserved after retry/);
  assert.ok(!text().includes('暂时无法定位对应练习的反馈'));assert.equal(puts().length,0);
+});
+
+test('automatic task status replaces the manual copy prompt until feedback arrives',async()=>{
+ state.entries[12].writeOriginal='Independent answer waiting for the queue.';
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='writeOriginal');
+ assert.ok(source);
+ const link={id:'v2:queued-task',sourceId:source.id,day:12};
+ reviewLinks=[link];
+ reviewTasks=[{id:'task-queued',attemptId:link.id,kind:'text',state:'queued',stage:'read_input',nextAt:0,lastError:null,updatedAt:Date.now()}];
+ await mount();
+ const section=()=>document.querySelector('[aria-label="写作首稿反馈"]');
+ assert.ok(section());
+ assert.match(section().textContent,/等待后台批改/);
+ assert.ok(!section().textContent.includes('复制本题批改请求'));
+ reviewTasks=[{...reviewTasks[0],state:'completed'}];
+ feedback=[{id:'task-feedback',day:12,stage:'write',attempt:link.id,evidence:'Automatic task evidence',feedback:'Automatic task correction',createdAt:'2026-11-09T01:00:00Z'}];
+ await tick();
+ assert.match(section().textContent,/Automatic task correction/);
+ assert.match(section().textContent,/批改已返回/);
 });

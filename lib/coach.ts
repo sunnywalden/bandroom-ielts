@@ -3,7 +3,7 @@ import { env } from "cloudflare:workers";
 import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod/v4";
 import { getDb } from "@/db";
-import { learnerStates, teacherFeedback, teacherLessons } from "@/db/schema";
+import { learnerStates, reviewTasks, teacherFeedback, teacherLessons } from "@/db/schema";
 import { getExercises, type Lesson } from "@/app/curriculum";
 import { targets, overallTarget } from "@/app/goals";
 import { frozenReviews } from "./review-jobs";
@@ -103,11 +103,15 @@ async function reviews(userId:string, day?:number) {
   return rows.map(row=>row.pronunciation?{...row,evidence:row.evidence+` · 发音专项暂定 ${row.pronunciation.band.toFixed(1)}/9（本次录音）· ${row.pronunciation.observation}`}:row);
 }
 export async function coachData(userId:string) {
-  const [lessons,feedback,jobs] = await Promise.all([
-    getDb().select({day:teacherLessons.day,lesson:teacherLessons.lesson}).from(teacherLessons).where(eq(teacherLessons.userId,userId)), reviews(userId), frozenReviews(userId)
+  const [lessons,feedback,jobs,tasks] = await Promise.all([
+    getDb().select({day:teacherLessons.day,lesson:teacherLessons.lesson}).from(teacherLessons).where(eq(teacherLessons.userId,userId)), reviews(userId), frozenReviews(userId),
+    getDb().select({
+      id:reviewTasks.id, attemptId:reviewTasks.attemptId, kind:reviewTasks.kind, state:reviewTasks.state,
+      stage:reviewTasks.stage, nextAt:reviewTasks.nextAt, lastError:reviewTasks.lastError, updatedAt:reviewTasks.updatedAt,
+    }).from(reviewTasks).where(eq(reviewTasks.userId,userId)).orderBy(desc(reviewTasks.updatedAt)).limit(50),
   ]);
   return {account:userId,extras:Object.fromEntries(lessons.map(({day,lesson})=>[day,lesson])),feedback,
-    reviewLinks:jobs.map(({id,day,snapshot})=>({id,day,sourceId:snapshot.sourceId}))};
+    reviewLinks:jobs.map(({id,day,snapshot})=>({id,day,sourceId:snapshot.sourceId})),reviewTasks:tasks};
 }
 
 class CoachError extends Error {}
