@@ -37,10 +37,12 @@ if(location.pathname==='/__fixture/clip'){
  const setAudioFault=()=>{document.cookie='fixture_audio_fault='+fault.value+'; Path=/api/audio; SameSite=Strict'};
  fault.addEventListener('change',setAudioFault);
  setAudioFault();
+ const events=[];
  const describe=(event)=>{
   const audio=event.target;
   if(!(audio instanceof HTMLAudioElement))return;
-  document.querySelector('#clip-evidence').textContent=event.type+' · '+audio.currentTime.toFixed(3)+' s · '+(audio.paused?'paused':'playing');
+  events.push({event:event.type,time:audio.currentTime.toFixed(3),paused:audio.paused});
+  document.querySelector('#clip-evidence').textContent=JSON.stringify(events.slice(-12));
  };
  for(const name of ['playing','pause','seeked'])document.addEventListener(name,describe,true);
 }
@@ -48,7 +50,7 @@ createRoot(document.querySelector('#root')).render(location.pathname==='/__fixtu
  ? <main className="ex-card"><h1>真人美音独立验收</h1>{[...Object.keys(pronunciations),'unlisted fixture word'].map(word=><section key={word}><h2>{word}</h2><Pronunciation word={word}/></section>)}</main>
  : location.pathname==='/__fixture/clip'
  ? <main className="ex-card"><h1>原录音片段独立验收</h1>
-   <RecordingClipPlayer recordingId="11111111-1111-4111-8111-111111111111" startMs={5000} endMs={8000} label="测试片段"/>
+   <RecordingClipPlayer recordingId="11111111-1111-4111-8111-111111111111" startMs={Number(new URLSearchParams(location.search).get('start')??5000)} endMs={Number(new URLSearchParams(location.search).get('end')??8000)} label="测试片段"/>
    <output id="clip-evidence"/>
   </main>
  : <Studio/>);

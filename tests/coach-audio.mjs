@@ -166,6 +166,23 @@ assert.deepEqual((await (await read.GET()).json()).feedback,[])
     const retry=await audio.POST(req('/api/audio','POST',context,bytes));
     assert.equal(retry.status,200);assert.deepEqual(await retry.json(),{id});
 
+    const storedKey='speaking/'+encodeURIComponent(account)+'/'+id;
+    const originalObject=media.get(storedKey);
+    const truncated={...originalObject,bytes:originalObject.bytes.subarray(0,-1),size:originalObject.size-1};
+    media.set(storedKey,truncated);
+    const shortObjectRetry=await audio.POST(req('/api/audio','POST',context,bytes));
+    assert.equal(shortObjectRetry.status,409);
+    assert.deepEqual(await shortObjectRetry.json(),{error:'recording_id_conflict'});
+    assert.equal(media.get(storedKey),truncated);
+    media.set(storedKey,originalObject);
+
+    const duplicateResponses=await Promise.all([
+      audio.POST(req('/api/audio','POST',context,bytes)),
+      audio.POST(req('/api/audio','POST',context,bytes)),
+    ]);
+    assert.deepEqual(duplicateResponses.map(response=>response.status),[200,200]);
+    assert.equal(media.get(storedKey),originalObject);
+
     const answer={at:new Date().toISOString(),text:'',spoken:true,audio:id};
     next.entries[12]={...next.entries[12],[key]:JSON.stringify([answer]),[key+'Draft']:'',speakingPhase:phase};
     const mismatch=structuredClone(next);
