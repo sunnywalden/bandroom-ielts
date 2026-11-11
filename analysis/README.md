@@ -54,11 +54,46 @@ Then configure `ANALYSIS_BUNDLE_VERSION`, `ANALYSIS_SIGNING_KEY` and
 ## Work recovery and release evidence
 
 Use the isolated Sites app and consented test recordings. Run A claims a
-speaking task and encounters a transient read failure. Retry the same range
-with a bounded attempt count, then call `fail_review_task` with the original
-error code and `retryable: true` if it persists. The server persists the next
-due time. The next scheduled Work run must claim the same task with a new
-fence. This requires a working cloud schedule with the isolated app attached.
+speaking task and encounters a transient read failure. Retry the full transfer
+with a bounded attempt count. If it still fails, call `fail_review_task` with
+the observed error code and `retryable: true`. The server persists the next due
+time. The next scheduled Work run must claim the same task with a new fence.
+
+Ask the authenticated Work app for `get_review_transfer` with `taskId`,
+`fence` and `action: "read_recording"`. Use the returned URL and method, with
+the grant in the `Authorization` header. A private Site also requires its own
+service access when the client uses direct HTTP. Send
+`OAI-Sites-Authorization` only through the provisioned service connection.
+Keep credentials and signed grants out of prompts, logs and evidence.
+Compare the response byte count and SHA-256 with the returned input identity.
+An expired transfer grant must be obtained again under the active lease.
+Treat a short response as incomplete and retry from the source. A persistent
+input identity mismatch needs investigation.
+
+```sh
+PYTHONPATH=analysis/src python3 -m bandroom_acoustic.cli \
+  --audio "$bandroom_original" --input-sha256 "$bandroom_input_sha" \
+  --analysis-version "$bandroom_analysis_version" \
+  --decode-only --save-checkpoint "$bandroom_decode" --out "$bandroom_decode_summary"
+```
+
+Request `action: "save_decode"` with the file's `artifactSha256` and `bytes`.
+Send the complete binary checkpoint with the returned PUT grant. The server
+validates the original identity, analysis version, decoded manifest and PCM
+payload before committing the task pointer. Wait for the successful receipt
+before interrupting the run. The next lease can request
+`action: "read_decode"` and GET the committed bytes.
+
+```sh
+PYTHONPATH=analysis/src python3 -m bandroom_acoustic.cli \
+  --checkpoint "$bandroom_decode" --checkpoint-sha256 "$bandroom_decode_sha" \
+  --input-sha256 "$bandroom_input_sha" \
+  --analysis-version "$bandroom_analysis_version" --out "$bandroom_analysis"
+```
+
+The restore path checks the checkpoint and input digests and uses the stored
+sample timeline. A speaking completion must consume that checkpoint under
+its active fence and supply output from a qualified analyzer.
 
 Close the browser and take the Mac offline between runs A and B. In B,
 assemble the entire original and verify its length and SHA-256 before decode.
@@ -80,7 +115,7 @@ python3 analysis/scripts/verify_release.py \
   --recordings /secure/consented-holdout-originals
 ```
 
-- `manifest.json` contains `schemaVersion: 1`, the full `sourceSha`,
+- `manifest.json` contains `schemaVersion: 2`, the full `sourceSha`,
   `buildSha256`, `analysisVersion`, `environmentId`, `route: "A"`, and
   `files`, a filename-to-SHA-256 map for the exact `FILES` set in the verifier.
   The build digest is the SHA-256 of `site-build.tar.gz`. Keep the evidence,
@@ -90,7 +125,7 @@ python3 analysis/scripts/verify_release.py \
   the role principal, `ssh-ed25519`, and its public key blob. The release
   owner, holdout custodian, Work auditor and site auditor each inspect their
   original evidence and sign the exact same manifest bytes with namespace
-  `bandroom-d2-release-v1`. Place each detached signature at `<role>.sig`.
+  `bandroom-d2-release-v2`. Place each detached signature at `<role>.sig`.
   The signatures attest the provenance of original records, including the
   Work run history. Verify the operator and audit records before signing.
 - Keep `--legacy-dir` on the trusted historical verification kit and use the
@@ -101,17 +136,31 @@ python3 analysis/scripts/verify_release.py \
   inventory records `deviceClass` per clip. `stratified-score.json` records
   metrics, sample sizes, coverage and timing by device, encoding and condition
   using the same scorer as `score.json`.
-- Preserve the official Work history export and isolated server events,
-  including run IDs, task ID, fences, byte-range outcomes, checkpoint identity,
-  retry time and receipt readback. Extend the historical `offline.json`
-  schema with `beforeOfflineEvents` for A and use `serverEvents` for B/C.
-  Keep per-run stage lists and the original playback record. The playback
-  seek point must match an independently verified error in the receipt.
-  `offline-output.json` contains the exact
-  serialized completion output whose SHA-256 was recorded on the receipt.
-  Seal the separate human timing reference, the platform short probe,
-  timestamped Mac connectivity checks, the 24-hour schedule check, and
-  Chrome and Safari acceptance against the same candidate.
+- Preserve official Work history and isolated server events with run IDs,
+  task ID, fences, transfer byte counts, checkpoint identity, retry time and
+  receipt readback. In `offline.json`, use `beforeOfflineEvents` for A and
+  `serverEvents` for B/C. Seal the actual committed `offline-checkpoint.bin`
+  and the exact serialized `offline-output.json` from the receipt.
+- In `offline-inference.json`, bind the run C windows to the task, committed
+  checkpoint, model, configuration and output digest. For each window keep
+  `chunkIndex`, `startSample`, `endSample`, `inputPcmSha256` and the
+  `result` containing the exact result bytes and digest.
+- In `browser-playback-events.json`, record Chrome and Safari reviews bound
+  to the original attempt, receipt and independently verified error. Keep the
+  actual media element `seeked`, `playing` and `pause` or `ended` events.
+  Include distinct recordings of both encodings with first, middle and tail
+  playback markers. Seal the separate human timing reference, platform probes,
+  timestamped Mac connectivity checks and 24-hour schedule check against the
+  same candidate.
+- In `platform-probe.json`, bind `officialHistorySha256` to the Work export.
+  Record `probes` for WebM/Opus and MP4/AAC, each at 30–45 seconds and
+  165–180 seconds. Each row records original identity, the scheduled
+  `readRun` that gave the verified original to the decoder, the scheduled
+  `resumeRun` that verified the same committed checkpoint, and `faults` for
+  truncation and expired access. Include run times and quota observations.
+  `receiptProbe` records an isolated writing task completion and receipt
+  readback on the same connection. This tests write authorization before
+  the acoustic model is qualified.
 
 The verifier exits 1 with `BLOCKED` when evidence is missing or inconsistent.
 `READY` requires G0–G5 and the historical zero-added-cost guard. Keep local
