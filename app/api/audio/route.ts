@@ -43,7 +43,8 @@ export async function POST(request: Request) {
     const stored=await env.BUCKET.put(key,bytes,{onlyIf:{etagDoesNotMatch:"*"},httpMetadata:{contentType:type},customMetadata:{purpose:"speaking",day,phase,digest}});
     if(stored)return json({id:attempt},201);
     const old=await env.BUCKET.head(key),m=old?.customMetadata;
-    if(m?.purpose==="speaking"&&m.day===day&&m.phase===phase&&m.digest===digest&&old?.httpMetadata?.contentType===type)return json({id:attempt},200);
+    if(m?.purpose==="speaking"&&m.day===day&&m.phase===phase&&m.digest===digest
+      &&old?.size===bytes.byteLength&&old.httpMetadata?.contentType===type)return json({id:attempt},200);
     return json({error:"recording_id_conflict"},409);
   }
   const id = crypto.randomUUID();

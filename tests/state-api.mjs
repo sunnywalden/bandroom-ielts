@@ -120,6 +120,10 @@ for(let day=12;day<=62;day++){
     eq(pair[0][1],pair[1][1]);eq(pair[0][1].submissionKey,submissionKey);
     assert.match(pair[0][1].attemptId,/^v2:/);checks++;
     eq(sql.prepare('SELECT COUNT(*) n FROM review_jobs').get().n,1);
+    const task=sql.prepare('SELECT kind,state,attempt_id,attempt_revision,recording_id FROM review_tasks').get();
+    eq(task.kind,'speaking');eq(task.state,'queued');eq(task.attempt_id,pair[0][1].attemptId);
+    eq(task.attempt_revision,atRevision+1);eq(task.recording_id,id);
+    eq(sql.prepare('SELECT COUNT(*) n FROM review_tasks').get().n,1);
     const frozen=JSON.parse(sql.prepare('SELECT snapshot FROM review_jobs').get().snapshot);
     eq(frozen.context.prompt,lesson.followup);eq(frozen.attempt.recordingId,id);
     const saved=(await get())[1];eq(saved.state,next);eq(saved.revision,atRevision+1);

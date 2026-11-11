@@ -1,15 +1,16 @@
-import { reviewAttempts, feedbackFor, type ReviewAttempt } from "@/app/feedback-model";
+import { reviewAttempts, feedbackFor } from "@/app/feedback-model";
 import { env } from "cloudflare:workers";
 import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod/v4";
 import { getDb } from "@/db";
-import { learnerStates, teacherFeedback, teacherLessons } from "@/db/schema";
+import { learnerStates, reviewTasks, teacherFeedback, teacherLessons } from "@/db/schema";
 import { getExercises, type Lesson } from "@/app/curriculum";
 import { targets, overallTarget } from "@/app/goals";
 import { frozenReviews } from "./review-jobs";
 import { reviewContext } from "./review-context";
 import { listRecoverable } from "./recording-recovery";
 import { initial, oldResults, part3, writings, type Ledger } from "@/app/ledger";
+import { callReviewTool, reviewTools } from "./review-tools";
 
 const text = (max: number, description: string) => z.string().trim().min(1).max(max).describe(description);
 const term = text(160, "English word, phrase or collocation.");
@@ -80,7 +81,7 @@ const recordingSpec = z.strictObject({
 
 });
 
-export const coachTools = [
+const coachingTools = [
   {name:"read_study_session",description:"Read canonical reviewAttempts IDs, question context and pending reviews, plus the learner's checkpoint and selected day's saved answers and available original/revised writing, historical results, coach feedback and current small task. Audio references require read_speaking_recording. Never start or complete a day.",schema:readSpec,readOnly:true},
   {name:"add_coach_feedback",description:"Append a private, evidence-based review using its exact reviewAttempts[].id; the page automatically displays it beside that answer. Review one identified attempt for a started day. First use read_study_session or inspect the learner's actual submitted evidence. Never infer pronunciation from a transcript. Existing attempts and scores remain intact; identical retries are deduplicated.",schema:feedbackSpec,readOnly:false},
   {name:"publish_lesson",description:"Add one complete new lesson to this learner's private catalogue for Day 17–62. Verify the British Council source audio, transcript and q/a; use original reading material. Match the learner's exam pathway and budget. Use only after the learner requests preparation or expansion; this does not start the day. A published day cannot be replaced.",schema:publishSpec,readOnly:false},
@@ -88,22 +89,33 @@ export const coachTools = [
   {name:"read_speaking_recording",description:"Read a submitted recording. Use audio mode first. If the client omits the sound, retrieve metadata then bytes and reconstruct privately in a supported audio decoder. Technical verification or text alone cannot justify pronunciation or fluency ratings. Device-only recordings can be played in the recording browser.",schema:recordingSpec,readOnly:true},
 ].map(({schema,readOnly,...tool})=>({...tool,inputSchema:z.toJSONSchema(schema),annotations:{readOnlyHint:readOnly,destructiveHint:false}}));
 
+const reviewToolNames = new Set(reviewTools.map(tool => tool.name));
+export const coachTools = [...coachingTools, ...reviewTools];
+
 const feedbackColumns = {id:teacherFeedback.id,day:teacherFeedback.day,stage:teacherFeedback.stage,
-  feedback:teacherFeedback.feedback,evidence:teacherFeedback.evidence,pronunciation:teacherFeedback.pronunciation,attempt:teacherFeedback.attempt,createdAt:teacherFeedback.createdAt};
+  feedback:teacherFeedback.feedback,evidence:teacherFeedback.evidence,pronunciation:teacherFeedback.pronunciation,analysisJson:teacherFeedback.analysisJson,attempt:teacherFeedback.attempt,createdAt:teacherFeedback.createdAt};
 
 async function reviews(userId:string, day?:number) {
   const rows=await getDb().select(feedbackColumns).from(teacherFeedback)
     .where(day === undefined ? eq(teacherFeedback.userId,userId)
       : and(eq(teacherFeedback.userId,userId),eq(teacherFeedback.day,day)))
     .orderBy(desc(teacherFeedback.createdAt),desc(teacherFeedback.id));
-  return rows.map(row=>row.pronunciation?{...row,evidence:row.evidence+` · 发音专项暂定 ${row.pronunciation.band.toFixed(1)}/9（本次录音）· ${row.pronunciation.observation}`}:row);
+  return rows.map(({analysisJson,...row})=>({
+    ...row,
+    ...(row.pronunciation?{evidence:row.evidence+` · 发音专项暂定 ${row.pronunciation.band.toFixed(1)}/9（本次录音）· ${row.pronunciation.observation}`}:{}),
+    ...(analysisJson?{analysis:analysisJson}:{}),
+  }));
 }
 export async function coachData(userId:string) {
-  const [lessons,feedback,jobs] = await Promise.all([
-    getDb().select({day:teacherLessons.day,lesson:teacherLessons.lesson}).from(teacherLessons).where(eq(teacherLessons.userId,userId)), reviews(userId), frozenReviews(userId)
+  const [lessons,feedback,jobs,tasks] = await Promise.all([
+    getDb().select({day:teacherLessons.day,lesson:teacherLessons.lesson}).from(teacherLessons).where(eq(teacherLessons.userId,userId)), reviews(userId), frozenReviews(userId),
+    getDb().select({
+      id:reviewTasks.id, attemptId:reviewTasks.attemptId, kind:reviewTasks.kind, state:reviewTasks.state,
+      stage:reviewTasks.stage, nextAt:reviewTasks.nextAt, lastError:reviewTasks.lastError, updatedAt:reviewTasks.updatedAt,
+    }).from(reviewTasks).where(eq(reviewTasks.userId,userId)).orderBy(desc(reviewTasks.updatedAt)).limit(50),
   ]);
   return {account:userId,extras:Object.fromEntries(lessons.map(({day,lesson})=>[day,lesson])),feedback,
-    reviewLinks:jobs.map(({id,day,snapshot})=>({id,day,sourceId:snapshot.sourceId}))};
+    reviewLinks:jobs.map(({id,day,snapshot})=>({id,day,sourceId:snapshot.sourceId})),reviewTasks:tasks};
 }
 
 class CoachError extends Error {}
@@ -291,7 +303,9 @@ export async function callCoach(userId:string, name:string, args:unknown) {
         if(!file)throw new CoachError("Recording unavailable.");
         return {content:[{type:"text",text:JSON.stringify({...info,guidance:"If this client omits the audio block, use bytes mode in code tools to decode privately. Do not infer pronunciation from metadata."})},{type:"audio",data:await encoded(file),mimeType}]};
       }
-      default: return toolError("Unknown coaching tool.");
+      default:
+        if (reviewToolNames.has(name)) return callReviewTool(userId, name, args);
+        return toolError("Unknown coaching tool.");
     }
   } catch(error) {
     if (error instanceof z.ZodError) return toolError(error.issues.slice(0,5).map(i=>i.path.join(".")+" "+i.message).join(" | "));

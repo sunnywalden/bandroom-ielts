@@ -16,6 +16,7 @@ window.scrollTo=()=>{};globalThis.IS_REACT_ACT_ENVIRONMENT=true;
 // JSDOM does not implement media playback; these tests inspect saved attempts.
 dom.window.HTMLMediaElement.prototype.pause=()=>{};
 dom.window.HTMLMediaElement.prototype.load=()=>{};
+dom.window.HTMLMediaElement.prototype.play=async()=>{};
 const {createElement,act}=await import('react'),{createRoot}=await import('react-dom/client');
 const {default:Studio}=await import('../.sites-runtime/tests/feedback-studio.mjs');
 const realInterval=globalThis.setInterval,realClear=globalThis.clearInterval;
@@ -23,7 +24,7 @@ let poll;
 globalThis.setInterval=(fn,ms,...args)=>[3000,10000].includes(ms)?(poll=fn,'feedback-poll'):realInterval(fn,ms,...args);
 globalThis.clearInterval=id=>id==='feedback-poll'?poll=undefined:realClear(id);
 const response=(status,data)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}});
-let root,state,revision,feedback,reviewLinks,calls,coachFault,stateFault;
+let root,state,revision,feedback,reviewLinks,reviewTasks,calls,coachFault,stateFault;
 async function receipt(payload){
  if(!payload.submissionKey)return response(200,{revision});
  const id='v2:'+payload.submissionKey;
@@ -49,11 +50,11 @@ async function row(field,message){
  return {id:crypto.randomUUID(),day:12,stage:attempt.stage,attempt:reviewLinks.find(link=>link.sourceId===attempt.id)?.id??attempt.id,evidence:'Synthetic submitted evidence',feedback:message,createdAt:'2026-11-09T01:00:00Z'};
 }
 beforeEach(()=>{
- localStorage.clear();calls=[];feedback=[];reviewLinks=[];coachFault=stateFault=null;revision=21;
+ localStorage.clear();calls=[];feedback=[];reviewLinks=[];reviewTasks=[];coachFault=stateFault=null;revision=21;
  state={version:1,day:12,stage:'write',finished:false,completed:Array.from({length:11},(_,i)=>i+1),checked:{11:'2026-11-09'},started:{11:'2026-11-02',12:'2026-11-09'},exam:'未选择',practice:{},entries:{11:{speakingReview:'Preserved older feedback'},12:{writeOriginal:'Independent original answer.',writeCondition:'独立 · 未计时'}}};
  globalThis.fetch=async(url,init={})=>{
   calls.push([url,init]);
-  if(url==='/api/coach')return coachFault?coachFault(init):response(200,{account:'fixture-feedback-ui',extras:{},feedback:structuredClone(feedback),reviewLinks:structuredClone(reviewLinks)});
+  if(url==='/api/coach')return coachFault?coachFault(init):response(200,{account:'fixture-feedback-ui',extras:{},feedback:structuredClone(feedback),reviewLinks:structuredClone(reviewLinks),reviewTasks:structuredClone(reviewTasks)});
   if(url==='/api/state'&&!init.method)return response(200,{account:'fixture-feedback-ui',revision,state:structuredClone(state)});
   if(url==='/api/state'){
    if(stateFault)return stateFault(init);
@@ -230,4 +231,106 @@ test('failed feedback identification is explicit, retryable and never mislabels 
  digest.mock.restore();await click(button('重试定位反馈'));
  assert.match(document.querySelector('[aria-label="写作首稿反馈"]').textContent,/Exact review preserved after retry/);
  assert.ok(!text().includes('暂时无法定位对应练习的反馈'));assert.equal(puts().length,0);
+});
+
+test('automatic task status replaces the manual copy prompt until feedback arrives',async()=>{
+ state.entries[12].writeOriginal='Independent answer waiting for the queue.';
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='writeOriginal');
+ assert.ok(source);
+ const link={id:'v2:queued-task',sourceId:source.id,day:12};
+ reviewLinks=[link];
+ reviewTasks=[{id:'task-queued',attemptId:link.id,kind:'text',state:'queued',stage:'read_input',nextAt:0,lastError:null,updatedAt:Date.now()}];
+ await mount();
+ const section=()=>document.querySelector('[aria-label="写作首稿反馈"]');
+ assert.ok(section());
+ assert.match(section().textContent,/等待后台批改/);
+ assert.ok(!section().textContent.includes('复制本题批改请求'));
+ reviewTasks=[{...reviewTasks[0],state:'completed'}];
+ feedback=[{id:'task-feedback',day:12,stage:'write',attempt:link.id,evidence:'Automatic task evidence',feedback:'Automatic task correction',createdAt:'2026-11-09T01:00:00Z'}];
+ await tick();
+ assert.match(section().textContent,/Automatic task correction/);
+ assert.match(section().textContent,/批改已返回/);
+});
+
+test('completed acoustic feedback renders IPA, error kind and the exact clip window',async()=>{
+ state.entries[12].writeOriginal='Independent answer with a clear /s/ for think.';
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='writeOriginal');
+ assert.ok(source);
+ feedback=[{id:'fb-acoustic',day:12,stage:'write',attempt:source.id,evidence:'Acoustic fixture',feedback:'注意 think 的词首音。',createdAt:'2026-11-09T01:00:00Z',analysis:{errors:[{wordIndex:0,phoneIndex:0,kind:'substitution',target:'TH',actual:'S',word:'think',startMs:1000,endMs:1100,probability:.92}]}}];
+ await mount();
+ const section=document.querySelector('[aria-label="写作首稿反馈"]');
+ assert.ok(section);
+ assert.ok(section.querySelector('[aria-label="发音错误与回听"]'));
+ assert.match(section.textContent,/think/);
+ assert.match(section.textContent,/θ/);
+ assert.match(section.textContent,/替换/);
+ assert.match(section.textContent,/92%/);
+ assert.match(section.textContent,/原录音引用不可用/);
+});
+
+test('speaking acoustic card seeks, stops and retries the original recording window',async()=>{
+ const audioId='22222222-2222-4222-8222-222222222222';
+ state.stage='speak';
+ state.entries[12]={speakingPhase:'review',speakingComplete:'yes',
+  speakingPart2:JSON.stringify([{at:'2026-11-09T01:00:00Z',text:'Fixture Part 2',spoken:true,audio:audioId}]),
+  speakingFollowup:JSON.stringify([{at:'2026-11-09T01:02:00Z',text:'Fixture follow-up',spoken:true}])};
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='speakingPart2');
+ assert.ok(source);
+ feedback=[{id:'fb-speak',day:12,stage:'speak',attempt:source.id,evidence:'Acoustic speaking fixture',feedback:'回听这一处词首音。',createdAt:'2026-11-09T01:00:00Z',analysis:{errors:[{wordIndex:0,phoneIndex:0,kind:'substitution',target:'TH',actual:'S',word:'think',startMs:1000,endMs:1100,probability:.9}]}}];
+ await mount();
+ const section=document.querySelector('[aria-label="口语 Part 2 · 首次回答反馈"]');
+ assert.ok(section);
+ const audio=section.querySelector('audio');
+ assert.ok(audio);
+ assert.equal(new URL(audio.src).searchParams.get('id'),audioId);
+ assert.equal(audio.preload,'none');
+ let starts=0,stops=0,paused=true;
+ Object.defineProperty(audio,'paused',{get:()=>paused});
+ audio.play=async()=>{
+  starts++;
+  if(starts===1)throw new Error('fixture playback unavailable');
+  paused=false;
+ };
+ audio.pause=()=>{paused=true;stops++};
+ await click(button('回听 think'));
+ assert.match(section.textContent,/原录音暂时无法播放/);
+ await click(button('重试回听 think'));
+ assert.equal(audio.currentTime,.5);
+ await click(button('停止回听'));
+ assert.equal(starts,2);
+ assert.equal(stops,1);
+ await click(button('回听 think'));
+ assert.equal(starts,3);
+ audio.currentTime=2;await act(async()=>audio.dispatchEvent(new Event('timeupdate')));
+ assert.equal(audio.currentTime,2);
+ assert.equal(audio.paused,true);
+ assert.equal(stops,2);
+ assert.ok(button('回听 think'));
+ assert.equal(puts().length,0);
+});
+
+test('two additions in the same gap replay distinct windows on the same original recording',async()=>{
+ const audioId='33333333-3333-4333-8333-333333333333';
+ state.stage='speak';
+ state.entries[12]={speakingPhase:'review',speakingComplete:'yes',
+  speakingPart2:JSON.stringify([{at:'2026-11-09T01:00:00Z',text:'Fixture Part 2',spoken:true,audio:audioId}]),
+  speakingFollowup:JSON.stringify([{at:'2026-11-09T01:02:00Z',text:'Fixture follow-up',spoken:true}])};
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='speakingPart2');
+ assert.ok(source);
+ const first={wordIndex:0,phoneIndex:1,kind:'addition',target:'∅',actual:'AH',word:'think',startMs:1000,endMs:1080};
+ const second={...first,gapOccurrence:1,startMs:2500,endMs:2570};
+ feedback=[{id:'fb-repeated',day:12,stage:'speak',attempt:source.id,evidence:'Acoustic fixture',
+  feedback:'回听两处添音。',createdAt:'2026-11-09T01:00:00Z',analysis:{errors:[first,second]}}];
+ await mount();
+ const section=document.querySelector('[aria-label="口语 Part 2 · 首次回答反馈"]');
+ const cards=[...section.querySelectorAll('.af-error-card')];
+ assert.equal(cards.length,2);
+ const clipStarts=[.5,2];
+ for(const [index,card] of cards.entries()){
+  const audio=card.querySelector('audio');
+  assert.equal(new URL(audio.src).searchParams.get('id'),audioId);
+  await click(card.querySelector('button'));
+  assert.equal(audio.currentTime,clipStarts[index]);
+ }
+ assert.equal(puts().length,0);
 });

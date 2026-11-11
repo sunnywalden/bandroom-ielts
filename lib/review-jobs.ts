@@ -3,11 +3,13 @@ import type { ReviewAttempt } from "@/app/feedback-model";
 import { getDb } from "@/db";
 import { reviewJobs } from "@/db/schema";
 import type { reviewContext } from "./review-context";
+import { createReviewTaskStatement, type ReviewTaskDb } from "./review-tasks";
 
 export type FrozenReview = {
   sourceId: string;
   attempt: ReviewAttempt;
   context: ReturnType<typeof reviewContext>;
+  recording?: { sha256: string; bytes: number };
 };
 
 export async function findSubmission(userId: string, submissionKey: string) {
@@ -25,10 +27,24 @@ export async function frozenReviews(userId: string, day?: number) {
 export async function submitReview(
   userId: string, submissionKey: string, requestHash: string, revision: number,
   state: Record<string, unknown>, snapshot: FrozenReview,
+  analysisVersion?: string,
 ) {
   const db = getDb().$client;
   const id = snapshot.attempt.id;
   const encoded = JSON.stringify(state);
+  const now = Date.now();
+  const task = createReviewTaskStatement(db as unknown as ReviewTaskDb, {
+    taskId: crypto.randomUUID(),
+    reviewJobId: id,
+    userId,
+    kind: snapshot.attempt.stage === "speak" && snapshot.attempt.recordingId ? "speaking" : "text",
+    attemptId: id,
+    day: snapshot.attempt.day,
+    attemptRevision: revision + 1,
+    recordingId: snapshot.attempt.recordingId ?? null,
+    analysisVersion: snapshot.attempt.recordingId ? analysisVersion : undefined,
+    now,
+  });
   // The fresh ID authorizes exactly one checkpoint update. A stale or repeated
   // request cannot update progress, even if it races after the initial read.
   await db.batch([
@@ -46,6 +62,7 @@ export async function submitReview(
     db.prepare(`SELECT json(CASE WHEN NOT EXISTS(SELECT 1 FROM review_jobs WHERE id=? AND user_id=?)
         OR EXISTS(SELECT 1 FROM learner_states WHERE user_id=? AND revision=? AND state=?)
         THEN 'true' ELSE 'rollback' END)`).bind(id, userId, userId, revision + 1, encoded),
-  ]);
+    task,
+  ] as unknown as Parameters<typeof db.batch>[0]);
   return findSubmission(userId, submissionKey);
 }

@@ -13,7 +13,7 @@ import BackupPanel from './backup-panel'
 import Reports, { type ReportState } from './reports'
 import AttemptFeedback,{FeedbackProvider,UnmatchedFeedback,FeedbackIdentificationStatus} from './attempt-feedback'
 import {requestJSON} from './request-json'
-import type {ReviewLink} from './feedback-model'
+import type {ReviewLink,ReviewTaskStatus} from './feedback-model'
 import {useDraft} from './use-draft'
 
 const tabs=[['home','今日练习',LayoutDashboard],['history','学习档案',BookOpen],['notes','错题手记',NotebookPen],['report','阶段评估',Activity]] as const
@@ -43,6 +43,7 @@ export default function Studio(){
  const [account,setAccount]=useState(''),[locked,setLocked]=useState(false),[refreshKey,setRefreshKey]=useState(0)
  const [historyDay,setHistoryDay]=useState(11),[feedback,setFeedback]=useState<Feedback[]>([]),[coachError,setCoachError]=useState(false)
  const [reviewLinks,setReviewLinks]=useState<ReviewLink[]>([])
+ const [reviewTasks,setReviewTasks]=useState<ReviewTaskStatus[]>([])
  const [note,setNote]=useState(0),[reply,setReply]=useState(''),[result,setResult]=useState<boolean|null>(null),[check,setCheck]=useState(false),[showPacket,setShowPacket]=useState(false)
  const navigate=(page:Tab)=>{setTab(page);setCheck(false);setShowPacket(false);if(typeof window!=='undefined')window.scrollTo({top:0,behavior:'instant'})}
  const revisionAtRead=useRef<number|null>(null), activeAccount=useRef(''),accessLocked=useRef(false)
@@ -56,13 +57,13 @@ export default function Studio(){
   coachBusy.current=true
   const read=++coachRead.current,owner=activeAccount.current
   try{
-   const {response:res,data:c}=await requestJSON<{account:string;extras:Record<string,Lesson>;feedback:Feedback[];reviewLinks?:ReviewLink[]}>('/api/coach',{cache:'no-store',redirect:'manual'})
+   const {response:res,data:c}=await requestJSON<{account:string;extras:Record<string,Lesson>;feedback:Feedback[];reviewLinks?:ReviewLink[];reviewTasks?:ReviewTaskStatus[]}>('/api/coach',{cache:'no-store',redirect:'manual'})
    if(read!==coachRead.current||owner!==activeAccount.current)return
    if(requiresLogin(res)){lockAccess();return}
    if(!res.ok)throw Error()
    if(c?.account!==owner){lockAccess('登录账号已改变。请重新读取进度，核对当前账号。');return}
    if(!c||!c.extras||typeof c.extras!=='object'||!Array.isArray(c.feedback)||c.feedback.some(f=>!f||typeof f.id!=='string'||typeof f.attempt!=='string'||typeof f.feedback!=='string'))throw Error()
-   registerExtraLessons(c.extras||{});setFeedback(c.feedback||[]);if(Array.isArray(c.reviewLinks))setReviewLinks(current=>[...c.reviewLinks!,...current.filter(row=>!c.reviewLinks!.some(job=>job.id===row.id))]);setCoachError(false)
+   registerExtraLessons(c.extras||{});setFeedback(c.feedback||[]);if(Array.isArray(c.reviewLinks))setReviewLinks(current=>[...c.reviewLinks!,...current.filter(row=>!c.reviewLinks!.some(job=>job.id===row.id))]);setReviewTasks(Array.isArray(c.reviewTasks)?c.reviewTasks:[]);setCoachError(false)
   }catch{if(read===coachRead.current&&owner===activeAccount.current)setCoachError(true)}finally{coachBusy.current=false}
  }
  async function refresh(){
@@ -124,10 +125,11 @@ export default function Studio(){
  // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
  useEffect(()=>{void refresh()},[])
  // One read-only subscription for the page. It never refreshes drafts or advances the checkpoint.
+ const pendingTaskCount=reviewTasks.filter(task=>['queued','running','retry_wait'].includes(task.state)).length;
  useEffect(()=>{
   if(!account||locked)return
   const poll=()=>{if(document.visibilityState==='visible')void refreshCoach()}
-  const awaiting=reviewLinks.some(link=>!feedback.some(row=>row.attempt===link.id));
+  const awaiting=reviewLinks.some(link=>!feedback.some(row=>row.attempt===link.id))||pendingTaskCount>0;
   const timer=setInterval(poll,awaiting?3_000:10_000)
   window.addEventListener('focus',poll);document.addEventListener('visibilitychange',poll)
   // This is a request-generation counter, intentionally read at cleanup (not a DOM ref).
@@ -135,7 +137,7 @@ export default function Studio(){
   return ()=>{clearInterval(timer);window.removeEventListener('focus',poll);document.removeEventListener('visibilitychange',poll);coachRead.current++}
  // refreshCoach reads the current account through its ref.
  // eslint-disable-next-line react-hooks/exhaustive-deps
- },[account,locked,reviewLinks.length,feedback.length])
+ },[account,locked,reviewLinks.length,feedback.length,pendingTaskCount])
  async function persist(make:(prev:Snapshot)=>Snapshot,forReview=false){
   if(accessLocked.current||busy.current||revisionAtRead.current===null||!activeAccount.current||sync==='conflict'||sync==='auth'||sync==='load')return false
   busy.current=true;setPending(true);setError('');setSync('write')
@@ -211,7 +213,7 @@ export default function Studio(){
   {sync!=='load'&&<button className="secondary" onClick={()=>void refresh()}>重新读取进度</button>}</div></section>
  if(!account)return <main>{loginGate}</main>
  const feedbackDay=tab==='history'?historyDay:s.day
- return <FeedbackProvider key={account} day={feedbackDay} entry={s.entries[feedbackDay]||{}} feedback={feedback.filter(f=>f.day===feedbackDay)} links={reviewLinks} error={coachError} refresh={()=>void refreshCoach()}>{locked&&<main>{loginGate}</main>}<div className="app-shell" hidden={locked} inert={locked} style={locked?{display:'none'}:undefined}>
+ return <FeedbackProvider key={account} day={feedbackDay} entry={s.entries[feedbackDay]||{}} feedback={feedback.filter(f=>f.day===feedbackDay)} links={reviewLinks} tasks={reviewTasks} error={coachError} refresh={()=>void refreshCoach()}>{locked&&<main>{loginGate}</main>}<div className="app-shell" hidden={locked} inert={locked} style={locked?{display:'none'}:undefined}>
  <aside className="side"><button className="brand" onClick={()=>navigate('home')}><Emblem/><span><b>Bandroom</b><small>IELTS STUDY STUDIO</small></span></button>
  <div className="nav-label">WORKSPACE</div><nav>{tabs.map(([id,title,Icon])=><button key={id} className={'nav-item '+((tab===id||(tab==='lesson'&&id==='home'))?'selected':'')} onClick={()=>navigate(id)}><Icon size={18}/>{title}</button>)}</nav>
  <div className="sidebar-bottom"><div className="sidebar-target"><span>MY PROGRAMME</span><b>IELTS <em>{overallTarget.toFixed(1)}</em></b><small>62 课时学习计划</small></div><button className={'nav-item '+(tab==='settings'?'selected':'')} onClick={()=>navigate('settings')}><SlidersHorizontal size={17}/>训练设置</button><div className="profile"><span>HZ</span><div><b>Henry</b><small>个人学习空间</small></div></div></div>

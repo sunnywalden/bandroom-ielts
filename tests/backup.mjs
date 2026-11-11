@@ -9,7 +9,7 @@ import {randomBytes} from 'node:crypto';
 import http from 'node:http';
 const require=createRequire(import.meta.url),wrangler=createRequire(require.resolve('wrangler/package.json'));
 const esbuild=wrangler('esbuild'),tmp=await mkdtemp(join(tmpdir(),'bandroom-backup-'));
-async function bundled(file){const out=join(tmp,file.split('/').at(-1).replace('.ts','.mjs'));await esbuild.build({entryPoints:[file],outfile:out,bundle:true,format:'esm',platform:'node'});return import(out);}
+async function bundled(file,plugins=[]){const out=join(tmp,file.split('/').at(-1).replace('.ts','.mjs'));await esbuild.build({entryPoints:[file],outfile:out,bundle:true,format:'esm',platform:'node',plugins});return import(out);}
 const {prepareBackup,downloadBackup,exportBackup,restoreBackup,restoreAudio,sealDevice,verifyDevice}=await bundled('lib/backup.ts');
 const {pack,unpack,hash}=await bundled('lib/backup-format.ts');
 let mf,sql;
@@ -54,6 +54,26 @@ try{
  } else{db=sqliteD1();bucket=isolatedBucket();}
  const run=async(q,...params)=>await db.prepare(q).bind(...params).run();
  for(const migration of (await readdir('drizzle')).filter(f=>f.endsWith('.sql')).sort()){const body=await readFile('drizzle/'+migration,'utf8');for(const q of body.split(';').map(s=>s.replaceAll('--> statement-breakpoint','').trim()).filter(Boolean))await run(q);}
+ if(mf){
+   const {saveReviewCheckpoint}=await bundled('lib/review-tasks.ts',[{name:'isolated-db',setup(build){
+     build.onResolve({filter:/^@\/db$/},()=>({path:'db',namespace:'isolated-db'}));
+     build.onLoad({filter:/^db$/,namespace:'isolated-db'},()=>({contents:"export function getDb(){throw new Error('Use the explicit test binding')}"}));
+   }}]);
+   await run('INSERT INTO review_jobs(id,user_id,day,submission_key,request_hash,revision,snapshot,created_at) VALUES (?,?,?,?,?,?,?,?)','checkpoint-job','checkpoint-owner',12,'fixture','fixture',1,'{}','fixture');
+   await run(`INSERT INTO review_tasks(id,review_job_id,user_id,kind,attempt_id,day,attempt_revision,stage,state,fence,attempts,lease_until,next_at,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,'read_input','running',1,1,2000,1000,1000,1000)`,'checkpoint-task','checkpoint-job','checkpoint-owner','speaking','checkpoint-attempt',12,1);
+   const checkpoint={taskId:'checkpoint-task',fence:1,now:1000,analysisVersion:'fixture',stage:'decode',chunkIndex:0,inputSha256:'input',artifactSha256:'first',bytes:16};
+   const save=fields=>saveReviewCheckpoint(db,'checkpoint-owner',{...checkpoint,...fields});
+   await run("CREATE TRIGGER fail_pointer BEFORE UPDATE OF checkpoint_sha256 ON review_tasks BEGIN SELECT RAISE(ABORT,'checkpoint interrupted'); END");
+   await assert.rejects(save({}),/checkpoint interrupted/);
+   const result=await run("SELECT COUNT(*) AS count FROM analysis_artifacts WHERE task_id='checkpoint-task'");
+   ok(result.results[0].count===0);
+   await run('DROP TRIGGER fail_pointer');
+   const concurrent=await Promise.all([save({}),save({})]);
+   ok(concurrent.filter(result=>result.duplicate).length===1);
+   ok((await save({chunkIndex:1,artifactSha256:'second'})).checkpointSha256==='second');
+   ok((await save({})).checkpointSha256==='second');
+ }
  const uid='fixture-owner',other='fixture-other',secret=randomBytes(32).toString('hex');
  const clip1=crypto.randomUUID(),clip2=crypto.randomUUID(),dev=crypto.randomUUID();
  const wave=new Uint8Array(44+16);wave.set([82,73,70,70]);wave.set([87,65,86,69],8);const webm=new Uint8Array([0x1a,0x45,0xdf,0xa3,1,2,3]);
