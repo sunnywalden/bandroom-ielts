@@ -2,6 +2,7 @@
 // submitted content, conditions, day and attempt; drafts never enter this list.
 export type PronunciationError = {
   wordIndex?: number; phoneIndex?: number; kind: 'substitution'|'deletion'|'addition';
+  gapOccurrence?: number;
   target: string; actual: string; word?: string;
   startMs?: number; endMs?: number; anchorMs?: number;
   probability?: number; suggestion?: string;

@@ -308,3 +308,29 @@ test('speaking acoustic card seeks, stops and retries the original recording win
  assert.ok(button('回听 think'));
  assert.equal(puts().length,0);
 });
+
+test('two additions in the same gap replay distinct windows on the same original recording',async()=>{
+ const audioId='33333333-3333-4333-8333-333333333333';
+ state.stage='speak';
+ state.entries[12]={speakingPhase:'review',speakingComplete:'yes',
+  speakingPart2:JSON.stringify([{at:'2026-11-09T01:00:00Z',text:'Fixture Part 2',spoken:true,audio:audioId}]),
+  speakingFollowup:JSON.stringify([{at:'2026-11-09T01:02:00Z',text:'Fixture follow-up',spoken:true}])};
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='speakingPart2');
+ assert.ok(source);
+ const first={wordIndex:0,phoneIndex:1,kind:'addition',target:'∅',actual:'AH',word:'think',startMs:1000,endMs:1080};
+ const second={...first,gapOccurrence:1,startMs:2500,endMs:2570};
+ feedback=[{id:'fb-repeated',day:12,stage:'speak',attempt:source.id,evidence:'Acoustic fixture',
+  feedback:'回听两处添音。',createdAt:'2026-11-09T01:00:00Z',analysis:{errors:[first,second]}}];
+ await mount();
+ const section=document.querySelector('[aria-label="口语 Part 2 · 首次回答反馈"]');
+ const cards=[...section.querySelectorAll('.af-error-card')];
+ assert.equal(cards.length,2);
+ const clipStarts=[.5,2];
+ for(const [index,card] of cards.entries()){
+  const audio=card.querySelector('audio');
+  assert.equal(new URL(audio.src).searchParams.get('id'),audioId);
+  await click(card.querySelector('button'));
+  assert.equal(audio.currentTime,clipStarts[index]);
+ }
+ assert.equal(puts().length,0);
+});
