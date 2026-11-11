@@ -31,6 +31,58 @@ PYTHONPATH=analysis/src python3 -m bandroom_acoustic.cli \
 PYTHONPATH=analysis/src python3 -m unittest discover -s analysis/tests -v
 ```
 
+## Reproduce the spontaneous speech development probe
+
+The probe trains small phoneme and boundary heads on a frozen DistilHuBERT
+encoder. Whisper supplies word positions for the substitution, deletion and
+insertion search. An offset acoustic pass checks the proposed events. The scorer
+counts every reference error, including ones it cannot map to an ASR word.
+These scripts run locally outside the Work analysis bundle. Use their output
+for development diagnostics only.
+
+Use the publisher's [L2-ARCTIC Suitcase archive](https://psi.engr.tamu.edu/l2-arctic-corpus/)
+under its CC BY-NC 4.0 terms. The archive digest is pinned in
+`development_probe.py`. The fixed development split trains on 17 speakers and
+uses EBVS/SVBI for threshold calibration and HJK/LXC/RRBI for measurement.
+All clips belong to the public corpus and are development material.
+
+The measured setup used arm64 macOS, FFmpeg 4.4, Python 3.13.13, PyTorch
+2.15.0, transformers 4.57.6, cmudict 1.1.3, NumPy 2.5.4, SciPy 1.18.1 and
+safetensors 0.8.0. Supply a local directory containing `config.json` and
+`model.safetensors` from the fixed
+[DistilHuBERT revision](https://huggingface.co/ntu-spml/distilhubert/tree/fa87d96265d6b7af66e112faff6ff44df419cec9).
+Build the [whisper.cpp v1.8.3 release](https://github.com/ggml-org/whisper.cpp/releases/tag/v1.8.3)
+with CMake Release, `GGML_METAL=OFF`, `GGML_BLAS=OFF` and
+`WHISPER_BUILD_TESTS=OFF`. Use `whisper-cli` and the pinned
+[`ggml-base.en-q5_1.bin`](https://huggingface.co/ggerganov/whisper.cpp/blob/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.en-q5_1.bin).
+
+From the repository root, set `probe_python`, `archive`, `encoder`,
+`whisper_bin`, `whisper_weights` and `ffmpeg` to local paths. Use a fresh
+`run_root`. Generate predictions before opening evaluation labels.
+
+```sh
+mkdir -p "$run_root/audio"
+"$probe_python" analysis/scripts/train_suitcase_probe.py \
+  "$archive" "$encoder" "$run_root/probe" --ffmpeg "$ffmpeg"
+for clip in ebvs svbi hjk lxc rrbi; do
+  unzip -p "$archive" "suitcase_corpus/wav/$clip.wav" > "$run_root/audio/$clip.wav"
+done
+"$probe_python" analysis/scripts/run_development_probe.py \
+  "$encoder" "$run_root/probe" "$whisper_bin" "$whisper_weights" \
+  "$run_root/predictions" "$run_root/audio/"{ebvs,svbi,hjk,lxc,rrbi}.wav \
+  --ffmpeg "$ffmpeg"
+"$probe_python" analysis/scripts/evaluate_suitcase_probe.py \
+  "$archive" "$run_root/predictions" "$run_root/probe/training.json" \
+  "$run_root/development-score.json"
+```
+
+Keep the training manifest, weights, prediction files and score together
+outside Git. Reuse the saved prediction files and manifest for score replay.
+For local performance measurements, run one recording per fresh process
+under `/usr/bin/time -l` on macOS. Record the decode, ASR and both acoustic
+pass timings along with the process wall time. Work cold-start measurements
+also need the full transfer, installation and concurrent memory costs.
+
 ## Build a bundle
 
 ```sh

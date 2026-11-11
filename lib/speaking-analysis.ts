@@ -16,7 +16,7 @@ export type SpeakingAnalysis = {
 const KINDS = new Set(["substitution", "deletion", "addition"]);
 
 function isInt(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value);
+  return typeof value === "number" && Number.isSafeInteger(value);
 }
 
 function isNumber(value: unknown): value is number {
@@ -83,6 +83,7 @@ export function validateSpeakingAnalysis(
   else {
     if (events.length > 500) errors.push("too many error events");
     const identities = new Set<string>();
+    const additions = new Map<string, Array<{ index: number; occurrence: number; start: number; end: number }>>();
     events.forEach((event, index) => {
       const prefix = `errors[${index}]`;
       if (!event || typeof event !== "object" || Array.isArray(event)) {
@@ -96,8 +97,14 @@ export function validateSpeakingAnalysis(
       if (!isInt(row.phoneIndex) || row.phoneIndex < 0) errors.push(`${prefix}.phoneIndex is invalid`);
       if (typeof row.target !== "string" || !row.target) errors.push(`${prefix}.target is required`);
       if (typeof row.actual !== "string" || !row.actual) errors.push(`${prefix}.actual is required`);
+      const identity = JSON.stringify([row.wordIndex, row.phoneIndex, kind, row.target, row.actual]);
+      const occurrence = row.gapOccurrence === undefined ? 0 : row.gapOccurrence;
+      const validOccurrence = isInt(occurrence) && occurrence >= 0;
+      if (row.gapOccurrence !== undefined && (kind !== "addition" || !validOccurrence))
+        errors.push(`${prefix}.gapOccurrence must be a nonnegative safe integer on an addition`);
       if (kind === "deletion") {
         if (row.actual !== "∅") errors.push(`${prefix}.actual must be ∅ for a deletion`);
+        if (row.target === "∅") errors.push(`${prefix}.target must be a phone for a deletion`);
         if (!isNumber(row.anchorMs) || row.anchorMs < 0 || row.anchorMs > durationMs)
           errors.push(`${prefix}.anchorMs is outside the recording`);
       } else if (kind === "substitution" || kind === "addition") {
@@ -105,15 +112,29 @@ export function validateSpeakingAnalysis(
         if (kind === "substitution" && (row.target === "∅" || row.actual === "∅"))
           errors.push(`${prefix} substitution needs non-empty target and actual`);
         if (row.target === row.actual) errors.push(`${prefix}.target equals actual`);
-        if (!isNumber(row.startMs) || !isNumber(row.endMs) || row.startMs < 0 || row.startMs >= row.endMs || row.endMs > durationMs)
+        const start = row.startMs, end = row.endMs;
+        if (!isNumber(start) || !isNumber(end) || start < 0 || start >= end || end > durationMs)
           errors.push(`${prefix} has an invalid startMs/endMs`);
+        else if (kind === "addition" && validOccurrence) {
+          const group = additions.get(identity) ?? [];
+          group.push({ index, occurrence, start, end });
+          additions.set(identity, group);
+        }
       }
       if (row.probability !== undefined && (!isNumber(row.probability) || row.probability < 0 || row.probability > 1))
         errors.push(`${prefix}.probability must be within [0,1]`);
-      const identity = `${String(row.wordIndex)}:${String(row.phoneIndex)}:${String(kind)}:${String(row.target)}:${String(row.actual)}`;
-      if (identities.has(identity)) errors.push(`${prefix} duplicates an error identity`);
-      identities.add(identity);
+      const eventKey = kind === "addition" ? JSON.stringify([identity, occurrence]) : identity;
+      if (identities.has(eventKey)) errors.push(`${prefix} duplicates an error identity`);
+      identities.add(eventKey);
     });
+    for (const group of additions.values()) {
+      group.sort((left, right) => left.start - right.start);
+      for (let i = 1; i < group.length; i += 1) {
+        const previous = group[i - 1], current = group[i];
+        if (current.start < previous.end || current.occurrence <= previous.occurrence)
+          errors.push(`errors[${current.index}] overlaps or misorders an addition in the same gap`);
+      }
+    }
   }
   return errors.length ? { ok: false, errors } : { ok: true, analysis: analysis as SpeakingAnalysis };
 }

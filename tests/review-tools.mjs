@@ -302,7 +302,9 @@ const thirdClaim=text(await callReviewTool(owner,'claim_review_tasks',{limit:1,c
 eq([thirdClaim.id,thirdClaim.fence,thirdClaim.checkpointSha256],[transferJob.taskId,3,decodedFields.artifactSha256],
   'next run reclaims committed checkpoint');
 eq((await transferPut(transferRequest(save,decoded))).status,409,'interrupted lease cannot overwrite checkpoint');
-const analysis={...baseAnalysis,inputSha256:source.sha256,inputBytes:source.bytes};
+const firstAddition={kind:'addition',wordIndex:0,phoneIndex:1,target:'∅',actual:'AH',startMs:100,endMs:170};
+const secondAddition={...firstAddition,gapOccurrence:1,startMs:230,endMs:290};
+const analysis={...baseAnalysis,inputSha256:source.sha256,inputBytes:source.bytes,errors:[firstAddition,secondAddition]};
 const completion={taskId:transferJob.taskId,fence:3,feedback:'Synthetic test feedback',evidence:'Synthetic test',
   analysisVersion:'analysis-v1',recordingSha256:source.sha256,analysis};
 eq(text(await callReviewTool(owner,'complete_review_task',completion)).error,'checkpoint_not_read','new lease must read committed bytes');
@@ -312,14 +314,28 @@ const restoredBytes=await transferGet(transferRequest(restoredGrant));
 eq([restoredBytes.status,Buffer.from(await restoredBytes.arrayBuffer())],[200,decoded],'fresh lease restores PCM without rereading source');
 const wrongCount={...analysis,decoded:{...analysis.decoded,sampleCount:8000},coverage:{analyzedSamples:[[0,8000]],fraction:1}};
 eq(text(await callReviewTool(owner,'complete_review_task',{...completion,analysis:wrongCount})).error,'invalid_analysis','final result must use committed timeline');
-sql.prepare('INSERT INTO learner_states(user_id,revision,state) VALUES (?,?,?)').run(owner,24,JSON.stringify({day:12,stage:'write'}));
+for(const [errors,message] of [
+  [[firstAddition,{...secondAddition,gapOccurrence:0}],'duplicate occurrence rejected'],
+  [[firstAddition,{...secondAddition,startMs:150}],'overlapping addition rejected'],
+  [[{...firstAddition,gapOccurrence:2},secondAddition],'out-of-order occurrence rejected'],
+  [[{...secondAddition,gapOccurrence:0.5}],'fractional occurrence rejected'],
+  [[{kind:'deletion',wordIndex:0,phoneIndex:1,target:'T',actual:'∅',anchorMs:210,gapOccurrence:0}],'occurrence on deletion rejected'],
+]){
+  const invalid=await callReviewTool(owner,'complete_review_task',{...completion,analysis:{...analysis,errors}});
+  eq(text(invalid).error,'invalid_analysis',message);
+}
+const learnerState={day:12,stage:'write',completed:[11],entries:{12:{speakingPart2:'preserved recording reference'}}};
+sql.prepare('INSERT INTO learner_states(user_id,revision,state) VALUES (?,?,?)').run(owner,24,JSON.stringify(learnerState));
 const completed=text(await callReviewTool(owner,'complete_review_task',completion));
 eq(completed.duplicate,false,'speaking result committed');
 const receipt=text(await callReviewTool(owner,'read_review_receipt',{taskId:transferJob.taskId}));
 eq([receipt.id,receipt.attemptId,receipt.fence,receipt.recordingSha256],[completed.receiptId,transferJob.jobId,3,source.sha256],
   'receipt is bound to the exact attempt, recording and current fence');
-eq(sql.prepare('SELECT attempt FROM teacher_feedback WHERE review_task_id=?').get(transferJob.taskId).attempt,transferJob.jobId,'feedback attached to same attempt');
-eq(sql.prepare('SELECT revision FROM learner_states WHERE user_id=?').get(owner).revision,24,'feedback did not change learner state');
+const feedbackRow=sql.prepare('SELECT attempt,analysis_json FROM teacher_feedback WHERE review_task_id=?').get(transferJob.taskId);
+eq([feedbackRow.attempt,JSON.parse(feedbackRow.analysis_json).errors],[transferJob.jobId,[firstAddition,secondAddition]],
+  'both additions and their timestamps are attached to the original attempt');
+const learnerRow=sql.prepare('SELECT revision,state FROM learner_states WHERE user_id=?').get(owner);
+eq([learnerRow.revision,JSON.parse(learnerRow.state)],[24,learnerState],'feedback did not change learner state');
 objects.delete(sourceKey);
 const completionReplay=text(await callReviewTool(owner,'complete_review_task',completion));
 eq([completionReplay.duplicate,completionReplay.receiptId],[true,completed.receiptId],'completion replay does not need recording storage');
