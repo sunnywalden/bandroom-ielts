@@ -2,6 +2,7 @@ import { z } from "zod/v4";
 import { env } from "cloudflare:workers";
 import { getDb } from "@/db";
 import { createAnalysisBundleGrant } from "./analysis-bundle";
+import { decodeCheckpointLimit, issueReviewTransfer, requireDecodedInput } from "./review-transfer";
 import { validateSpeakingAnalysis } from "./speaking-analysis";
 import {
   claimReviewTasks, completeReviewTask, failReviewTask, getReviewTask, readReviewCheckpoint, readReviewReceipt,
@@ -65,6 +66,14 @@ const completeSpec = z.strictObject({
   payload: z.record(z.string(), z.unknown()).optional(),
 });
 const bundleSpec = z.strictObject({ taskId, fence });
+const transferSpec = z.discriminatedUnion("action", [
+  z.strictObject({ taskId, fence, action: z.literal("read_recording") }),
+  z.strictObject({ taskId, fence, action: z.literal("read_decode") }),
+  z.strictObject({
+    taskId, fence, action: z.literal("save_decode"), artifactSha256: hex64,
+    bytes: z.number().int().min(1).max(decodeCheckpointLimit),
+  }),
+]);
 const recordingSpec = z.strictObject({
   taskId, fence,
   offset: z.number().int().min(0).max(12 * 1024 * 1024),
@@ -90,7 +99,7 @@ export const reviewTools = [
     name: "renew_review_lease", description: "Extend the current processing lease for one claimed task. A stale fence or expired lease is rejected; stop writing when this fails.", schema: renewSpec, readOnly: false,
   },
   {
-    name: "save_review_checkpoint", description: "Persist one analyzer-versioned checkpoint artifact for a claimed task. The same chunk and version are idempotent; a different digest is rejected.", schema: checkpointSpec, readOnly: false,
+    name: "save_review_checkpoint", description: "Persist metadata for a claimed text task. Speaking tasks save decoded bytes using get_review_transfer.", schema: checkpointSpec, readOnly: false,
   },
   {
     name: "read_review_checkpoint", description: "Read the current durable checkpoint for a claimed task, or supply stage and chunkIndex to read a specific checkpoint. Requires the current lease and fence. Verify artifact hashes before reuse.", schema: checkpointReadSpec, readOnly: true,
@@ -103,6 +112,9 @@ export const reviewTools = [
   },
   {
     name: "get_analysis_bundle", description: "Issue a short-lived, task/fence-bound URL for the fixed acoustic analysis bundle. The URL is private, expiring and must not be logged or shared; verify the SHA after download.", schema: bundleSpec, readOnly: true,
+  },
+  {
+    name: "get_review_transfer", description: "Issue a task/fence-bound grant for a single private binary transfer. GET original audio or committed decoded audio, or PUT the exact decoded artifact digest and size requested. Use the returned authorization only in the request header. Verify the SHA after download. Private Site access is required.", schema: transferSpec, readOnly: false,
   },
   {
     name: "read_review_recording", description: "Read one bounded byte range of the original recording bound to a claimed speaking task. Verify the reassembled SHA-256 before analysis. If a transient read failure persists, call fail_review_task with its error code and retryable=true.", schema: recordingSpec, readOnly: true,
@@ -132,7 +144,7 @@ async function snapshotFor(db: ReviewTaskDb, userId: string, task: ReviewTask) {
 
 function toolError(error: unknown) {
   if (error instanceof ReviewTaskError) {
-    const payload = error.code === "recording_read_failed" || error.code === "recording_range_truncated"
+    const payload = ["recording_read_failed", "recording_range_truncated", "transfer_storage_unavailable"].includes(error.code)
       ? { error: error.code, retryable: true }
       : { error: error.code };
     return { content: [{ type: "text", text: JSON.stringify(payload) }], isError: true };
@@ -167,6 +179,9 @@ export async function callReviewTool(userId: string, name: string, args: unknown
       }
       case "save_review_checkpoint": {
         const input = checkpointSpec.parse(args);
+        const task = await getReviewTask(db, userId, input.taskId);
+        if (task?.kind === "speaking")
+          throw new ReviewTaskError("binary_checkpoint_required", "Speaking checkpoints must store verified decoded bytes.");
         const saved = await saveReviewCheckpoint(db, userId, {
           ...input, coverage: input.coverage, objectRef: input.objectRef ?? null, payload: input.payload,
         });
@@ -207,7 +222,7 @@ export async function callReviewTool(userId: string, name: string, args: unknown
         if (task.kind === "text" && input.analysis)
           throw new ReviewTaskError("analysis_not_allowed", "Text-only tasks cannot claim acoustic evidence.");
         const analysisVersion = input.analysisVersion ?? task.analysisVersion;
-        if (task.kind === "speaking") {
+        if (task.kind === "speaking" && task.state !== "completed") {
           if (!analysisVersion) throw new ReviewTaskError("analysis_version_required", "A speaking completion needs an analysis version.");
           const released = (env.ANALYSIS_RELEASED_VERSIONS ?? "").split(",").map(value => value.trim()).filter(Boolean);
           if (!released.includes(analysisVersion))
@@ -223,6 +238,10 @@ export async function callReviewTool(userId: string, name: string, args: unknown
             recordingSha256: input.recordingSha256!, analysisVersion,
           });
           if (!validation.ok) throw new ReviewTaskError("invalid_analysis", validation.errors.join("; "));
+          const sampleCount = await requireDecodedInput(db, userId, task.id, input.fence,
+            { sha256: digest, bytes: metadata.size }, analysisVersion);
+          if ((input.analysis?.decoded as { sampleCount?: number }).sampleCount !== sampleCount)
+            throw new ReviewTaskError("invalid_analysis", "The decoded sample count differs from the committed timeline.");
         }
         const snapshot = await snapshotFor(db, userId, task);
         const attempt = snapshot.attempt as Record<string, unknown> | undefined;
@@ -255,6 +274,11 @@ export async function callReviewTool(userId: string, name: string, args: unknown
       case "get_analysis_bundle": {
         const input = bundleSpec.parse(args);
         const grant = await createAnalysisBundleGrant(db, userId, input.taskId, input.fence);
+        return { content: [{ type: "text", text: JSON.stringify(grant) }] };
+      }
+      case "get_review_transfer": {
+        const input = transferSpec.parse(args);
+        const grant = await issueReviewTransfer(db, userId, input.taskId, input.fence, input);
         return { content: [{ type: "text", text: JSON.stringify(grant) }] };
       }
       case "read_review_recording": {

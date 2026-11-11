@@ -104,16 +104,17 @@ export function createReviewTaskStatement(db: D1Like, input: {
   day: number;
   attemptRevision: number;
   recordingId?: string | null;
+  analysisVersion?: string | null;
   now: number;
 }) {
   return db.prepare(`INSERT INTO review_tasks
     (id, review_job_id, user_id, kind, attempt_id, day, attempt_revision, recording_id,
-     stage, state, fence, attempts, next_at, created_at, updated_at)
-    SELECT ?,?,?,?,?,?,?,?, 'read_input','queued',0,0,?,?,?
+     analysis_version, stage, state, fence, attempts, next_at, created_at, updated_at)
+    SELECT ?,?,?,?,?,?,?,?,?, 'read_input','queued',0,0,?,?,?
     WHERE EXISTS (SELECT 1 FROM review_jobs WHERE id=? AND user_id=?)
     ON CONFLICT(review_job_id) DO NOTHING`)
     .bind(input.taskId, input.reviewJobId, input.userId, input.kind, input.attemptId, input.day,
-      input.attemptRevision, input.recordingId ?? null, input.now, input.now, input.now,
+      input.attemptRevision, input.recordingId ?? null, input.analysisVersion ?? null, input.now, input.now, input.now,
       input.reviewJobId, input.userId);
 }
 
@@ -176,6 +177,7 @@ export async function saveReviewCheckpoint(db: D1Like, userId: string, input: {
   taskId: string; fence: number; analysisVersion: string; stage: string; chunkIndex: number;
   inputSha256: string; artifactSha256: string; bytes: number; coverage?: number;
   objectRef?: string | null; payload?: Record<string, unknown>; now?: number;
+  expectedDecodePointer?: string | null;
 }) {
   const now = input.now ?? Date.now();
   const lease = [input.taskId, userId, input.fence, now];
@@ -184,26 +186,34 @@ export async function saveReviewCheckpoint(db: D1Like, userId: string, input: {
   const payloadJson = JSON.stringify(input.payload ?? {});
   const active = "id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?";
   const artifact = "task_id=? AND stage=? AND chunk_index=? AND analyzer_version=?";
+  const verifiedDecode = input.expectedDecodePointer !== undefined;
+  const pointer = "AND (?=0 OR (stage IN ('read_input','decode') AND checkpoint_sha256 IS ?))";
+  const pointerArgs = [Number(verifiedDecode), input.expectedDecodePointer ?? null];
   const [insert, , readback] = await db.batch([
     db.prepare(`INSERT INTO analysis_artifacts
       (task_id, stage, chunk_index, analyzer_version, input_sha256, artifact_sha256, bytes, object_ref, payload_json, created_at)
       SELECT ?,?,?,?,?,?,?,?,?,? WHERE EXISTS (
-        SELECT 1 FROM review_tasks WHERE ${active} AND (analysis_version IS NULL OR analysis_version=?)
+        SELECT 1 FROM review_tasks WHERE ${active} AND (analysis_version IS NULL OR analysis_version=?) ${pointer}
       )
-      ON CONFLICT(task_id, stage, chunk_index, analyzer_version) DO NOTHING`)
+      ON CONFLICT(task_id, stage, chunk_index, analyzer_version) DO UPDATE SET
+        artifact_sha256=excluded.artifact_sha256, bytes=excluded.bytes, object_ref=excluded.object_ref,
+        payload_json=excluded.payload_json, created_at=excluded.created_at
+      WHERE ?=1 AND analysis_artifacts.stage='decode' AND analysis_artifacts.chunk_index=0
+        AND analysis_artifacts.input_sha256=excluded.input_sha256
+        AND COALESCE(json_extract(analysis_artifacts.payload_json, '$.format'), '')<>'bandroom-decode-v1'`)
       .bind(...key, input.inputSha256, input.artifactSha256, input.bytes,
-        objectRef, payloadJson, now, ...lease, input.analysisVersion),
+        objectRef, payloadJson, now, ...lease, input.analysisVersion, ...pointerArgs, Number(verifiedDecode)),
     // A matching replay can repair an old artifact whose task pointer was never written.
     db.prepare(`UPDATE review_tasks
       SET stage=?, checkpoint_sha256=?, coverage=COALESCE(?, coverage),
           analysis_version=COALESCE(analysis_version, ?), lease_until=MAX(lease_until, ?), updated_at=?
-      WHERE ${active} AND (analysis_version IS NULL OR analysis_version=?)
+      WHERE ${active} AND (analysis_version IS NULL OR analysis_version=?) ${pointer}
         AND (changes()=1 OR (checkpoint_sha256 IS NULL AND EXISTS (
           SELECT 1 FROM analysis_artifacts WHERE ${artifact} AND input_sha256=? AND artifact_sha256=? AND bytes=?
             AND object_ref IS ? AND payload_json=?
         )))`)
       .bind(input.stage, input.artifactSha256, input.coverage ?? null, input.analysisVersion,
-        now + LEASE_MS, now, ...lease, input.analysisVersion, ...key,
+        now + LEASE_MS, now, ...lease, input.analysisVersion, ...pointerArgs, ...key,
         input.inputSha256, input.artifactSha256, input.bytes, objectRef, payloadJson),
     db.prepare(`SELECT analysis_version AS analysisVersion, checkpoint_sha256 AS checkpointSha256,
         a.input_sha256 AS inputSha256, a.artifact_sha256 AS artifactSha256, a.bytes,
@@ -225,6 +235,8 @@ export async function saveReviewCheckpoint(db: D1Like, userId: string, input: {
   if (!current) throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
   if (current.analysisVersion !== null && current.analysisVersion !== input.analysisVersion)
     throw new ReviewTaskError("analysis_version_mismatch", "Checkpoints cannot mix analyzer versions.");
+  if (verifiedDecode && current.artifactSha256 === null && current.checkpointSha256 !== input.expectedDecodePointer)
+    throw new ReviewTaskError("checkpoint_advanced", "The checkpoint changed before this write committed.");
   if (current.inputSha256 !== input.inputSha256 || current.artifactSha256 !== input.artifactSha256 ||
       current.bytes !== input.bytes || current.objectRef !== objectRef || current.payloadJson !== payloadJson)
     throw new ReviewTaskError("artifact_conflict", "A different artifact already exists for this chunk.");
@@ -298,24 +310,24 @@ export async function completeReviewTask(db: D1Like, userId: string, input: {
   };
   now?: number;
 }) {
-  const now = input.now ?? Date.now();
   const outputSha256 = await sha256Json(input.output);
-  const receiptSql = `SELECT id, task_id AS taskId, user_id AS userId,
-      attempt_id AS attemptId, attempt_revision AS attemptRevision, recording_sha256 AS recordingSha256,
-      analysis_version AS analysisVersion, fence, feedback_id AS feedbackId, output_sha256 AS outputSha256,
-      payload_json AS payloadJson, created_at AS createdAt
-    FROM review_receipts`;
-  const existing = toReceipt(await db.prepare(`${receiptSql} WHERE task_id=? AND user_id=?`)
-    .bind(input.taskId, userId).first<Record<string, unknown>>());
-  if (existing) {
-    if (existing.outputSha256 !== outputSha256)
+  const matchingReceipt = async () => {
+    const receipt = await readReviewReceipt(db, userId, input.taskId);
+    if (receipt && receipt.outputSha256 !== outputSha256)
       throw new ReviewTaskError("receipt_conflict", "A different result was already committed for this task.");
-    return { receipt: existing, duplicate: true };
-  }
+    return receipt;
+  };
+  const existing = await matchingReceipt();
+  if (existing) return { receipt: existing, duplicate: true };
 
   const task = toTask(await db.prepare(`SELECT ${taskColumns} FROM review_tasks
     WHERE id=? AND user_id=?`).bind(input.taskId, userId).first<Record<string, unknown>>());
   if (!task) throw new ReviewTaskError("task_not_found", "The task is not available to this account.");
+  if (task.state === "completed") {
+    const receipt = await matchingReceipt();
+    if (receipt) return { receipt, duplicate: true };
+  }
+  const now = input.now ?? Date.now();
   if (task.state !== "running" || task.fence !== input.fence || (task.leaseUntil ?? 0) <= now)
     throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
   if (input.feedback.attempt !== task.attemptId) throw new ReviewTaskError("attempt_mismatch", "Feedback must bind to the task's exact attempt.");
@@ -350,11 +362,10 @@ export async function completeReviewTask(db: D1Like, userId: string, input: {
   ];
   const results = await db.batch(statements) as Array<{ meta?: { changes?: number } }>;
   const changed = results?.[2]?.meta?.changes;
-  if (changed !== 1) throw new ReviewTaskError("stale_lease", "The task lease expired before completion.");
-  const receipt = toReceipt(await db.prepare(`${receiptSql} WHERE task_id=? AND user_id=?`)
-    .bind(input.taskId, userId).first<Record<string, unknown>>());
+  const receipt = await matchingReceipt();
+  if (!receipt && changed !== 1) throw new ReviewTaskError("stale_lease", "The task lease expired before completion.");
   if (!receipt) throw new ReviewTaskError("receipt_missing", "The completion receipt was not persisted.");
-  return { receipt, duplicate: false };
+  return { receipt, duplicate: receipt.id !== receiptId };
 }
 
 export async function getReviewTask(db: D1Like, userId: string, taskId: string) {

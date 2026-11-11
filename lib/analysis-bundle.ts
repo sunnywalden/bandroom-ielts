@@ -40,28 +40,27 @@ async function hmacKey(secret: string) {
   return crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
 }
 
-export async function signBundleToken(secret: string, payload: SignedPayload) {
+export async function signAnalysisGrant(secret: string, payload: unknown, scope = "") {
   const body = base64Url(encoder.encode(JSON.stringify(payload)));
-  const signature = await crypto.subtle.sign("HMAC", await hmacKey(secret), encoder.encode(body));
+  const signature = await crypto.subtle.sign("HMAC", await hmacKey(secret), encoder.encode(scope + body));
   return `${body}.${base64Url(new Uint8Array(signature))}`;
 }
 
-export async function verifyBundleToken(secret: string, token: string, now = Date.now()) {
+export async function verifyAnalysisGrant(secret: string, token: string, scope = ""): Promise<unknown> {
+  if (token.length > 4096) return null;
   const parts = token.split(".");
   if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
-  let valid = false;
   try {
-    valid = await crypto.subtle.verify("HMAC", await hmacKey(secret), fromBase64Url(parts[1]), encoder.encode(parts[0]));
+    const valid = await crypto.subtle.verify("HMAC", await hmacKey(secret),
+      fromBase64Url(parts[1]), encoder.encode(scope + parts[0]));
+    return valid ? JSON.parse(new TextDecoder().decode(fromBase64Url(parts[0]))) : null;
   } catch {
     return null;
   }
-  if (!valid) return null;
-  let payload: SignedPayload;
-  try {
-    payload = JSON.parse(new TextDecoder().decode(fromBase64Url(parts[0]))) as SignedPayload;
-  } catch {
-    return null;
-  }
+}
+
+export async function verifyBundleToken(secret: string, token: string, now = Date.now()) {
+  const payload = await verifyAnalysisGrant(secret, token) as SignedPayload | null;
   if (payload?.v !== 1 || typeof payload.key !== "string" || typeof payload.user !== "string"
     || typeof payload.task !== "string" || !Number.isInteger(payload.fence)
     || !Number.isInteger(payload.iat) || !Number.isInteger(payload.exp)) return null;
@@ -121,9 +120,10 @@ export async function createAnalysisBundleGrant(
   if (!origin || !/^https?:\/\//.test(origin))
     throw new ReviewTaskError("bundle_origin_unavailable", "The public site origin is not configured.");
   const expiresAt = now + Math.max(60_000, Math.min(options.ttlMs ?? 10 * 60_000, 15 * 60_000));
-  const token = await signBundleToken(secret, {
+  const payload: SignedPayload = {
     v: 1, key, user: userId, task: taskId, fence, iat: now, exp: expiresAt,
-  });
+  };
+  const token = await signAnalysisGrant(secret, payload);
   return {
     version, expiresAt, bundleSha256: manifest.bundleSha256, bytes: manifest.bytes, parts: manifest.parts,
     url: `${origin.replace(/\/$/, "")}/api/analysis-bundle?token=${encodeURIComponent(token)}`,

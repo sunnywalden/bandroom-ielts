@@ -86,6 +86,7 @@ export async function PUT(request: Request) {
   if ((state.fullTests?.length??0)>(previous?.fullTests?.length??0) && state.fullTests.at(-1)?.audio)
     refs.push({id:state.fullTests.at(-1).audio,phase:"assessment"});
   const linked=refs.length&&previous?linkedRecordings(previous):new Set<string>();
+  const recordingIdentities = new Map<string, { sha256: string; bytes: number }>();
   for (const {id,phase} of refs) {
     if (!env.BUCKET) return json({error:"recordings_unavailable"},503);
     const object=await env.BUCKET.head(`speaking/${encodeURIComponent(user.userId)}/${id}`);
@@ -94,6 +95,8 @@ export async function PUT(request: Request) {
     const m=object.customMetadata;
     if(linked.has(id)||(m?.purpose==="assessment"&&phase!=="assessment")||(m?.purpose==="speaking"&&(m.day!==String(state.day)||m.phase!==phase)))
       return json({error:"recording_question_mismatch"},422);
+    if (m?.digest && /^[0-9a-f]{64}$/.test(m.digest) && Number.isSafeInteger(object.size) && object.size > 0)
+      recordingIdentities.set(id, { sha256: m.digest, bytes: object.size });
     linked.add(id);
   }
   if (submissionKey) {
@@ -103,10 +106,12 @@ export async function PUT(request: Request) {
     if (submitted.length !== 1 || state.finished || state.stage !== submitted[0].stage)
       return json({ error: "invalid_review_submission" }, 422);
     const attempt = submitted[0];
+    const recording = attempt.recordingId ? recordingIdentities.get(attempt.recordingId) : undefined;
     const saved = await submitReview(user.userId, submissionKey, requestHash, revision, state, {
       sourceId: attempt.id, attempt: { ...attempt, id: "v2:" + crypto.randomUUID() },
       context: reviewContext(attempt, lesson),
-    });
+      ...(recording && { recording }),
+    }, env.ANALYSIS_BUNDLE_VERSION);
     return saved ? receipt(saved) : json({ error: "revision_conflict" }, 409);
   }
   if (prior&&same(prior.state,state)) return json({revision:prior.revision});

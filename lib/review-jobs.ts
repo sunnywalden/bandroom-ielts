@@ -9,6 +9,7 @@ export type FrozenReview = {
   sourceId: string;
   attempt: ReviewAttempt;
   context: ReturnType<typeof reviewContext>;
+  recording?: { sha256: string; bytes: number };
 };
 
 export async function findSubmission(userId: string, submissionKey: string) {
@@ -26,6 +27,7 @@ export async function frozenReviews(userId: string, day?: number) {
 export async function submitReview(
   userId: string, submissionKey: string, requestHash: string, revision: number,
   state: Record<string, unknown>, snapshot: FrozenReview,
+  analysisVersion?: string,
 ) {
   const db = getDb().$client;
   const id = snapshot.attempt.id;
@@ -40,6 +42,7 @@ export async function submitReview(
     day: snapshot.attempt.day,
     attemptRevision: revision + 1,
     recordingId: snapshot.attempt.recordingId ?? null,
+    analysisVersion: snapshot.attempt.recordingId ? analysisVersion : undefined,
     now,
   });
   // The fresh ID authorizes exactly one checkpoint update. A stale or repeated

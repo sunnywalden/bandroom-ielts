@@ -16,21 +16,30 @@ import sys
 import time
 
 from .analyzer import UnavailableAnalyzer
+from .checkpoint import encode_checkpoint, read_checkpoint
 from .chunks import chunk_coverage, plan_chunks
-from .decode import DecodeError, decode_audio
+from .decode import DecodeError, DecodedAudio, decode_audio
 from .schema import validate_analysis
 
 
 def build_analysis(audio: str, *, analysis_version: str, ffmpeg: str = "ffmpeg") -> dict:
     started = time.monotonic()
     decoded = decode_audio(audio, ffmpeg=ffmpeg)
-    decode_ms = (time.monotonic() - started) * 1000.0
+    return analyze_decoded(decoded, analysis_version, (time.monotonic() - started) * 1000.0)
+
+
+def check_duration(decoded: DecodedAudio) -> None:
     if decoded.container_duration_ms is not None:
         delta = abs(decoded.container_duration_ms - decoded.decoded_duration_ms)
         if delta > max(100.0, decoded.decoded_duration_ms * 0.05):
             raise DecodeError("container and decoded durations differ by more than 5%")
+
+
+def analyze_decoded(decoded: DecodedAudio, analysis_version: str, decode_ms: float) -> dict:
+    check_duration(decoded)
+    started = time.monotonic()
     chunks = plan_chunks(decoded.sample_count)
-    chunk_ms = (time.monotonic() - started) * 1000.0 - decode_ms
+    chunk_ms = (time.monotonic() - started) * 1000.0
     analyzer = UnavailableAnalyzer()
     outcome = analyzer.analyze(decoded, chunks)
     state = outcome.state
@@ -80,14 +89,49 @@ def build_analysis(audio: str, *, analysis_version: str, ffmpeg: str = "ffmpeg")
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--audio", required=True, type=Path)
-    parser.add_argument("--out", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--audio", type=Path)
+    source.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--input-sha256", help="expected SHA-256 of the original audio")
+    parser.add_argument("--checkpoint-sha256", help="expected SHA-256 of the committed checkpoint")
+    parser.add_argument("--save-checkpoint", type=Path)
+    parser.add_argument("--decode-only", action="store_true")
+    parser.add_argument("--out", type=Path)
     parser.add_argument("--analysis-version", default="bandroom-acoustic-dev")
     parser.add_argument("--ffmpeg", default=os.environ.get("FFMPEG", "ffmpeg"))
     parser.add_argument("--json", action="store_true", help="print the full analysis JSON")
     args = parser.parse_args(argv)
+    if args.checkpoint and (not args.input_sha256 or not args.checkpoint_sha256 or args.save_checkpoint):
+        parser.error("--checkpoint requires both SHA-256 values and disallows --save-checkpoint")
+    if args.decode_only and not args.save_checkpoint:
+        parser.error("--decode-only requires --save-checkpoint")
+    if not args.decode_only and not args.out:
+        parser.error("--out is required when running analysis")
     try:
-        value = build_analysis(str(args.audio), analysis_version=args.analysis_version, ffmpeg=args.ffmpeg)
+        started = time.monotonic()
+        if args.checkpoint:
+            decoded = read_checkpoint(args.checkpoint, input_sha256=args.input_sha256,
+                                      artifact_sha256=args.checkpoint_sha256, analysis_version=args.analysis_version)
+        else:
+            decoded = decode_audio(args.audio, ffmpeg=args.ffmpeg)
+            if args.input_sha256 and decoded.input_sha256 != args.input_sha256:
+                raise DecodeError("original audio digest does not match the expected input")
+        decode_ms = (time.monotonic() - started) * 1000.0
+        check_duration(decoded)
+        if args.save_checkpoint:
+            args.save_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            artifact = encode_checkpoint(decoded, args.analysis_version)
+            temp = args.save_checkpoint.with_suffix(args.save_checkpoint.suffix + ".tmp")
+            temp.write_bytes(artifact)
+            temp.replace(args.save_checkpoint)
+        if args.decode_only:
+            from hashlib import sha256
+            print(json.dumps({
+                "inputSha256": decoded.input_sha256, "artifactSha256": sha256(artifact).hexdigest(),
+                "bytes": len(artifact), "analysisVersion": args.analysis_version, "stage": "decode",
+            }))
+            return 0
+        value = analyze_decoded(decoded, args.analysis_version, decode_ms)
     except (DecodeError, OSError, ValueError) as exc:
         print(f"decode failed: {exc}", file=sys.stderr)
         return 2

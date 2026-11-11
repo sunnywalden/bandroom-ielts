@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 import json
 from pathlib import Path
 import subprocess
@@ -51,6 +52,35 @@ class DecodeTest(unittest.TestCase):
 
 
 class AnalysisTest(unittest.TestCase):
+    def test_cli_restores_exact_decoded_checkpoint_in_fresh_process(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            audio, checkpoint, output = (root / name for name in ("clip.wav", "decode.bin", "analysis.json"))
+            write_wav(audio, seconds=1.0, channels=2)
+            input_digest = sha256(audio.read_bytes()).hexdigest()
+            command = [sys.executable, "-m", "bandroom_acoustic.cli",
+                       "--analysis-version", "test-v1", "--input-sha256", input_digest]
+            decode = subprocess.run(command + ["--audio", str(audio), "--decode-only",
+                                               "--save-checkpoint", str(checkpoint)],
+                                    capture_output=True, text=True, check=False)
+            self.assertEqual(decode.returncode, 0, decode.stderr)
+            decoded = checkpoint.read_bytes()
+            audio.unlink()
+            resume = command + ["--checkpoint", str(checkpoint), "--checkpoint-sha256", sha256(decoded).hexdigest(),
+                                "--ffmpeg", str(root / "missing-ffmpeg"), "--out", str(output)]
+            result = subprocess.run(resume, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 3, result.stderr)
+            report = json.loads(output.read_text())
+            self.assertEqual(report["inputSha256"], input_digest)
+            self.assertEqual(report["decoded"]["sampleCount"], TARGET_RATE)
+            self.assertEqual(report["decoded"]["decodedDurationMs"], 1000.0)
+            self.assertEqual(report["reason"], "qualified_analyzer_unavailable")
+            checkpoint.write_bytes(decoded[:-1] + bytes([decoded[-1] ^ 1]))
+            output.unlink()
+            invalid = subprocess.run(resume, capture_output=True, text=True, check=False)
+            self.assertEqual(invalid.returncode, 2, invalid.stderr)
+            self.assertFalse(output.exists())
+
     def test_blocked_analysis_never_invents_errors(self):
         with TemporaryDirectory() as temporary:
             path = Path(temporary) / "clip.wav"

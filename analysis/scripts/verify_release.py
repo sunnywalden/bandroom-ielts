@@ -16,7 +16,10 @@ import sys
 
 from align_predictions import align
 
-NAMESPACE = "bandroom-d2-release-v1"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from bandroom_acoustic.checkpoint import read_checkpoint
+
+NAMESPACE = "bandroom-d2-release-v2"
 ROLES = ("release-owner", "holdout-custodian", "work-auditor", "site-auditor")
 IDENTITY = ("sourceSha", "buildSha256", "analysisVersion", "environmentId", "route")
 SUBJECT = ("jobId", "taskId", "attemptId", "attemptRevision", "recordingId", "recordingSha256", "inputBytes", "analysisVersion")
@@ -27,7 +30,8 @@ FILES = (
     "predictions.json", "aligned-predictions.json", "word-map.json", "reference-words.json",
     "holdout-ledger.json", "inference-windows.json", "offline.json", "work-runs.json",
     "mac-probes.json", "platform-probe.json", "browser-acceptance.json",
-    "official-run-history.zip", "site-event-export.json", "offline-output.json", "offline-reference.json",
+    "official-run-history.zip", "site-event-export.json", "offline-checkpoint.bin", "offline-inference.json",
+    "offline-output.json", "offline-reference.json", "browser-playback-events.json",
 )
 BROWSER_CASES = {
     "final-chunk", "save-delay", "api-failure", "session-expired", "refresh", "double-click",
@@ -186,6 +190,11 @@ def verify_work_runs(offline, official, probes):
     def at(event):
         return utc(event["at"])
 
+    def binary_checkpoint(run, tool):
+        selected = [event for event in for_run(run, tool) if event["metadata"].get("transport") == "binary-v1"]
+        require(len(selected) == 1, f"require one binary decode checkpoint {tool} for {run['clientRunId']}")
+        return selected[0]
+
     a_claim = one(a, "claim_review_tasks")
     read_error = one(a, "read_review_recording", "error")
     retry = one(a, "fail_review_task", "retry_wait")
@@ -199,9 +208,9 @@ def verify_work_runs(offline, official, probes):
     ranges = for_run(b, "read_review_recording")
     verify_ranges(ranges, offline)
     b_claim = one(b, "claim_review_tasks")
-    saved = one(b, "save_review_checkpoint")
+    saved = binary_checkpoint(b, "save_review_checkpoint")
     c_claim = one(c, "claim_review_tasks")
-    resumed = one(c, "read_review_checkpoint")
+    resumed = binary_checkpoint(c, "read_review_checkpoint")
     complete = one(c, "complete_review_task")
     readback = one(c, "read_review_receipt")
     receipt = offline["feedbackReceipt"]
@@ -220,8 +229,10 @@ def verify_work_runs(offline, official, probes):
     checkpoint = saved["metadata"]
     require(saved["stage"] == resumed["stage"] == "decode"
             and same(checkpoint, resumed["metadata"],
-                     ("analysisVersion", "chunkIndex", "artifactSha256", "inputSha256", "bytes"))
+                     ("analysisVersion", "chunkIndex", "artifactSha256", "inputSha256", "inputBytes", "bytes"))
+            and integer(checkpoint["chunkIndex"]) and checkpoint["chunkIndex"] == 0
             and checkpoint["inputSha256"] == offline["recordingSha256"]
+            and checkpoint["inputBytes"] == offline["inputBytes"]
             and checkpoint["analysisVersion"] == offline["analysisVersion"]
             and c["verifiedCheckpointSha256"] == checkpoint["artifactSha256"]
             and digest(checkpoint["artifactSha256"]) and integer(checkpoint["bytes"], 1),
@@ -254,6 +265,18 @@ def verify_work_runs(offline, official, probes):
                     and row["approvalPrompts"] == 0
                     and soak_start <= utc(row["startedAt"]) < utc(row["endedAt"]) <= soak_end for row in wakeups),
             "24-hour soak needs at least three verified cloud wakeups without prompts")
+    return checkpoint
+
+
+def verify_checkpoint_file(path, checkpoint, offline, output):
+    require(path.stat().st_size == checkpoint["bytes"], "decode checkpoint byte count does not match Work's download")
+    decoded = read_checkpoint(path, input_sha256=offline["recordingSha256"],
+                              artifact_sha256=checkpoint["artifactSha256"], analysis_version=offline["analysisVersion"])
+    timeline = output["analysis"]["decoded"]
+    require(decoded.input_bytes == offline["inputBytes"]
+            and decoded.sample_rate == timeline["sampleRateHz"] and decoded.sample_count == timeline["sampleCount"],
+            "the receipt does not use the recovered decode checkpoint's timeline")
+    return decoded
 
 
 def ranges_union(ranges, sample_count):
@@ -294,6 +317,53 @@ def verify_inference(analysis, predictions, labels, manifest):
                 "claimed coverage differs from completed inference windows")
 
 
+def verify_offline_inference(evidence, offline, run, checkpoint, decoded, output, hashes):
+    receipt = offline["feedbackReceipt"]
+    require(same(evidence, offline, SUBJECT) and evidence["fence"] == receipt["fence"] == run["fences"][0]
+            and evidence["clientRunId"] == run["clientRunId"]
+            and evidence["checkpointSha256"] == checkpoint["artifactSha256"]
+            and evidence["weightsSha256"] == hashes["model-weights.bin"]
+            and evidence["configSha256"] == hashes["analysis-config.json"]
+            and evidence["outputSha256"] == receipt["outputSha256"]
+            and utc(run["checkpointVerifiedAt"]) <= utc(evidence["startedAt"])
+            < utc(evidence["endedAt"]) <= utc(receipt["createdAt"]),
+            "offline inference does not bind to the recovered input, model and receipt")
+    samples = decoded.samples
+    if sys.byteorder != "little":
+        samples = samples[:]
+        samples.byteswap()
+    pcm = memoryview(samples).cast("B")
+    seen, completed = set(), []
+    for window in evidence["windows"]:
+        index, start, end = (window[key] for key in ("chunkIndex", "startSample", "endSample"))
+        require(integer(index) and index not in seen and integer(start) and integer(end, 1)
+                and start < end <= decoded.sample_count and window["state"] == "inferred",
+                "invalid completed offline inference window")
+        seen.add(index)
+        require(window["inputPcmSha256"] == hashlib.sha256(pcm[start * 2:end * 2]).hexdigest(),
+                "offline inference window does not match recovered PCM samples")
+        require(nonempty(window.get("outputBase64")), "missing offline inference window artifact")
+        raw = base64.b64decode(window["outputBase64"], validate=True)
+        require(window["outputSha256"] == hashlib.sha256(raw).hexdigest(),
+                "offline inference window artifact digest does not match")
+        artifact = read_json(raw)
+        require(same(artifact, window, ("chunkIndex", "startSample", "endSample", "inputPcmSha256"))
+                and isinstance(artifact.get("result"), dict) and bool(artifact["result"]),
+                "offline inference artifact has no model result for this window")
+        completed.append([start, end])
+    require(ranges_union(completed, decoded.sample_count) == [[0, decoded.sample_count]]
+            and ranges_union(output["analysis"]["coverage"]["analyzedSamples"], decoded.sample_count)
+            == [[0, decoded.sample_count]], "offline inference artifacts do not cover the complete recovered audio")
+
+
+def error_time_keys(kind):
+    return ("anchorMs",) if kind == "deletion" else ("startMs", "endMs")
+
+
+def within_media_time(value, duration_ms):
+    return type(value) in (int, float) and 0 <= value <= duration_ms
+
+
 def verify_offline_output(output, reference, offline, output_sha):
     receipt = offline["feedbackReceipt"]
     require(receipt["outputSha256"] == output_sha and same(reference, offline, SUBJECT)
@@ -311,20 +381,81 @@ def verify_offline_output(output, reference, offline, output_sha):
 
     def correct_time(event, human, key):
         actual, expected = event[key], human[key]
-        return all(type(value) in (int, float) and 0 <= value <= duration_ms for value in (actual, expected)) \
+        return all(within_media_time(value, duration_ms) for value in (actual, expected)) \
             and abs(actual - expected) <= 150
 
     playback = offline["browser"]["playback"]
     require(playback["recordingId"] == offline["recordingId"] and integer(playback["startMs"]),
             "offline playback does not identify the original recording and seek point")
-    require(any(
-        same(event, human, ERROR_ID)
-        and human["kind"] in ("substitution", "addition", "deletion")
-        and event["anchorMs" if human["kind"] == "deletion" else "startMs"] == playback["startMs"]
-        and all(correct_time(event, human, key)
-                for key in (("anchorMs",) if human["kind"] == "deletion" else ("startMs", "endMs")))
-        for event in analysis["errors"] for human in reference["errors"]
-    ), "offline playback has no independently verified error at its seek timestamp")
+    for event in analysis["errors"]:
+        for human in reference["errors"]:
+            if (same(event, human, ERROR_ID) and human["kind"] in ("substitution", "addition", "deletion")
+                    and event[error_time_keys(human["kind"])[0]] == playback["startMs"]
+                    and all(correct_time(event, human, key) for key in error_time_keys(human["kind"]))):
+                return event, human
+    raise ValueError("offline playback has no independently verified error at its seek timestamp")
+
+
+def verify_playback_events(events, start_ms, stop_ms, duration_ms):
+    playback = []
+    previous = -1
+    for event in events:
+        require(within_media_time(event["mediaTimeMs"], duration_ms) and integer(event["elapsedMs"])
+                and event["elapsedMs"] >= previous,
+                "invalid browser media event timestamp")
+        previous = event["elapsedMs"]
+        if event["type"] in ("seeked", "playing", "pause", "ended"):
+            playback.append(event)
+    for seeked, playing, stopped in zip(playback, playback[1:], playback[2:]):
+        if (seeked["type"] == "seeked" and playing["type"] == "playing"
+                and stopped["type"] in ("pause", "ended")):
+            require(seeked["elapsedMs"] <= playing["elapsedMs"] < stopped["elapsedMs"]
+                    and abs(seeked["mediaTimeMs"] - start_ms) <= 150
+                    and abs(playing["mediaTimeMs"] - start_ms) <= 150
+                    and abs(stopped["mediaTimeMs"] - stop_ms) <= 150
+                    and stopped["mediaTimeMs"] > playing["mediaTimeMs"],
+                    "browser seek or playback stop does not match the independently verified time")
+            return
+    raise ValueError("missing browser seeked, playing and stop event sequence")
+
+
+def verify_browser_playback(raw, browser, offline, event, human, duration_ms):
+    receipt = offline["feedbackReceipt"]
+    start = max(0, event["anchorMs"] - 750) if event["kind"] == "deletion" else max(0, event["startMs"] - 500)
+    end = event["anchorMs"] + 750 if event["kind"] == "deletion" else event["endMs"] + 500
+    stop = min(duration_ms, max(start + 300, end))
+    require(nonempty(human.get("word")), "offline human reference needs the word heard on playback")
+    for name in ("Chrome", "Safari"):
+        review = raw["reviews"][name]
+        require(same(review, offline, SUBJECT) and review["feedbackId"] == receipt["feedbackId"]
+                and review["receiptId"] == receipt["id"] and review["version"] == browser["browsers"][name]["version"]
+                and same(review["error"], event, ERROR_ID + error_time_keys(event["kind"])),
+                f"{name} playback does not bind to the original answer and error receipt")
+        require(nonempty(review["reviewerId"]) and review["heardWord"] == human["word"]
+                and review["heardActual"] == human["actual"],
+                f"{name} playback has no matching human listening record")
+        verify_playback_events(review["events"], start, stop, duration_ms)
+
+    samples = raw["timelineChecks"]
+    expected = {("Chrome", "webm/opus"), ("Safari", "mp4/aac")}
+    require(len(samples) == len(expected) and {(row["browser"], row["encoding"]) for row in samples} == expected,
+            "missing browser timeline markers for both recording encodings")
+    require(len({sample["recordingSha256"] for sample in samples}) == len(samples),
+            "timeline markers must come from distinct original recordings")
+    for sample in samples:
+        duration = sample["durationMs"]
+        markers = sample["markers"]
+        require(integer(duration, 30_000) and duration <= 180_000
+                and digest(sample["recordingSha256"]) and sample["recordingSha256"] != offline["recordingSha256"]
+                and sample["version"] == browser["browsers"][sample["browser"]]["version"]
+                and [marker["position"] for marker in markers] == ["first", "middle", "tail"],
+                "invalid independent first, middle and tail timeline markers")
+        for index, marker in enumerate(markers):
+            start, stop = marker["startMs"], marker["stopMs"]
+            require(within_media_time(start, duration) and within_media_time(stop, duration)
+                    and index * duration / 3 <= start < (index + 1) * duration / 3 and start < stop,
+                    "browser marker is outside its expected portion of the original recording")
+            verify_playback_events(marker["events"], start, stop, duration)
 
 
 def replay_report(legacy_dir, script, inputs, expected):
@@ -333,6 +464,59 @@ def replay_report(legacy_dir, script, inputs, expected):
     )
     require(result.returncode == 0 and read_json(result.stdout) == expected,
             f"{script} did not reproduce the signed report")
+
+
+def verify_platform_probes(evidence, offline, history_sha256):
+    probes = evidence["probes"]
+    duration_ranges = {"short": (30_000, 45_000), "near-limit": (165_000, 180_000)}
+    expected = {(encoding, span) for encoding in ("webm/opus", "mp4/aac") for span in duration_ranges}
+    require(evidence["officialHistorySha256"] == history_sha256
+            and len(probes) == len(expected) and {(row["encoding"], row["span"]) for row in probes} == expected,
+            "G0 needs verified short and near-limit cloud audio probes for both browser encodings")
+    recordings = {offline["recordingSha256"]}
+    task_ids = {offline["taskId"]}
+    offline_run_ids = {run["officialRunId"] for run in offline["runs"]}
+    probe_runs = {}
+    run_identity = ("automationId", "startedAt", "endedAt", "quotaObservation")
+    for row in probes:
+        minimum, maximum = duration_ranges[row["span"]]
+        require(integer(row["durationMs"], minimum) and row["durationMs"] <= maximum
+                and nonempty(row["taskId"]) and row["taskId"] not in task_ids
+                and digest(row["recordingSha256"]) and row["recordingSha256"] not in recordings
+                and integer(row["recordingBytes"], 1) and row["recordingBytes"] <= 12 * 1024 * 1024,
+                "invalid or reused G0 recording or task")
+        task_ids.add(row["taskId"])
+        recordings.add(row["recordingSha256"])
+        read, resume = row["readRun"], row["resumeRun"]
+        for run in (read, resume):
+            run_id = run["officialRunId"]
+            require(nonempty(run_id) and run_id not in offline_run_ids
+                    and run["taskId"] == row["taskId"] and run["source"] == "scheduled-cloud"
+                    and nonempty(run["automationId"]) and integer(run["fence"], 1)
+                    and integer(run["approvalPrompts"]) and run["approvalPrompts"] == 0
+                    and 0 < (utc(run["endedAt"]) - utc(run["startedAt"])).total_seconds() <= 900
+                    and nonempty(run["quotaObservation"])
+                    and same(run, probe_runs.setdefault(run_id, run), run_identity),
+                    "G0 run lacks an independent cloud record, elapsed time or quota observation")
+        require(read["officialRunId"] != resume["officialRunId"]
+                and read["automationId"] == resume["automationId"] and read["fence"] < resume["fence"]
+                and utc(read["endedAt"]) <= utc(resume["startedAt"])
+                and read["readBytes"] == row["recordingBytes"] and read["computedSha256"] == row["recordingSha256"]
+                and read["decoderInputSha256"] == row["recordingSha256"]
+                and digest(read["checkpointSha256"]) and integer(read["checkpointBytes"], 1)
+                and same(resume, read, ("checkpointSha256", "checkpointBytes"))
+                and resume["computedCheckpointSha256"] == read["checkpointSha256"],
+                "G0 did not deliver the full original to the decoder and read back the checkpoint")
+        faults = row["faults"]
+        require(integer(faults["shortReadBytes"]) and faults["shortReadBytes"] < row["recordingBytes"]
+                and faults["shortReadRejected"] is True and faults["recoveredSha256"] == row["recordingSha256"]
+                and faults["expiredRejected"] is True and faults["refreshedSucceeded"] is True,
+                "G0 needs truncated transfer recovery and expired access refresh")
+    receipt = evidence["receiptProbe"]
+    require(receipt["officialRunId"] in probe_runs and receipt["kind"] == "writing"
+            and nonempty(receipt["taskId"]) and receipt["taskId"] not in task_ids
+            and nonempty(receipt["receiptId"]) and receipt["receiptId"] == receipt["readbackReceiptId"],
+            "G0 needs an isolated text write and receipt readback on the same cloud connection")
 
 
 def stratified_score(inventory, labels, predictions, scorer):
@@ -369,7 +553,7 @@ def verify_bundle(bundle, trusted_signers, legacy_dir, repo, recording_root):
     raw = local_file(bundle, "manifest.json").read_bytes()
     verify_signatures(bundle, raw, trusted_signers)
     manifest = read_json(raw)
-    require(type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1 and manifest["route"] == "A"
+    require(type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 2 and manifest["route"] == "A"
             and digest(manifest["sourceSha"], 40) and digest(manifest["buildSha256"])
             and nonempty(manifest["environmentId"]) and nonempty(manifest["analysisVersion"]),
             "invalid release manifest identity")
@@ -384,7 +568,8 @@ def verify_bundle(bundle, trusted_signers, legacy_dir, repo, recording_root):
         if name.endswith(".json"):
             docs[name] = read_json(path.read_bytes())
     for name in ("candidate.json", "gates.json", "holdout-ledger.json", "offline.json", "work-runs.json",
-                 "mac-probes.json", "platform-probe.json", "browser-acceptance.json"):
+                 "mac-probes.json", "platform-probe.json", "browser-acceptance.json", "browser-playback-events.json",
+                 "offline-inference.json"):
         require(same(docs[name], manifest, IDENTITY), f"{name} belongs to a different candidate")
     ledger = docs["holdout-ledger.json"]
     require(all(ledger["files"].get(name) == hashes[name] for name in (
@@ -417,24 +602,17 @@ def verify_bundle(bundle, trusted_signers, legacy_dir, repo, recording_root):
             == docs["stratified-score.json"], "sealed device, encoding or condition scores did not reproduce")
 
     offline = docs["offline.json"]
-    verify_work_runs(offline, docs["work-runs.json"], docs["mac-probes.json"])
+    runs = docs["work-runs.json"]
+    checkpoint = verify_work_runs(offline, runs, docs["mac-probes.json"])
     require(docs["site-event-export.json"]["events"] == offline["beforeOfflineEvents"] + offline["serverEvents"]
             and docs["site-event-export.json"]["feedbackReceipt"] == offline["feedbackReceipt"]
-            and docs["work-runs.json"]["officialHistorySha256"] == hashes["official-run-history.zip"],
+            and runs["officialHistorySha256"] == hashes["official-run-history.zip"],
             "official history or isolated server export does not corroborate the accepted run")
-    verify_offline_output(docs["offline-output.json"], docs["offline-reference.json"],
-                          offline, hashes["offline-output.json"])
-    probe = docs["platform-probe.json"]
-    require(nonempty(probe["taskId"]) and probe["taskId"] != offline["taskId"]
-            and nonempty(probe["officialRunId"])
-            and probe["officialRunId"] not in {run["officialRunId"] for run in offline["runs"]}
-            and probe["source"] == "scheduled-cloud" and integer(probe["approvalPrompts"])
-            and probe["approvalPrompts"] == 0 and integer(probe["recordingBytes"], 1)
-            and probe["readBytes"] == probe["recordingBytes"] and digest(probe["recordingSha256"])
-            and probe["recordingSha256"] == probe["computedSha256"]
-            and nonempty(probe["receiptId"]) and probe["receiptId"] == probe["readbackReceiptId"]
-            and probe["expiredRejected"] is True and probe["refreshedSucceeded"] is True,
-            "G0 needs a separate verified cloud audio and receipt probe")
+    output = docs["offline-output.json"]
+    event, human = verify_offline_output(output, docs["offline-reference.json"], offline, hashes["offline-output.json"])
+    decoded = verify_checkpoint_file(bundle / "offline-checkpoint.bin", checkpoint, offline, output)
+    verify_offline_inference(docs["offline-inference.json"], offline, runs["runs"][2], checkpoint, decoded, output, hashes)
+    verify_platform_probes(docs["platform-probe.json"], offline, hashes["official-run-history.zip"])
     browser = docs["browser-acceptance.json"]
     require(same(browser, offline, SUBJECT) and browser["feedbackId"] == offline["feedbackReceipt"]["feedbackId"]
             and browser["receiptId"] == offline["feedbackReceipt"]["id"], "G4 does not point to the G3 original attempt")
@@ -447,6 +625,8 @@ def verify_bundle(bundle, trusted_signers, legacy_dir, repo, recording_root):
     before, after = browser["learnerBaselineBefore"], browser["learnerBaselineAfter"]
     require(PRESERVED <= before.keys() and before == after and browser["rollbackVerified"] is True,
             "isolated historical state or rollback has not been verified")
+    verify_browser_playback(docs["browser-playback-events.json"], browser, offline, event, human,
+                            decoded.decoded_duration_ms)
 
     arguments = [
         "--candidate", "candidate.json", "--preflight", "preflight.json", "--score", "score.json",
