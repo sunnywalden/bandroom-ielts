@@ -9,6 +9,7 @@ const {Miniflare}=wrangler('miniflare'),esbuild=wrangler('esbuild');
 const client=await esbuild.build({stdin:{contents:`
 import React from 'react';import {createRoot} from 'react-dom/client';import Studio from './app/studio.tsx';import './app/globals.css';
 import Pronunciation from './app/pronunciation.tsx';import {pronunciations} from './app/pronunciations.ts';import './app/exercise.css';
+import RecordingClipPlayer from './app/recording-clip-player.tsx';
 // Feed a synthetic tone through the browser's REAL MediaRecorder. This avoids
 // recording the operator's microphone or requiring microphone permissions.
 const contexts=[];
@@ -30,8 +31,28 @@ HTMLMediaElement.prototype.play=function(){
 window.fetch=(url,init={})=>{const headers=new Headers(init.headers);headers.set('X-Fixture-Fault',document.querySelector('#fault').value);return actualFetch(url,{...init,headers})};
 document.querySelector('#inspect').onclick=async()=>{const response=await actualFetch('/__fixture/status');document.querySelector('#evidence').textContent=JSON.stringify(await response.json(),null,2)};
 document.querySelector('#coach-review').onclick=async()=>{const response=await actualFetch('/__fixture/coach',{method:'POST'});document.querySelector('#evidence').textContent=JSON.stringify(await response.json(),null,2)};
+if(location.pathname==='/__fixture/clip'){
+ const fault=document.querySelector('#fault');
+ fault.add(new Option('原录音读取失败 503','clip503'));
+ const setAudioFault=()=>{document.cookie='fixture_audio_fault='+fault.value+'; Path=/api/audio; SameSite=Strict'};
+ fault.addEventListener('change',setAudioFault);
+ setAudioFault();
+ const events=[];
+ const describe=(event)=>{
+  const audio=event.target;
+  if(!(audio instanceof HTMLAudioElement))return;
+  events.push({event:event.type,time:audio.currentTime.toFixed(3),paused:audio.paused});
+  document.querySelector('#clip-evidence').textContent=JSON.stringify(events.slice(-12));
+ };
+ for(const name of ['playing','pause','seeked'])document.addEventListener(name,describe,true);
+}
 createRoot(document.querySelector('#root')).render(location.pathname==='/__fixture/pronunciations'
  ? <main className="ex-card"><h1>真人美音独立验收</h1>{[...Object.keys(pronunciations),'unlisted fixture word'].map(word=><section key={word}><h2>{word}</h2><Pronunciation word={word}/></section>)}</main>
+ : location.pathname==='/__fixture/clip'
+ ? <main className="ex-card"><h1>原录音片段独立验收</h1>
+   <RecordingClipPlayer recordingId="11111111-1111-4111-8111-111111111111" startMs={Number(new URLSearchParams(location.search).get('start')??5000)} endMs={Number(new URLSearchParams(location.search).get('end')??8000)} label="测试片段"/>
+   <output id="clip-evidence"/>
+  </main>
  : <Studio/>);
 `,resolveDir:process.cwd(),loader:'tsx'},bundle:true,format:'esm',platform:'browser',write:false,outdir:'.sites-runtime/browser-fixture',loader:{'.css':'css'},define:{'process.env.NODE_ENV':'"production"'}});
 const html=`<!doctype html><html lang="zh"><meta charset="utf-8"><title>Bandroom isolated acceptance</title><link rel="stylesheet" href="/fixture.css"><body>
@@ -50,7 +71,7 @@ import {GET as getRecovery} from './app/api/audio/recovery/route.ts';
 import {callCoach} from './lib/coach.ts';
 export default {async fetch(request){
  const url=new URL(request.url),fault=request.headers.get('X-Fixture-Fault');
- if(url.pathname==='/'||url.pathname==='/__fixture/pronunciations')return new Response(env.HTML,{headers:{'Content-Type':'text/html'}});
+ if(url.pathname==='/'||url.pathname==='/__fixture/pronunciations'||(env.CLIP&&url.pathname==='/__fixture/clip'))return new Response(env.HTML,{headers:{'Content-Type':'text/html'}});
  if(url.pathname==='/fixture.js')return new Response(env.JS,{headers:{'Content-Type':'text/javascript'}});
  if(url.pathname==='/fixture.css')return new Response(env.CSS,{headers:{'Content-Type':'text/css'}});
  if(url.pathname==='/api/state'){
@@ -61,7 +82,11 @@ export default {async fetch(request){
   return PUT(request);
  }
  if(url.pathname==='/api/audio'){
-  if(request.method==='GET')return getAudio(request);
+  if(request.method==='GET'){
+   if(env.CLIP&&request.headers.get('Cookie')?.split('; ').includes('fixture_audio_fault=clip503'))
+    return Response.json({error:'fixture_audio_unavailable'},{status:503,headers:{'Cache-Control':'no-store'}});
+   return getAudio(request);
+  }
   if(fault==='upload503')return Response.json({error:'fixture_unavailable'},{status:503});
   return POST(request);
  }
@@ -89,7 +114,8 @@ export default {async fetch(request){
  b.onResolve({filter:/^@\/app\/chatgpt-auth$/},()=>({path:'identity',namespace:'fixture'}));
  b.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:'export async function getChatGPTUser(){return {userId:"fixture-browser-only"}}'}));
 }}]});
-const mf=new Miniflare({host:'127.0.0.1',port:8788,cf:false,modules:true,script:worker.outputFiles[0].text,compatibilityDate:'2025-03-01',d1Databases:['DB'],r2Buckets:['BUCKET'],bindings:{HTML:html,JS:client.outputFiles.find(f=>f.path.endsWith('.js')).text,CSS:client.outputFiles.find(f=>f.path.endsWith('.css')).text}});
+const clipFile=process.env.BANDROOM_FIXTURE_CLIP;
+const mf=new Miniflare({host:'127.0.0.1',port:8788,cf:false,modules:true,script:worker.outputFiles[0].text,compatibilityDate:'2025-03-01',d1Databases:['DB'],r2Buckets:['BUCKET'],bindings:{CLIP:Boolean(clipFile),HTML:html,JS:client.outputFiles.find(f=>f.path.endsWith('.js')).text,CSS:client.outputFiles.find(f=>f.path.endsWith('.css')).text}});
 await mf.ready;
 const db=await mf.getD1Database('DB');
 for(const file of readdirSync('drizzle').filter(f=>f.endsWith('.sql')).sort()){
@@ -105,8 +131,8 @@ if(['vocab','write'].includes(process.env.BANDROOM_FIXTURE_STAGE)) {
 }
 await db.prepare('INSERT INTO learner_states (user_id,revision,state) VALUES (?,?,?)').bind('fixture-browser-only',6,JSON.stringify(state)).run();
 await db.prepare('INSERT INTO teacher_feedback (id,user_id,day,stage,attempt,evidence,feedback,created_at) VALUES (?,?,?,?,?,?,?,?)').bind('fixture-feedback','fixture-browser-only',11,'speak','fixture-earlier','Synthetic evidence','Preserved earlier coach feedback',at).run();
-const sample=execFileSync('ffmpeg',['-v','error','-f','lavfi','-i','sine=frequency=440:duration=0.3','-c:a','libopus','-f','webm','pipe:1']);
-const bucket=await mf.getR2Bucket('BUCKET');await bucket.put('speaking/fixture-browser-only/'+id,sample,{httpMetadata:{contentType:'audio/webm'},customMetadata:{purpose:'speaking',day:'12',phase:'part2'}});
+const sample=clipFile?readFileSync(clipFile):execFileSync('ffmpeg',['-v','error','-f','lavfi','-i','sine=frequency=440:duration=0.3','-c:a','libopus','-f','webm','pipe:1']);
+const bucket=await mf.getR2Bucket('BUCKET');await bucket.put('speaking/fixture-browser-only/'+id,sample,{httpMetadata:{contentType:clipFile?'audio/mp4':'audio/webm'},customMetadata:{purpose:'speaking',day:'12',phase:'part2'}});
 console.log(JSON.stringify({url:String(await mf.ready),account:'fixture-browser-only',revision:6,part2:id,part2Bytes:sample.length}));
 for(const signal of ['SIGINT','SIGTERM'])process.on(signal,async()=>{await mf.dispose();process.exit(0)});
 await new Promise(()=>{});
