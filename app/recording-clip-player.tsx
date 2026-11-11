@@ -3,28 +3,39 @@ import {useEffect,useRef,useState} from 'react';
 
 type Props = {recordingId:string; startMs:number; endMs?:number; anchorMs?:number; label:string};
 
-// Plays only the evidence window, not the whole answer. The browser seeks on
-// the original recording timeline produced by the analysis bundle.
+// The clip uses timestamps on the original recording timeline.
 export default function RecordingClipPlayer({recordingId,startMs,endMs,anchorMs,label}:Props) {
   const audio=useRef<HTMLAudioElement>(null);
   const playback=useRef<symbol|null>(null);
+  const stopTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
   const [status,setStatus]=useState<'idle'|'loading'|'playing'|'error'>('idle');
   const from=Math.max(0,anchorMs!=null?anchorMs-750:startMs-500);
   const to=Math.max(from+300,anchorMs!=null?anchorMs+750:(endMs??startMs+500)+500);
   useEffect(()=>{
     const element=audio.current;
     return ()=>{
+      if(stopTimer.current!==null)clearTimeout(stopTimer.current);
+      stopTimer.current=null;
       playback.current=null;
       element?.pause();
     };
   },[]);
-  function stop(){
+  function clearStopTimer(){
+    if(stopTimer.current!==null)clearTimeout(stopTimer.current);
+    stopTimer.current=null;
+  }
+  function cancelPlayback(){
+    clearStopTimer();
     playback.current=null;
-    audio.current?.pause();
+    const element=audio.current;
+    if(element&&!element.paused)element.pause();
+  }
+  function stop(){
+    cancelPlayback();
     setStatus('idle');
   }
   function fail(){
-    playback.current=null;
+    cancelPlayback();
     setStatus('error');
   }
   async function togglePlayback(){
@@ -47,17 +58,24 @@ export default function RecordingClipPlayer({recordingId,startMs,endMs,anchorMs,
     }
   }
   function tick(){
+    clearStopTimer();
     const element=audio.current;
-    if(!element)return;
-    if(playback.current&&element.currentTime*1000>=to){
+    if(!element||!playback.current||element.paused||element.seeking)return;
+    const remainingMs=to-element.currentTime*1000;
+    if(remainingMs<=0){
       stop();
-      element.currentTime=to/1000;
+      return;
     }
+    stopTimer.current=setTimeout(tick,Math.max(20,remainingMs));
+  }
+  function playing(){
+    if(playback.current)tick();
+    else audio.current?.pause();
   }
   const active=status==='loading'||status==='playing';
   return <div className="clip-player">
     <audio ref={audio} src={'/api/audio?id='+encodeURIComponent(recordingId)} preload="none"
-      onTimeUpdate={tick} onEnded={stop} onError={fail}/>
+      onPlaying={playing} onSeeked={tick} onTimeUpdate={tick} onEnded={stop} onError={fail}/>
     <button type="button" className="secondary" onClick={togglePlayback}>
       {active?'停止回听':status==='error'?'重试回听 '+label:'回听 '+label}
     </button>

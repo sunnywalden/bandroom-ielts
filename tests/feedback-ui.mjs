@@ -284,12 +284,14 @@ test('speaking acoustic card seeks, stops and retries the original recording win
  assert.ok(audio);
  assert.equal(new URL(audio.src).searchParams.get('id'),audioId);
  assert.equal(audio.preload,'none');
- let starts=0,stops=0;
+ let starts=0,stops=0,paused=true;
+ Object.defineProperty(audio,'paused',{get:()=>paused});
  audio.play=async()=>{
   starts++;
   if(starts===1)throw new Error('fixture playback unavailable');
+  paused=false;
  };
- audio.pause=()=>{stops++};
+ audio.pause=()=>{paused=true;stops++};
  await click(button('回听 think'));
  assert.match(section.textContent,/原录音暂时无法播放/);
  await click(button('重试回听 think'));
@@ -300,7 +302,8 @@ test('speaking acoustic card seeks, stops and retries the original recording win
  await click(button('回听 think'));
  assert.equal(starts,3);
  audio.currentTime=2;await act(async()=>audio.dispatchEvent(new Event('timeupdate')));
- assert.equal(audio.currentTime,1.6);
+ assert.equal(audio.currentTime,2);
+ assert.equal(audio.paused,true);
  assert.equal(stops,2);
  assert.ok(button('回听 think'));
  assert.equal(puts().length,0);
