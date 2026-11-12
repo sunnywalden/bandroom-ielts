@@ -96,7 +96,7 @@ def local_file(directory, name):
     return path
 
 
-def verify_signatures(bundle, manifest, trusted_signers):
+def verify_signatures(bundle, manifest, trusted_signers, namespace=NAMESPACE):
     require(not trusted_signers.resolve().is_relative_to(bundle.resolve()),
             "the allowed-signers file must be distributed outside the evidence bundle")
     keys = {}
@@ -114,7 +114,7 @@ def verify_signatures(bundle, manifest, trusted_signers):
         signature = local_file(bundle, role + ".sig")
         verified = subprocess.run([
             "ssh-keygen", "-Y", "verify", "-f", str(trusted_signers), "-I", role,
-            "-n", NAMESPACE, "-s", str(signature),
+            "-n", namespace, "-s", str(signature),
         ], input=manifest, capture_output=True, check=False)
         require(verified.returncode == 0, f"invalid release manifest signature for {role}")
 
@@ -396,20 +396,24 @@ def verify_offline_output(output, reference, offline, output_sha):
     raise ValueError("offline playback has no independently verified error at its seek timestamp")
 
 
-def verify_playback_events(events, start_ms, stop_ms, duration_ms):
+def verify_playback_events(events, start_ms, stop_ms, duration_ms, *, require_metadata=False):
     playback = []
+    metadata = None
     previous = -1
     for event in events:
         require(within_media_time(event["mediaTimeMs"], duration_ms) and integer(event["elapsedMs"])
                 and event["elapsedMs"] >= previous,
                 "invalid browser media event timestamp")
         previous = event["elapsedMs"]
+        if event["type"] == "loadedmetadata" and metadata is None:
+            metadata = event["elapsedMs"]
         if event["type"] in ("seeked", "playing", "pause", "ended"):
             playback.append(event)
     for seeked, playing, stopped in zip(playback, playback[1:], playback[2:]):
         if (seeked["type"] == "seeked" and playing["type"] == "playing"
                 and stopped["type"] in ("pause", "ended")):
-            require(seeked["elapsedMs"] <= playing["elapsedMs"] < stopped["elapsedMs"]
+            require((not require_metadata or metadata is not None and metadata <= seeked["elapsedMs"])
+                    and seeked["elapsedMs"] <= playing["elapsedMs"] < stopped["elapsedMs"]
                     and abs(seeked["mediaTimeMs"] - start_ms) <= 150
                     and abs(playing["mediaTimeMs"] - start_ms) <= 150
                     and abs(stopped["mediaTimeMs"] - stop_ms) <= 150
@@ -419,13 +423,14 @@ def verify_playback_events(events, start_ms, stop_ms, duration_ms):
     raise ValueError("missing browser seeked, playing and stop event sequence")
 
 
-def verify_browser_playback(raw, browser, offline, event, human, duration_ms):
+def verify_browser_playback(raw, browser, offline, event, human, duration_ms, *,
+                            browsers=("Chrome", "Safari"), timeline_encodings=None, require_metadata=False):
     receipt = offline["feedbackReceipt"]
     start = max(0, event["anchorMs"] - 750) if event["kind"] == "deletion" else max(0, event["startMs"] - 500)
     end = event["anchorMs"] + 750 if event["kind"] == "deletion" else event["endMs"] + 500
     stop = min(duration_ms, max(start + 300, end))
     require(nonempty(human.get("word")), "offline human reference needs the word heard on playback")
-    for name in ("Chrome", "Safari"):
+    for name in browsers:
         review = raw["reviews"][name]
         require(same(review, offline, SUBJECT) and review["feedbackId"] == receipt["feedbackId"]
                 and review["receiptId"] == receipt["id"] and review["version"] == browser["browsers"][name]["version"]
@@ -434,10 +439,10 @@ def verify_browser_playback(raw, browser, offline, event, human, duration_ms):
         require(nonempty(review["reviewerId"]) and review["heardWord"] == human["word"]
                 and review["heardActual"] == human["actual"],
                 f"{name} playback has no matching human listening record")
-        verify_playback_events(review["events"], start, stop, duration_ms)
+        verify_playback_events(review["events"], start, stop, duration_ms, require_metadata=require_metadata)
 
     samples = raw["timelineChecks"]
-    expected = {("Chrome", "webm/opus"), ("Safari", "mp4/aac")}
+    expected = timeline_encodings or {("Chrome", "webm/opus"), ("Safari", "mp4/aac")}
     require(len(samples) == len(expected) and {(row["browser"], row["encoding"]) for row in samples} == expected,
             "missing browser timeline markers for both recording encodings")
     require(len({sample["recordingSha256"] for sample in samples}) == len(samples),
@@ -455,7 +460,7 @@ def verify_browser_playback(raw, browser, offline, event, human, duration_ms):
             require(within_media_time(start, duration) and within_media_time(stop, duration)
                     and index * duration / 3 <= start < (index + 1) * duration / 3 and start < stop,
                     "browser marker is outside its expected portion of the original recording")
-            verify_playback_events(marker["events"], start, stop, duration)
+            verify_playback_events(marker["events"], start, stop, duration, require_metadata=require_metadata)
 
 
 def replay_report(legacy_dir, script, inputs, expected):
@@ -549,34 +554,14 @@ def stratified_score(inventory, labels, predictions, scorer):
     return {axis: {key: summarize(rows) for key, rows in grouped.items()} for axis, grouped in groups.items()}
 
 
-def verify_bundle(bundle, trusted_signers, legacy_dir, repo, recording_root):
-    raw = local_file(bundle, "manifest.json").read_bytes()
-    verify_signatures(bundle, raw, trusted_signers)
-    manifest = read_json(raw)
-    require(type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 2 and manifest["route"] == "A"
-            and digest(manifest["sourceSha"], 40) and digest(manifest["buildSha256"])
-            and nonempty(manifest["environmentId"]) and nonempty(manifest["analysisVersion"]),
-            "invalid release manifest identity")
+def verify_holdout(bundle, docs, manifest, legacy_dir, recording_root, frozen_files=()):
     hashes = manifest["files"]
-    require(set(hashes) == set(FILES) and hashes["site-build.tar.gz"] == manifest["buildSha256"],
-            "manifest file list or build digest does not match")
-    docs = {}
-    for name in FILES:
-        path = local_file(bundle, name)
-        with path.open("rb") as data:
-            require(hashlib.file_digest(data, "sha256").hexdigest() == hashes[name], f"digest mismatch for {name}")
-        if name.endswith(".json"):
-            docs[name] = read_json(path.read_bytes())
-    for name in ("candidate.json", "gates.json", "holdout-ledger.json", "offline.json", "work-runs.json",
-                 "mac-probes.json", "platform-probe.json", "browser-acceptance.json", "browser-playback-events.json",
-                 "offline-inference.json"):
-        require(same(docs[name], manifest, IDENTITY), f"{name} belongs to a different candidate")
     ledger = docs["holdout-ledger.json"]
     require(all(ledger["files"].get(name) == hashes[name] for name in (
         "holdout-inventory.json", "annotator-a.json", "annotator-b.json", "adjudicated.json",
         "predictions.json", "aligned-predictions.json", "word-map.json", "reference-words.json",
         "preflight.json", "score.json", "stratified-score.json", "analysis-bundle.tar.zst", "inference-windows.json",
-        "model-weights.bin", "analysis-config.json",
+        "model-weights.bin", "analysis-config.json", *frozen_files,
     )), "sealed holdout ledger does not bind the labels, predictions and scoring to the frozen analyzer")
     people = [ledger[name] for name in ("annotatorA", "annotatorB", "adjudicator")]
     require(len(set(people)) == 3 and all(nonempty(person) for person in people)
@@ -600,6 +585,31 @@ def verify_bundle(bundle, trusted_signers, legacy_dir, repo, recording_root):
     scorer = runpy.run_path(str(legacy_dir / "score_pronunciation.py"))
     require(stratified_score(docs["holdout-inventory.json"], docs["adjudicated.json"], aligned, scorer)
             == docs["stratified-score.json"], "sealed device, encoding or condition scores did not reproduce")
+
+
+def verify_bundle(bundle, trusted_signers, legacy_dir, repo, recording_root):
+    raw = local_file(bundle, "manifest.json").read_bytes()
+    verify_signatures(bundle, raw, trusted_signers)
+    manifest = read_json(raw)
+    require(type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 2 and manifest["route"] == "A"
+            and digest(manifest["sourceSha"], 40) and digest(manifest["buildSha256"])
+            and nonempty(manifest["environmentId"]) and nonempty(manifest["analysisVersion"]),
+            "invalid release manifest identity")
+    hashes = manifest["files"]
+    require(set(hashes) == set(FILES) and hashes["site-build.tar.gz"] == manifest["buildSha256"],
+            "manifest file list or build digest does not match")
+    docs = {}
+    for name in FILES:
+        path = local_file(bundle, name)
+        with path.open("rb") as data:
+            require(hashlib.file_digest(data, "sha256").hexdigest() == hashes[name], f"digest mismatch for {name}")
+        if name.endswith(".json"):
+            docs[name] = read_json(path.read_bytes())
+    for name in ("candidate.json", "gates.json", "holdout-ledger.json", "offline.json", "work-runs.json",
+                 "mac-probes.json", "platform-probe.json", "browser-acceptance.json", "browser-playback-events.json",
+                 "offline-inference.json"):
+        require(same(docs[name], manifest, IDENTITY), f"{name} belongs to a different candidate")
+    verify_holdout(bundle, docs, manifest, legacy_dir, recording_root)
 
     offline = docs["offline.json"]
     runs = docs["work-runs.json"]

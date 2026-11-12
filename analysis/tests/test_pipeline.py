@@ -11,7 +11,7 @@ import wave
 
 from bandroom_acoustic.chunks import chunk_coverage, plan_chunks
 from bandroom_acoustic.cli import build_analysis
-from bandroom_acoustic.decode import TARGET_RATE, decode_audio
+from bandroom_acoustic.decode import DecodeError, TARGET_RATE, decode_audio
 from bandroom_acoustic.schema import validate_analysis
 
 
@@ -35,6 +35,24 @@ class DecodeTest(unittest.TestCase):
             self.assertAlmostEqual(decoded.decoded_duration_ms, 1000.0)
             self.assertEqual(len(decoded.input_sha256), 64)
             self.assertAlmostEqual(decoded.media_time_ms(TARGET_RATE // 2), 500.0)
+
+    def test_original_identity_is_checked_before_decoding(self):
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "clip.webm"
+            path.write_bytes(b"invalid audio with a verifiable identity")
+            missing_ffmpeg = str(path.with_name("missing-ffmpeg"))
+            with self.assertRaisesRegex(DecodeError, "byte count does not match"):
+                decode_audio(path, ffmpeg=missing_ffmpeg, expected_bytes=1)
+            with self.assertRaisesRegex(DecodeError, "audio digest does not match"):
+                decode_audio(path, ffmpeg=missing_ffmpeg, expected_sha256="0" * 64)
+
+    def test_wav_with_truncated_samples_is_rejected(self):
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "clip.wav"
+            write_wav(path, seconds=0.1)
+            path.write_bytes(path.read_bytes()[:-2])
+            with self.assertRaisesRegex(DecodeError, "before the declared sample count"):
+                decode_audio(path)
 
     def test_chunk_plan_covers_tail_without_gaps(self):
         chunks = plan_chunks(30 * TARGET_RATE)
@@ -75,8 +93,12 @@ class AnalysisTest(unittest.TestCase):
             self.assertEqual(report["decoded"]["sampleCount"], TARGET_RATE)
             self.assertEqual(report["decoded"]["decodedDurationMs"], 1000.0)
             self.assertEqual(report["reason"], "qualified_analyzer_unavailable")
-            checkpoint.write_bytes(decoded[:-1] + bytes([decoded[-1] ^ 1]))
             output.unlink()
+            wrong_size = subprocess.run(resume + ["--input-bytes", "1"], capture_output=True, text=True, check=False)
+            self.assertEqual(wrong_size.returncode, 2, wrong_size.stderr)
+            self.assertIn("byte count does not match", wrong_size.stderr)
+            self.assertFalse(output.exists())
+            checkpoint.write_bytes(decoded[:-1] + bytes([decoded[-1] ^ 1]))
             invalid = subprocess.run(resume, capture_output=True, text=True, check=False)
             self.assertEqual(invalid.returncode, 2, invalid.stderr)
             self.assertFalse(output.exists())
