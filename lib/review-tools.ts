@@ -1,4 +1,5 @@
 import { z } from "zod/v4";
+import { acousticChunkIndex, acousticChunkLimit } from "./acoustic-chunk";
 import { env } from "cloudflare:workers";
 import { getDb } from "@/db";
 import { createAnalysisBundleGrant } from "./analysis-bundle";
@@ -69,9 +70,14 @@ const bundleSpec = z.strictObject({ taskId, fence });
 const transferSpec = z.discriminatedUnion("action", [
   z.strictObject({ taskId, fence, action: z.literal("read_recording") }),
   z.strictObject({ taskId, fence, action: z.literal("read_decode") }),
+  z.strictObject({ taskId, fence, action: z.literal("read_acoustic"), chunkIndex: acousticChunkIndex }),
   z.strictObject({
     taskId, fence, action: z.literal("save_decode"), artifactSha256: hex64,
     bytes: z.number().int().min(1).max(decodeCheckpointLimit),
+  }),
+  z.strictObject({
+    taskId, fence, action: z.literal("save_acoustic"), chunkIndex: acousticChunkIndex, artifactSha256: hex64,
+    bytes: z.number().int().min(1).max(acousticChunkLimit),
   }),
 ]);
 const recordingSpec = z.strictObject({
@@ -114,7 +120,7 @@ export const reviewTools = [
     name: "get_analysis_bundle", description: "Issue a short-lived, task/fence-bound URL for the fixed acoustic analysis bundle. The URL is private, expiring and must not be logged or shared; verify the SHA after download.", schema: bundleSpec, readOnly: true,
   },
   {
-    name: "get_review_transfer", description: "Issue a task/fence-bound grant for a single private binary transfer. GET original audio or committed decoded audio, or PUT the exact decoded artifact digest and size requested. Use the returned authorization only in the request header. Verify the SHA after download. Private Site access is required.", schema: transferSpec, readOnly: false,
+    name: "get_review_transfer", description: "Issue a task/fence-bound grant for a private binary transfer. GET original audio, decoded audio or a committed acoustic chunk. PUT an exact decoded artifact or the next acoustic chunk. Use the returned authorization only in the request header and verify the SHA after download. Private Site access is required.", schema: transferSpec, readOnly: false,
   },
   {
     name: "read_review_recording", description: "Read one bounded byte range of the original recording bound to a claimed speaking task. Verify the reassembled SHA-256 before analysis. If a transient read failure persists, call fail_review_task with its error code and retryable=true.", schema: recordingSpec, readOnly: true,
