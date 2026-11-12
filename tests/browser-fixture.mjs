@@ -41,17 +41,16 @@ if(location.pathname==='/__fixture/clip'){
  const describe=(event)=>{
   const audio=event.target;
   if(!(audio instanceof HTMLAudioElement))return;
-  events.push({event:event.type,time:audio.currentTime.toFixed(3),duration:audio.duration.toFixed(3),paused:audio.paused});
+  events.push({event:event.type,time:audio.currentTime.toFixed(3),paused:audio.paused});
   document.querySelector('#clip-evidence').textContent=JSON.stringify(events.slice(-12));
  };
  for(const name of ['playing','pause','seeked'])document.addEventListener(name,describe,true);
 }
-const clipParams=new URLSearchParams(location.search);
 createRoot(document.querySelector('#root')).render(location.pathname==='/__fixture/pronunciations'
  ? <main className="ex-card"><h1>真人美音独立验收</h1>{[...Object.keys(pronunciations),'unlisted fixture word'].map(word=><section key={word}><h2>{word}</h2><Pronunciation word={word}/></section>)}</main>
  : location.pathname==='/__fixture/clip'
  ? <main className="ex-card"><h1>原录音片段独立验收</h1>
-   <RecordingClipPlayer recordingId="11111111-1111-4111-8111-111111111111" startMs={Number(clipParams.get('start')??5000)} endMs={Number(clipParams.get('end')??8000)} anchorMs={clipParams.has('anchor')?Number(clipParams.get('anchor')):undefined} label="测试片段"/>
+   <RecordingClipPlayer recordingId="11111111-1111-4111-8111-111111111111" startMs={Number(new URLSearchParams(location.search).get('start')??5000)} endMs={Number(new URLSearchParams(location.search).get('end')??8000)} label="测试片段"/>
    <output id="clip-evidence"/>
   </main>
  : <Studio/>);
@@ -133,8 +132,7 @@ if(['vocab','write'].includes(process.env.BANDROOM_FIXTURE_STAGE)) {
 await db.prepare('INSERT INTO learner_states (user_id,revision,state) VALUES (?,?,?)').bind('fixture-browser-only',6,JSON.stringify(state)).run();
 await db.prepare('INSERT INTO teacher_feedback (id,user_id,day,stage,attempt,evidence,feedback,created_at) VALUES (?,?,?,?,?,?,?,?)').bind('fixture-feedback','fixture-browser-only',11,'speak','fixture-earlier','Synthetic evidence','Preserved earlier coach feedback',at).run();
 const sample=clipFile?readFileSync(clipFile):execFileSync('ffmpeg',['-v','error','-f','lavfi','-i','sine=frequency=440:duration=0.3','-c:a','libopus','-f','webm','pipe:1']);
-const contentType=clipFile && !clipFile.endsWith('.webm')?'audio/mp4':'audio/webm';
-const bucket=await mf.getR2Bucket('BUCKET');await bucket.put('speaking/fixture-browser-only/'+id,sample,{httpMetadata:{contentType},customMetadata:{purpose:'speaking',day:'12',phase:'part2'}});
+const bucket=await mf.getR2Bucket('BUCKET');await bucket.put('speaking/fixture-browser-only/'+id,sample,{httpMetadata:{contentType:clipFile?'audio/mp4':'audio/webm'},customMetadata:{purpose:'speaking',day:'12',phase:'part2'}});
 console.log(JSON.stringify({url:String(await mf.ready),account:'fixture-browser-only',revision:6,part2:id,part2Bytes:sample.length}));
 for(const signal of ['SIGINT','SIGTERM'])process.on(signal,async()=>{await mf.dispose();process.exit(0)});
 await new Promise(()=>{});

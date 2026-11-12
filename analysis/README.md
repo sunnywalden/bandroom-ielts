@@ -101,9 +101,7 @@ analysis/<version>/manifest.json
 ```
 
 Then configure `ANALYSIS_BUNDLE_VERSION`, `ANALYSIS_SIGNING_KEY` and
-`BANDROOM_PUBLIC_ORIGIN` before `get_analysis_bundle` can issue a URL. Acoustic
-checkpoint transfer also requires `ANALYSIS_RUNTIME_BUNDLE_SHA256`, the exact
-digest printed by `cloud_stage.py build`.
+`BANDROOM_PUBLIC_ORIGIN` before `get_analysis_bundle` can issue a URL.
 
 ## Work recovery and release evidence
 
@@ -123,35 +121,6 @@ Compare the response byte count and SHA-256 with the returned input identity.
 An expired transfer grant must be obtained again under the active lease.
 Treat a short response as incomplete and retry from the source. A persistent
 input identity mismatch needs investigation.
-
-If direct HTTP is unavailable in the Work runner, read the original with the
-authenticated recording tool. Request each range at the preceding
-`nextOffset` and save each successful result as one JSON line in a private
-temporary file. Stop at the verified total length. Assemble the original
-before passing it to FFmpeg:
-
-```sh
-PYTHONPATH=analysis/src python3 -m bandroom_acoustic.work_transfer assemble-recording \
-  --task-id "$bandroom_task" --recording-id "$bandroom_recording" \
-  --input-sha256 "$bandroom_input_sha" --input-bytes "$bandroom_input_bytes" \
-  --file "$bandroom_original" < "$bandroom_ranges"
-```
-
-For the isolated QA tool's response format, replace `--task-id` and
-`--recording-id` with `--qa-job-id`. The assembler checks the task and
-recording identity, sequence, each range length and the whole-file digest.
-It replaces the output atomically after verification. Discard range files
-when the input changes. If range reads still fail after bounded retries,
-report the observed failure under the active lease.
-
-For direct HTTP, `bandroom_acoustic.work_transfer download` and `upload`
-accept the trusted envelope `{"grant": ..., "sitesAuthorization": ...}`
-on standard input. Pass the exact `--origin`, input SHA-256, input byte
-count and file. For checkpoint transfers also pass the analysis version,
-artifact SHA-256, artifact byte count and, for acoustic windows, chunk
-index. Pass credentials through private execution input and retain only
-the sanitized result. If an upload reports `reconcile: true`, read the
-stored pointer or receipt under the active lease before retrying the PUT.
 
 ```sh
 PYTHONPATH=analysis/src python3 -m bandroom_acoustic.cli \
@@ -177,84 +146,6 @@ PYTHONPATH=analysis/src python3 -m bandroom_acoustic.cli \
 The restore path checks the checkpoint and input digests and uses the stored
 sample timeline. A speaking completion must consume that checkpoint under
 its active fence and supply output from a qualified analyzer.
-
-### Acoustic checkpoint transfer
-
-`bandroom_acoustic.acoustic_stage` runs the pinned development ONNX encoder
-and phone head against the decoded PCM. Its receipt records the analysis
-identity, next window, computed and reused window counts, and output hashes.
-It requires NumPy, ONNX Runtime, and the two pinned graphs. This stage has no
-authority to publish speaking feedback.
-
-- Set `--max-new-chunks` to stop at a window boundary. With
-  `--export-directory`, each numbered file `00.bin`, `01.bin`, and so on
-  contains a canonical manifest and the actual float32 features. The
-  corresponding `transferSha256` entries are artifact digests.
-- Under the active lease, request `save_acoustic` with each file's
-  `chunkIndex`, `artifactSha256` and `bytes`. PUT the bytes in index order
-  and retain each successful checkpoint receipt. The site verifies the
-  decoded input, pinned bundle, predecessor and window geometry. It advances
-  the task pointer only when that checkpoint commits.
-- Under the next lease, request `read_acoustic` for the committed prefix
-  and verify its byte counts and SHA-256 digests. Pass the files in order
-  as repeated `--restore-chunk SHA256=FILE` arguments to the runner with a
-  fresh directory. Use the original attempt, revision, decoded artifact and
-  runtime configuration. Resume at the first absent window. On transient
-  read failure, obtain a fresh grant under the current lease or persist
-  `retry_wait` before the lease expires.
-
-### Cloud runtime bundle
-
-`analysis/scripts/cloud_stage.py` builds a self-contained Linux x86-64 bundle
-for a Work executor that has no network access to PyPI. Place the two pinned
-graphs (`encoder-int8.onnx`, `probe-head.onnx`) and the wheels named in
-`requirements-cloud-x86_64.txt` in private directories, then build:
-
-```sh
-python3 analysis/scripts/cloud_stage.py build \
-  --bundle /secure/bandroom-runtime/acoustic-stage.zip \
-  --graphs /secure/bandroom-graphs \
-  --wheels /secure/bandroom-wheels
-```
-
-The builder verifies every graph and wheel digest, includes all
-`src/bandroom_acoustic` modules plus the lock file, and prints the bundle
-SHA-256. The archive contains no learner audio, labels or keys. Run stages on
-Linux x86-64 CPython 3.12 with FFmpeg on `PATH`:
-
-```sh
-python3 analysis/scripts/cloud_stage.py decode \
-  --bundle /secure/bandroom-runtime/acoustic-stage.zip --bundle-sha256 "$bundle_sha" \
-  --input-sha256 "$input_sha" --analysis-version "$analysis_version" \
-  --audio "$original" --input-bytes "$input_bytes" --save-checkpoint "$decode"
-
-python3 analysis/scripts/cloud_stage.py acoustic \
-  --bundle /secure/bandroom-runtime/acoustic-stage.zip --bundle-sha256 "$bundle_sha" \
-  --input-sha256 "$input_sha" --analysis-version "$analysis_version" \
-  --checkpoint "$decode" --checkpoint-sha256 "$decode_sha" \
-  --directory "$acoustic_work" --environment "$environment" --task "$task" \
-  --attempt "$attempt" --revision "$revision" \
-  --max-new-chunks 4 --export-directory "$transfer"
-```
-
-The acoustic stage installs the pinned wheels offline and refuses a foreign
-platform, bundle digest, graph digest or checkpoint identity. The exported
-`NN.bin` files and the receipt's `transferSha256` list are the exact artifacts
-to submit through `save_acoustic`. This bundle contains the development probe
-head, not a qualified analyzer, so it must not produce learner feedback.
-
-Configure the site with `ANALYSIS_RUNTIME_BUNDLE_SHA256` set to the exact
-SHA-256 printed by `cloud_stage.py build`. The first `save_acoustic` grant for a
-task binds that digest, and the site rejects a chunk whose `bundleSha256`
-differs with `invalid_acoustic_checkpoint`. Later chunks must reuse the
-committed predecessor's digest, so a resumed run must use the same runtime zip.
-The digest must also equal the runner's `--bundle-sha256` and the signed
-`runtimeBundleSha256`. The analysis bundle served by `get_analysis_bundle` is a
-separate artifact; its `manifest.json` digest is not the runtime binding and
-must not be used for `save_acoustic`.
-
-The following procedure applies to the historical Route A release protocol.
-Obtain the Mac owner's explicit authorization before disconnecting the host.
 
 Close the browser and take the Mac offline between runs A and B. In B,
 assemble the entire original and verify its length and SHA-256 before decode.
@@ -327,41 +218,6 @@ The verifier exits 1 with `BLOCKED` when evidence is missing or inconsistent.
 `READY` requires G0–G5 and the historical zero-added-cost guard. Keep local
 test fixtures separate from that release package. The bundled analyzer still
 reports `qualified_analyzer_unavailable` until a real candidate meets G2.
-
-### Scheduled Work recovery release
-
-Use the scheduled Work verifier for the protocol that tests recovery while the
-original exercise is closed.
-
-```sh
-PYTHONPATH=analysis/src python3 analysis/scripts/verify_cloud_release.py \
-  --evidence /secure/bandroom-cloud-evidence \
-  --trusted-signers /secure/bandroom-allowed-signers \
-  --legacy-dir /secure/trusted-delivery-d2 \
-  --recordings /secure/consented-holdout-originals \
-  --repo . --phase candidate
-```
-
-- Sign the exact `manifest.json` bytes with the four release roles in the
-  `bandroom-d2-cloud-recovery-v1` namespace. Use schema version 1 with the
-  protocol, base commit, candidate tree, site build, runtime archive, weights,
-  configuration and file digests. Keep the keys and original evidence outside
-  the repository. The candidate phase compares the signed tree to the staged
-  candidate. The release phase checks the clean committed tree after merge.
-- Seal the official Work history, isolated site events and executor receipts.
-  Correlate the failed read, prefix save and resumed write to the same
-  recording, attempt and scheduled task with distinct runs and increasing
-  fences. Record the committed chunks, the read-only cold output, and the
-  original receipt readback after a lost response. Preserve the three empty
-  queue wakes over 24 hours and the queue fairness check.
-- Seal the dual-annotated and adjudicated holdout, scoring and inference ledger,
-  the two browser codec probes and cold profiles, and the Chrome media events
-  from the original answer. Attest zero added cost and record rollback and
-  unchanged learner state using the isolated acceptance site.
-
-The verifier exits 1 with `BLOCKED` if any of these checks fail. Run receipts
-from a local Linux probe and temporary signing keys belong in development
-tests. Release auditors sign only after inspecting the official records.
 
 ## Boundaries
 

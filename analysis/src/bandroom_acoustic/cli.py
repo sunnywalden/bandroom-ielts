@@ -16,9 +16,9 @@ import sys
 import time
 
 from .analyzer import UnavailableAnalyzer
-from .checkpoint import encode_checkpoint, read_checkpoint, write_atomically
+from .checkpoint import encode_checkpoint, read_checkpoint
 from .chunks import chunk_coverage, plan_chunks
-from .decode import DecodeError, DecodedAudio, MAX_AUDIO, decode_audio
+from .decode import DecodeError, DecodedAudio, decode_audio
 from .schema import validate_analysis
 
 
@@ -93,7 +93,6 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--audio", type=Path)
     source.add_argument("--checkpoint", type=Path)
     parser.add_argument("--input-sha256", help="expected SHA-256 of the original audio")
-    parser.add_argument("--input-bytes", type=int, help="expected byte count of the original audio")
     parser.add_argument("--checkpoint-sha256", help="expected SHA-256 of the committed checkpoint")
     parser.add_argument("--save-checkpoint", type=Path)
     parser.add_argument("--decode-only", action="store_true")
@@ -104,8 +103,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.checkpoint and (not args.input_sha256 or not args.checkpoint_sha256 or args.save_checkpoint):
         parser.error("--checkpoint requires both SHA-256 values and disallows --save-checkpoint")
-    if args.input_bytes is not None and not 0 < args.input_bytes <= MAX_AUDIO:
-        parser.error("--input-bytes is outside the supported range")
     if args.decode_only and not args.save_checkpoint:
         parser.error("--decode-only requires --save-checkpoint")
     if not args.decode_only and not args.out:
@@ -115,17 +112,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.checkpoint:
             decoded = read_checkpoint(args.checkpoint, input_sha256=args.input_sha256,
                                       artifact_sha256=args.checkpoint_sha256, analysis_version=args.analysis_version)
-            if args.input_bytes is not None and decoded.input_bytes != args.input_bytes:
-                raise DecodeError("checkpoint original audio byte count does not match the expected input")
         else:
-            decoded = decode_audio(args.audio, ffmpeg=args.ffmpeg,
-                                   expected_sha256=args.input_sha256, expected_bytes=args.input_bytes)
+            decoded = decode_audio(args.audio, ffmpeg=args.ffmpeg)
+            if args.input_sha256 and decoded.input_sha256 != args.input_sha256:
+                raise DecodeError("original audio digest does not match the expected input")
         decode_ms = (time.monotonic() - started) * 1000.0
         check_duration(decoded)
         if args.save_checkpoint:
             args.save_checkpoint.parent.mkdir(parents=True, exist_ok=True)
             artifact = encode_checkpoint(decoded, args.analysis_version)
-            write_atomically(args.save_checkpoint, artifact)
+            temp = args.save_checkpoint.with_suffix(args.save_checkpoint.suffix + ".tmp")
+            temp.write_bytes(artifact)
+            temp.replace(args.save_checkpoint)
         if args.decode_only:
             from hashlib import sha256
             print(json.dumps({

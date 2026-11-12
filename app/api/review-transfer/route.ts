@@ -1,7 +1,6 @@
 import { reviewTaskDb, ReviewTaskError, recordAnalysisEvent } from "@/lib/review-tasks";
 import {
-  authenticateReviewTransfer, downloadReviewTransfer, isReviewUpload, liveSpeakingLease,
-  uploadAcousticCheckpoint, uploadDecodeCheckpoint,
+  authenticateReviewTransfer, downloadReviewTransfer, liveSpeakingLease, uploadDecodeCheckpoint,
 } from "@/lib/review-transfer";
 import { json, limitedBody } from "../shared";
 
@@ -19,7 +18,6 @@ const statuses: Record<string, number> = {
   transfer_integrity_failed: 422,
   recording_read_failed: 503,
   invalid_decode_checkpoint: 422,
-  invalid_acoustic_checkpoint: 422,
   analysis_version_mismatch: 409,
   checkpoint_advanced: 409,
   artifact_conflict: 409,
@@ -33,24 +31,24 @@ async function transfer(request: Request) {
   const audit = {
     taskId: grant.taskId,
     fence: grant.fence,
-    stage: "chunkIndex" in grant ? "acoustic" : grant.action === "read_recording" ? "read_input" : "decode",
-    event: grant.action === "read_recording" ? "read_review_recording"
-      : isReviewUpload(grant) ? "save_review_checkpoint" : "read_review_checkpoint",
+    stage: grant.action === "read_recording" ? "read_input" : "decode",
+    event: {
+      read_recording: "read_review_recording",
+      read_decode: "read_review_checkpoint",
+      save_decode: "save_review_checkpoint",
+    }[grant.action],
     requestId: crypto.randomUUID(),
   };
   const checkpointMetadata = grant.action === "read_recording" ? null : {
     inputSha256: grant.input.sha256, inputBytes: grant.input.bytes, artifactSha256: grant.artifact.sha256,
-    bytes: grant.artifact.bytes, analysisVersion: grant.analysisVersion,
-    chunkIndex: "chunkIndex" in grant ? grant.chunkIndex : 0, transport: "binary-v1",
+    bytes: grant.artifact.bytes, analysisVersion: grant.analysisVersion, chunkIndex: 0, transport: "binary-v1",
   };
   try {
-    if (isReviewUpload(grant)) {
+    if (grant.action === "save_decode") {
       await liveSpeakingLease(db, grant.userId, grant.taskId, grant.fence);
       const body = await limitedBody(request, grant.artifact.bytes);
       if (body instanceof Response) return body;
-      const result = grant.action === "save_acoustic"
-        ? await uploadAcousticCheckpoint(db, grant, body)
-        : await uploadDecodeCheckpoint(db, grant, body);
+      const result = await uploadDecodeCheckpoint(db, grant, body);
       await recordAnalysisEvent(db, {
         ...audit, outcome: result.duplicate ? "duplicate" : "ok",
         metadata: checkpointMetadata!,
