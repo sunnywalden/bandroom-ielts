@@ -211,23 +211,13 @@ const sourceKey=`speaking/${owner}/${recordingId}`;
 const objects=new Map();
 const metadata=data=>({size:data.length,customMetadata:{digest:digest(data)},httpMetadata:{contentType:'audio/wav'}});
 objects.set(sourceKey,{...metadata(recordingBytes),data:recordingBytes});
-const bundle=Buffer.from('isolated test bundle');
-const bundleSha256=digest(bundle);
-const runtimeBundleSha256='f'.repeat(64);
-globalThis.testEnv.ANALYSIS_RUNTIME_BUNDLE_SHA256=runtimeBundleSha256;
-const bundleManifest=Buffer.from(JSON.stringify({version:'analysis-v1',bundleSha256,bytes:bundle.length}));
-objects.set('analysis/analysis-v1/manifest.json',{...metadata(bundleManifest),data:bundleManifest});
-objects.set('analysis/analysis-v1/bundle.tar.zst',{...metadata(bundle),data:bundle});
 let failOriginalRead=true;
-let failAcousticRead=false;
 globalThis.testEnv.BUCKET={
   async head(key){return objects.get(key)??null},
   async get(key){
     if(key===sourceKey&&failOriginalRead)throw new Error('R2 read temporarily unavailable');
-    if(key===firstChunkKey&&failAcousticRead)throw new Error('R2 checkpoint read temporarily unavailable');
     const object=objects.get(key);
-    return object?{...object,arrayBuffer:async()=>Uint8Array.from(object.data).buffer,
-      text:async()=>object.data.toString()}:null;
+    return object?{...object,arrayBuffer:async()=>Uint8Array.from(object.data).buffer}:null;
   },
   async put(key,value,options){
     const data=Buffer.from(value);
@@ -254,31 +244,14 @@ const manifest={
   pcm:{encoding:'s16le',rateHz:16000,channels:1,sampleCount:16000,sha256:digest(pcm)},
   mediaTime:{originMs:0,samplesPerSecond:16000},
 };
-function encodeArtifact(manifest,body){
+function encodeDecode(manifest,pcm){
   const json=Buffer.from(JSON.stringify(manifest));
   const length=Buffer.alloc(4);
   length.writeUInt32BE(json.length);
-  return Buffer.concat([length,json,body]);
+  return Buffer.concat([length,json,pcm]);
 }
-function encodeAcoustic(manifest,body){
-  const ordered=Object.fromEntries(Object.keys(manifest).sort().map(key=>[key,manifest[key]]));
-  return encodeArtifact(ordered,body);
-}
-const decoded=encodeArtifact(manifest,pcm);
+const decoded=encodeDecode(manifest,pcm);
 const decodedFields={artifactSha256:digest(decoded),bytes:decoded.length};
-const features=Buffer.alloc(49*768*4);
-const acousticHeader={
-  format:'bandroom-acoustic-chunk-v1',chunkIndex:0,previousSha256:decodedFields.artifactSha256,
-  decodeSha256:decodedFields.artifactSha256,bundleSha256:runtimeBundleSha256,configSha256:'a'.repeat(64),featuresSha256:digest(features),
-};
-const firstChunk=encodeAcoustic(acousticHeader,features);
-const firstChunkSha256=digest(firstChunk);
-const firstChunkKey=`review-checkpoints/${owner}/${transferJob.taskId}/${firstChunkSha256}`;
-const secondHeader={...acousticHeader,chunkIndex:1,previousSha256:firstChunkSha256};
-const secondChunk=encodeAcoustic(secondHeader,features);
-const grantForChunk=(fence,chunkIndex,data)=>transferGrant(fence,'save_acoustic',{
-  chunkIndex,artifactSha256:digest(data),bytes:data.length,
-});
 await callReviewTool(owner,'claim_review_tasks',{limit:1,clientRunId:'run-a'});
 eq((await transferGrant(1,'read_recording',{},other)).error,'task_not_found','binary grant is owner isolated');
 const firstRead=await transferGrant(1,'read_recording');
@@ -312,7 +285,7 @@ const save=await transferGrant(2,'save_decode',decodedFields);
 const tampered=Buffer.from(decoded);
 tampered[tampered.length-1]^=1;
 eq((await transferPut(transferRequest(save,tampered))).status,422,'authorized digest rejects tampered PCM');
-const wrongTimeline=encodeArtifact({...manifest,mediaTime:{originMs:20,samplesPerSecond:16000}},pcm);
+const wrongTimeline=encodeDecode({...manifest,mediaTime:{originMs:20,samplesPerSecond:16000}},pcm);
 const wrongGrant=await transferGrant(2,'save_decode',{artifactSha256:digest(wrongTimeline),bytes:wrongTimeline.length});
 eq((await transferPut(transferRequest(wrongGrant,wrongTimeline))).status,422,'invalid media timeline cannot commit');
 eq((await transferGrant(2,'read_decode')).error,'checkpoint_missing','failed writes leave no checkpoint');
@@ -320,69 +293,15 @@ const saved=await transferPut(transferRequest(save,decoded));
 eq([saved.status,(await saved.json()).checkpointSha256],[201,decodedFields.artifactSha256],'decoded PCM stored and committed');
 const decodeReplay=await transferPut(transferRequest(save,decoded));
 eq([decodeReplay.status,(await decodeReplay.json()).duplicate],[200,true],'identical checkpoint replay is idempotent');
-const otherDecoded=encodeArtifact({...manifest,containerDurationMs:null},pcm);
+const otherDecoded=encodeDecode({...manifest,containerDurationMs:null},pcm);
 const conflict=await transferGrant(2,'save_decode',{artifactSha256:digest(otherDecoded),bytes:otherDecoded.length});
 eq((await transferPut(transferRequest(conflict,otherDecoded))).status,409,'conflicting checkpoint cannot overwrite');
 
-eq((await grantForChunk(2,1,secondChunk)).error,'checkpoint_missing','cannot skip the first acoustic chunk');
-eq((await grantForChunk(2,2,secondChunk)).error,'invalid_acoustic_checkpoint','chunk must be within canonical timeline');
-delete globalThis.testEnv.ANALYSIS_RUNTIME_BUNDLE_SHA256;
-eq(await grantForChunk(2,0,firstChunk),{error:'transfer_unconfigured'},
-  'missing runtime bundle digest refuses the first acoustic grant');
-globalThis.testEnv.ANALYSIS_RUNTIME_BUNDLE_SHA256=runtimeBundleSha256;
-const analysisBound=encodeAcoustic({...acousticHeader,bundleSha256},features);
-eq((await transferPut(transferRequest(await grantForChunk(2,0,analysisBound),analysisBound))).status,422,
-  'analysis bundle digest cannot bind an acoustic chunk');
-for(const [data,message] of [
-  [encodeAcoustic({...acousticHeader,decodeSha256:'e'.repeat(64)},features),'chunk must bind the committed decode'],
-  [encodeAcoustic({...acousticHeader,bundleSha256:'e'.repeat(64)},features),'first chunk must bind the task bundle'],
-  [encodeAcoustic(acousticHeader,features.subarray(4)),'chunk must have exact feature geometry'],
-  [encodeArtifact(acousticHeader,features),'a manifest that the Python runner cannot restore is refused'],
-]){
-  const bad=await grantForChunk(2,0,data);
-  const rejected=await transferPut(transferRequest(bad,data));
-  eq([rejected.status,(await rejected.json()).error],[422,'invalid_acoustic_checkpoint'],message);
-}
-const firstChunkGrant=await grantForChunk(2,0,firstChunk);
-const firstCheckpoint=await transferPut(transferRequest(firstChunkGrant,firstChunk));
-eq([firstCheckpoint.status,(await firstCheckpoint.json()).checkpointSha256],[201,firstChunkSha256],
-  'first acoustic chunk is durably committed');
-
 sql.prepare('UPDATE review_tasks SET lease_until=? WHERE id=?').run(Date.now()-1,transferJob.taskId);
 const thirdClaim=text(await callReviewTool(owner,'claim_review_tasks',{limit:1,clientRunId:'run-c'})).tasks[0];
-eq([thirdClaim.id,thirdClaim.fence,thirdClaim.stage,thirdClaim.checkpointSha256],
-  [transferJob.taskId,3,'acoustic',firstChunkSha256],'next run reclaims committed acoustic checkpoint');
+eq([thirdClaim.id,thirdClaim.fence,thirdClaim.checkpointSha256],[transferJob.taskId,3,decodedFields.artifactSha256],
+  'next run reclaims committed checkpoint');
 eq((await transferPut(transferRequest(save,decoded))).status,409,'interrupted lease cannot overwrite checkpoint');
-eq((await transferPut(transferRequest(firstChunkGrant,firstChunk))).status,409,'stale acoustic write grant is rejected');
-const readAcoustic=await transferGrant(3,'read_acoustic',{chunkIndex:0});
-failAcousticRead=true;
-const readAcousticError=await transferGet(transferRequest(readAcoustic));
-eq([readAcousticError.status,await readAcousticError.json()],
-  [503,{error:'transfer_storage_unavailable',retryable:true}],'private checkpoint read is retryable');
-failAcousticRead=false;
-const acousticBytes=await transferGet(transferRequest(readAcoustic));
-eq([acousticBytes.status,acousticBytes.headers.get('X-Bandroom-SHA256'),Buffer.from(await acousticBytes.arrayBuffer())],
-  [200,firstChunkSha256,firstChunk],'fresh lease reads exact committed acoustic features');
-for(const [header,message] of [
-  [{...secondHeader,previousSha256:'e'.repeat(64)},'second chunk must bind its predecessor'],
-  [{...secondHeader,configSha256:'e'.repeat(64)},'second chunk must use the same runtime configuration'],
-]){
-  const data=encodeAcoustic(header,features);
-  const rejected=await transferPut(transferRequest(await grantForChunk(3,1,data),data));
-  eq([rejected.status,(await rejected.json()).error],[422,'invalid_acoustic_checkpoint'],message);
-}
-const secondGrant=await grantForChunk(3,1,secondChunk);
-const alternative=encodeAcoustic({...secondHeader,featuresSha256:digest(Buffer.alloc(features.length,1))},
-  Buffer.alloc(features.length,1));
-const alternativeGrant=await grantForChunk(3,1,alternative);
-const secondCheckpoint=await transferPut(transferRequest(secondGrant,secondChunk));
-eq([secondCheckpoint.status,(await secondCheckpoint.json()).checkpointSha256],[201,digest(secondChunk)],
-  'fresh lease advances acoustic checkpoint');
-eq((await transferPut(transferRequest(alternativeGrant,alternative))).status,409,
-  'competing valid grant cannot replace the committed chunk');
-const replayFirst=await transferPut(transferRequest(await grantForChunk(3,0,firstChunk),firstChunk));
-eq([replayFirst.status,await replayFirst.json()],
-  [200,{saved:true,duplicate:true,checkpointSha256:digest(secondChunk)}],'earlier replay cannot roll back the pointer');
 const firstAddition={kind:'addition',wordIndex:0,phoneIndex:1,target:'∅',actual:'AH',startMs:100,endMs:170};
 const secondAddition={...firstAddition,gapOccurrence:1,startMs:230,endMs:290};
 const analysis={...baseAnalysis,inputSha256:source.sha256,inputBytes:source.bytes,errors:[firstAddition,secondAddition]};
@@ -421,7 +340,6 @@ objects.delete(sourceKey);
 const completionReplay=text(await callReviewTool(owner,'complete_review_task',completion));
 eq([completionReplay.duplicate,completionReplay.receiptId],[true,completed.receiptId],'completion replay does not need recording storage');
 const transferRuns=sql.prepare(`SELECT client_run_id,event FROM analysis_events WHERE task_id=?
-  AND stage IN ('read_input','decode')
   AND outcome IN ('ok','error') AND event IN ('read_review_recording','save_review_checkpoint','read_review_checkpoint')
   ORDER BY id`).all(transferJob.taskId);
 eq(transferRuns.map(row=>[row.client_run_id,row.event]).filter(row=>row[0]!==null),[
@@ -430,7 +348,6 @@ eq(transferRuns.map(row=>[row.client_run_id,row.event]).filter(row=>row[0]!==nul
   ['run-b','save_review_checkpoint'],['run-b','save_review_checkpoint'],['run-c','read_review_checkpoint'],
 ],'binary transfers are correlated to each claim');
 globalThis.testEnv.BUCKET=globalThis.testBucket;
-delete globalThis.testEnv.ANALYSIS_RUNTIME_BUNDLE_SHA256;
 }
 
 // retry path + heartbeat

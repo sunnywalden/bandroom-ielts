@@ -9,17 +9,13 @@ from __future__ import annotations
 from array import array
 from dataclasses import asdict, dataclass
 from hashlib import sha256
-from pathlib import Path
 import re
 import subprocess
 import sys
-from tempfile import TemporaryDirectory
 import wave
+from pathlib import Path
 
 TARGET_RATE = 16_000
-MAX_AUDIO = 12 * 1024 * 1024
-MAX_SAMPLES = MAX_AUDIO // 2
-FFMPEG_TIMEOUT = 60
 
 
 class DecodeError(ValueError):
@@ -51,6 +47,14 @@ class DecodedAudio:
         data = asdict(self)
         data.pop("samples")
         return data
+
+
+def _sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _mono_values(frames: bytes, width: int, channels: int) -> list[float]:
@@ -104,15 +108,11 @@ def _decode_wav(path: Path) -> tuple[array, int, int, float]:
             width = handle.getsampwidth()
             rate = handle.getframerate()
             frame_count = handle.getnframes()
-            if frame_count <= 0 or rate <= 0 or channels <= 0:
-                raise DecodeError("invalid WAV sample metadata")
-            if frame_count * width * channels > MAX_AUDIO or round(frame_count * TARGET_RATE / rate) > MAX_SAMPLES:
-                raise DecodeError("decoded audio exceeds the sample limit")
             frames = handle.readframes(frame_count)
     except (wave.Error, EOFError) as exc:
         raise DecodeError(f"invalid WAV container: {exc}") from exc
-    if len(frames) != frame_count * width * channels:
-        raise DecodeError("WAV audio ended before the declared sample count")
+    if frame_count <= 0 or not frames:
+        raise DecodeError("decoded WAV is empty")
     values = _mono_values(frames, width, channels)
     values = _resample(values, rate)
     return _to_pcm16(values), rate, channels, frame_count * 1000.0 / rate
@@ -123,9 +123,9 @@ _AUDIO = re.compile(r"Audio:\s*([^,\s]+)(?:[^,]*),\s*(\d+)\s*Hz,\s*([^,]+)")
 
 
 def _probe_ffmpeg(path: Path, ffmpeg: str) -> tuple[float | None, str | None, int | None, int | None]:
-    result = subprocess.run([ffmpeg, "-nostdin", "-hide_banner", "-protocol_whitelist", "file,pipe", "-i", str(path)],
-                            capture_output=True, check=False, timeout=FFMPEG_TIMEOUT)
-    text = result.stderr.decode("utf-8", "replace")
+    result = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)],
+                            capture_output=True, text=True, check=False)
+    text = result.stderr
     duration = None
     match = _DURATION.search(text)
     if match:
@@ -142,17 +142,13 @@ def _probe_ffmpeg(path: Path, ffmpeg: str) -> tuple[float | None, str | None, in
 
 def _decode_ffmpeg(path: Path, ffmpeg: str) -> tuple[array, int | None, int | None, float | None, str | None]:
     duration, codec, rate, channels = _probe_ffmpeg(path, ffmpeg)
-    # Decode past the limit by at most one second so oversized input fails instead of being accepted as truncated.
-    output_seconds = MAX_SAMPLES / TARGET_RATE + 1
     result = subprocess.run(
-        [ffmpeg, "-nostdin", "-v", "error", "-xerror", "-protocol_whitelist", "file,pipe", "-i", str(path),
-         "-map", "0:a:0", "-ac", "1", "-ar", str(TARGET_RATE), "-t", str(output_seconds), "-f", "s16le", "pipe:1"],
-        capture_output=True, check=False, timeout=FFMPEG_TIMEOUT,
+        [ffmpeg, "-v", "error", "-i", str(path), "-ac", "1", "-ar", str(TARGET_RATE),
+         "-f", "s16le", "pipe:1"],
+        capture_output=True, check=False,
     )
     if result.returncode != 0:
         raise DecodeError(result.stderr.decode("utf-8", "replace").strip() or "ffmpeg decode failed")
-    if len(result.stdout) > MAX_SAMPLES * 2 or len(result.stdout) % 2:
-        raise DecodeError("decoded PCM has an invalid byte count")
     samples = array("h")
     samples.frombytes(result.stdout)
     if sys.byteorder != "little":
@@ -160,37 +156,20 @@ def _decode_ffmpeg(path: Path, ffmpeg: str) -> tuple[array, int | None, int | No
     return samples, rate, channels, duration, codec
 
 
-def decode_audio(path: str | Path, ffmpeg: str = "ffmpeg", *,
-                 expected_sha256: str | None = None, expected_bytes: int | None = None) -> DecodedAudio:
+def decode_audio(path: str | Path, ffmpeg: str = "ffmpeg") -> DecodedAudio:
     source = Path(path).resolve(strict=True)
     if not source.is_file():
         raise DecodeError("input is not a file")
-    with source.open("rb") as stream:
-        original = stream.read(MAX_AUDIO + 1)
-    if not 0 < len(original) <= MAX_AUDIO:
-        raise DecodeError("original audio byte count is outside the supported range")
-    if expected_bytes is not None and len(original) != expected_bytes:
-        raise DecodeError("original audio byte count does not match the expected input")
-    digest = sha256(original).hexdigest()
-    if expected_sha256 is not None and digest != expected_sha256:
-        raise DecodeError("original audio digest does not match the expected input")
     suffix = source.suffix.lower()
-    # Decoder input and published provenance must refer to the same immutable bytes.
-    with TemporaryDirectory(prefix="bandroom-audio-") as directory:
-        snapshot = Path(directory) / "recording"
-        snapshot.write_bytes(original)
-        try:
-            if suffix in (".wav", ".wave"):
-                samples, source_rate, channels, container_ms = _decode_wav(snapshot)
-                codec = "pcm"
-            else:
-                samples, source_rate, channels, container_ms, codec = _decode_ffmpeg(snapshot, ffmpeg)
-        except subprocess.TimeoutExpired as exc:
-            raise DecodeError("audio decoding exceeded its time limit") from exc
+    if suffix in (".wav", ".wave"):
+        samples, source_rate, channels, container_ms = _decode_wav(source)
+        codec = "pcm"
+    else:
+        samples, source_rate, channels, container_ms, codec = _decode_ffmpeg(source, ffmpeg)
     if len(samples) == 0:
         raise DecodeError("decoded audio is empty")
     return DecodedAudio(
-        path=str(source), input_sha256=digest, input_bytes=len(original),
+        path=str(source), input_sha256=_sha256(source), input_bytes=source.stat().st_size,
         container=suffix.lstrip(".") or "unknown", codec=codec,
         source_rate=source_rate, source_channels=channels,
         sample_rate=TARGET_RATE, sample_count=len(samples),

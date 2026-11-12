@@ -6,17 +6,16 @@ from array import array
 from hashlib import sha256
 import json
 import math
-import os
 from pathlib import Path
 import re
 import struct
 import sys
-import tempfile
 
-from .decode import DecodeError, DecodedAudio, MAX_AUDIO, MAX_SAMPLES, TARGET_RATE
+from .decode import DecodeError, DecodedAudio, TARGET_RATE
 
 FORMAT = "bandroom-decode-v1"
 MAX_MANIFEST = 4096
+MAX_AUDIO = 12 * 1024 * 1024
 MAX_CHECKPOINT = 4 + MAX_MANIFEST + MAX_AUDIO
 MEDIA_TIME = {"originMs": 0, "samplesPerSecond": TARGET_RATE}
 MANIFEST_FIELDS = {
@@ -26,28 +25,11 @@ MANIFEST_FIELDS = {
 PCM_FIELDS = {"encoding", "rateHz", "channels", "sampleCount", "sha256"}
 
 
-def write_atomically(path: Path, value: bytes) -> None:
-    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".pending-")
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(value)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
-
-
 def encode_checkpoint(decoded: DecodedAudio, analysis_version: str) -> bytes:
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", analysis_version):
         raise DecodeError("invalid checkpoint analysis version")
     if (decoded.sample_rate != TARGET_RATE or not 0 < decoded.input_bytes <= MAX_AUDIO
-            or not 0 < decoded.sample_count == len(decoded.samples) <= MAX_SAMPLES):
+            or not 0 < decoded.sample_count == len(decoded.samples) <= MAX_AUDIO // 2):
         raise DecodeError("decoded audio exceeds the checkpoint bounds")
     samples = array("h", decoded.samples)
     if sys.byteorder != "little":
@@ -114,7 +96,7 @@ def read_checkpoint(path: Path, *, input_sha256: str, artifact_sha256: str, anal
     raw_samples = memoryview(value)[4 + length:]
     if (not isinstance(pcm, dict) or set(pcm) != PCM_FIELDS
             or pcm["encoding"] != "s16le" or pcm["rateHz"] != TARGET_RATE or pcm["channels"] != 1
-            or not _count(pcm["sampleCount"], MAX_SAMPLES)
+            or not _count(pcm["sampleCount"], MAX_AUDIO // 2)
             or len(raw_samples) != 2 * pcm["sampleCount"] or sha256(raw_samples).hexdigest() != pcm["sha256"]):
         raise DecodeError("checkpoint PCM digest or timeline does not match")
     samples = array("h")
