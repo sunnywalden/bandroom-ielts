@@ -178,6 +178,7 @@ export async function saveReviewCheckpoint(db: D1Like, userId: string, input: {
   inputSha256: string; artifactSha256: string; bytes: number; coverage?: number;
   objectRef?: string | null; payload?: Record<string, unknown>; now?: number;
   expectedDecodePointer?: string | null;
+  expectedAcousticPointer?: { stage: "decode" | "acoustic"; sha256: string };
 }) {
   const now = input.now ?? Date.now();
   const lease = [input.taskId, userId, input.fence, now];
@@ -187,8 +188,11 @@ export async function saveReviewCheckpoint(db: D1Like, userId: string, input: {
   const active = "id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?";
   const artifact = "task_id=? AND stage=? AND chunk_index=? AND analyzer_version=?";
   const verifiedDecode = input.expectedDecodePointer !== undefined;
-  const pointer = "AND (?=0 OR (stage IN ('read_input','decode') AND checkpoint_sha256 IS ?))";
-  const pointerArgs = [Number(verifiedDecode), input.expectedDecodePointer ?? null];
+  const previous = input.expectedAcousticPointer;
+  const pointer = `AND (?=0 OR (stage IN ('read_input','decode') AND checkpoint_sha256 IS ?))
+    AND (? IS NULL OR (stage=? AND checkpoint_sha256=?))`;
+  const pointerArgs = [Number(verifiedDecode), input.expectedDecodePointer ?? null,
+    previous?.stage ?? null, previous?.stage ?? null, previous?.sha256 ?? null];
   const [insert, , readback] = await db.batch([
     db.prepare(`INSERT INTO analysis_artifacts
       (task_id, stage, chunk_index, analyzer_version, input_sha256, artifact_sha256, bytes, object_ref, payload_json, created_at)
@@ -215,7 +219,7 @@ export async function saveReviewCheckpoint(db: D1Like, userId: string, input: {
       .bind(input.stage, input.artifactSha256, input.coverage ?? null, input.analysisVersion,
         now + LEASE_MS, now, ...lease, input.analysisVersion, ...pointerArgs, ...key,
         input.inputSha256, input.artifactSha256, input.bytes, objectRef, payloadJson),
-    db.prepare(`SELECT analysis_version AS analysisVersion, checkpoint_sha256 AS checkpointSha256,
+    db.prepare(`SELECT analysis_version AS analysisVersion, checkpoint_sha256 AS checkpointSha256, review_tasks.stage,
         a.input_sha256 AS inputSha256, a.artifact_sha256 AS artifactSha256, a.bytes,
         a.object_ref AS objectRef, a.payload_json AS payloadJson
       FROM review_tasks LEFT JOIN analysis_artifacts a
@@ -226,7 +230,7 @@ export async function saveReviewCheckpoint(db: D1Like, userId: string, input: {
     { meta?: { changes?: number } },
     unknown,
     { results?: Array<{
-      analysisVersion: string | null; checkpointSha256: string | null;
+      analysisVersion: string | null; checkpointSha256: string | null; stage: string;
       inputSha256: string | null; artifactSha256: string | null; bytes: number | null;
       objectRef: string | null; payloadJson: string | null;
     }> },
@@ -235,7 +239,10 @@ export async function saveReviewCheckpoint(db: D1Like, userId: string, input: {
   if (!current) throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
   if (current.analysisVersion !== null && current.analysisVersion !== input.analysisVersion)
     throw new ReviewTaskError("analysis_version_mismatch", "Checkpoints cannot mix analyzer versions.");
-  if (verifiedDecode && current.artifactSha256 === null && current.checkpointSha256 !== input.expectedDecodePointer)
+  if (current.artifactSha256 === null && (
+    (verifiedDecode && current.checkpointSha256 !== input.expectedDecodePointer)
+    || (previous && (current.stage !== previous.stage || current.checkpointSha256 !== previous.sha256))
+  ))
     throw new ReviewTaskError("checkpoint_advanced", "The checkpoint changed before this write committed.");
   if (current.inputSha256 !== input.inputSha256 || current.artifactSha256 !== input.artifactSha256 ||
       current.bytes !== input.bytes || current.objectRef !== objectRef || current.payloadJson !== payloadJson)
