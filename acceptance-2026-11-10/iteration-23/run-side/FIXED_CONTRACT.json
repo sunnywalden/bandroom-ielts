@@ -1,0 +1,110 @@
+{
+  "schema": "bandroom.qa.run-contract.v26",
+  "generatedUtc": "2026-11-13",
+  "jobId": "qa_hosted_ad79ac58-4d0a-4a29-af0f-c4f37cbc5710",
+  "taskId": "Automation_c2ca080ec67481919b9db50329e9e943",
+  "recipeSha256": "9022a23414fc0201753c3a06e81209d058c9ae0fbe5c6dff5893042e909e95c2",
+  "recipeDescriptorCanonical": "{\"batch\":8,\"frameMs\":20,\"interOpThreads\":1,\"intraOpThreads\":2,\"keepsAllWindowFrames\":true,\"mode\":\"diagnostic\",\"model\":{\"encoder\":\"913f30b95735bbf2e7d80dc93066e2730dc02bd0d19fb4a6b7cfefab657ed07c\",\"probe\":\"813c832bebffb68087be08544a1be100c1e73dda6f431d7a4731084e22430370\"},\"prefixWindows\":8,\"runtime\":{\"ort\":\"1.24.4\",\"target\":\"cp312-manylinux-x86_64\"},\"sampleRateHz\":16000,\"strideMs\":80,\"windowMs\":120}",
+  "recipeCanonicalization": "UTF-8 JSON, keys sorted lexicographically, separators ',' and ':', no whitespace, no trailing newline; SHA-256 over those exact bytes",
+  "modelSha256": "913f30b95735bbf2e7d80dc93066e2730dc02bd0d19fb4a6b7cfefab657ed07c",
+  "modelSha256Definition": "SHA-256 of encoder-int8.onnx (the frozen graph). This matches verify_official_run_v26.py ENCODER_SHA256. Do not substitute a combined encoder+probe digest; the probe head is identified by prefix metadata/runtime, not this field.",
+  "prefixSha256Field": "prefixSha256 is the authoritative key (verify_official_run_v26.py prefix_info). The design's shorthand 'prefixSha' is the same value; include it only as an optional alias.",
+  "recording": {
+    "sha256": "55ecb210cf3490448df0372344d2618086709bf2c6112e6f6354e18ac6b232d1",
+    "bytes": 441322,
+    "mimeType": "audio/mp4",
+    "localDecodedPcmSha256": "912fcde5a9e62e3f918bcfb36834d895c82c107273886d9f134127c90f436804",
+    "samples": 1099196,
+    "windows": 859,
+    "durationSeconds": 68.699728,
+    "globalTimelineFrames": 3434,
+    "deliveredFrames": 4295,
+    "note": "PCM SHA and duration are local decode references; the cloud run must measure and record its own values. Never substitute a reference value for a measurement."
+  },
+  "prefix": {
+    "windows": 8,
+    "frames": 40,
+    "bytes": 125976,
+    "parts": 6,
+    "partBytes": 20996,
+    "maxPartBytes": 24576,
+    "metadataIndex": 0,
+    "firstDataIndex": 1,
+    "lastDataIndex": 6,
+    "nextIndexAfterPrefix": 7,
+    "localReferenceSha256": "4b347dd6b89dc88dddc0f5566be2e69fda1ce0e1aa588c390b261b866943c167",
+    "note": "125,976 B = 8 chunks of 5x768 float32 frames plus bandroom-acoustic-chunk-v1 framing. The cloud run must record the measured prefix SHA; the local reference is a comparison only."
+  },
+  "output": {
+    "schema": "bandroom.qa.acoustic-output.v1",
+    "mode": "diagnostic",
+    "outputIndex": 7,
+    "rawOutputBytes": 1718000,
+    "frames": 4295,
+    "bytesPerFrame": 400,
+    "coldMustEqualResumed": true
+  },
+  "g5AcousticPlan": {
+    "basis": "bandroom_acoustic.acoustic_stage.windows(sample_count): frameSamples=320, receptiveSamples=400, windowFrames=800, contextFrames=100, offsets=[0,400], features=768",
+    "expectedChunks": 10,
+    "cut": 6,
+    "cutRule": "B persists verifier-plan chunks 0..5; C restores them and computes 6..9; 0 < cut < chunks",
+    "configSource": "release analysis-config.json.acousticConfig, used verbatim; never invent configSha256",
+    "persistence": "/mnt/data/bandroom-g5/acoustic-plan (B writes, C must read; missing prefix is a blocker, not a recompute)",
+    "parallelToV26Prefix": "the 6-part 120/80 ms v26 prefix remains for G3 resume; plan chunks are the G5 acoustic-recovery evidence",
+    "identity": ["environment", "taskId", "attemptId", "revision", "inputSha256", "inputBytes", "decodeSha256", "bundleSha256", "configSha256"]
+  },
+  "truth": {
+    "sha256": "394fcb74a4221278aa7df02ead49a3743da6293c527617c7f973b1a52c062e28",
+    "anchors": [
+      {"word": "business", "start": 3.360, "end": 3.660, "kind": "substitution"},
+      {"word": "and", "start": 11.440, "end": 11.740, "kind": "deletion"},
+      {"word": "suitcase", "start": 55.209724, "end": 55.509724, "kind": "addition"}
+    ]
+  },
+  "feedback": {
+    "prefix": "声学链路验收（不代表纠音盲测达标）。",
+    "prefixLength": 18,
+    "minLength": 10,
+    "maxLength": 800,
+    "quote": "[原声录音]"
+  },
+  "fences": {
+    "referenceRuns": ["A", "B", "C", "D"],
+    "noteD": "Run D is a read-only cold reference with no acoustic lease; its officialRunId is the G5 coldRunId and must differ from A/B/C",
+    "reset": "HJK legacy qa_acoustic_leases row (recipe 602a745b..., fence 2) deleted by owner-authorised QA-only reset per B4",
+    "expectedA": 1,
+    "expectedBRelative": "fence_A + 1",
+    "expectedCRelative": "fence_A + 2",
+    "policy": "Record measured values; assert strictly increasing. Do not hardcode 1/2/3 as pass evidence if the measured reset baseline differs; stop and report instead."
+  },
+  "retryReasons": [
+    "recording_read_failed",
+    "checkpoint_read_failed",
+    "checkpoint_write_failed",
+    "bundle_read_failed",
+    "bundle_integrity_failed",
+    "runtime_unavailable",
+    "compute_budget"
+  ],
+  "lease": {
+    "milliseconds": 600000,
+    "renewEverySeconds": [200, 240],
+    "renewBeforeRemainingSeconds": 260,
+    "maxPartBytes": 24576
+  },
+  "deliveryManifest": [
+    {"name": "encoder-int8.onnx", "bytes": 50410797, "sha256": "913f30b95735bbf2e7d80dc93066e2730dc02bd0d19fb4a6b7cfefab657ed07c"},
+    {"name": "probe-head.onnx", "bytes": 455850, "sha256": "813c832bebffb68087be08544a1be100c1e73dda6f431d7a4731084e22430370"},
+    {"name": "onnxruntime-1.24.4-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "bytes": 17244912, "sha256": "0d640eb9f3782689b55cfa715094474cd5662f2f137be6a6f847a594b6e9705c"},
+    {"name": "flatbuffers-25.12.19-py2.py3-none-any.whl", "bytes": 26661, "sha256": "7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4"},
+    {"name": "packaging-26.3-py3-none-any.whl", "bytes": 129956, "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"},
+    {"name": "protobuf-7.36.2-cp310-abi3-manylinux2014_x86_64.whl", "bytes": 343223, "sha256": "89f23aa53c24553a2416fd4fd1ec06f74fa42b14b546d8883128813f775bbfd2"},
+    {"name": "sympy-1.14.0-py3-none-any.whl", "bytes": 6299353, "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5"},
+    {"name": "mpmath-1.3.0-py3-none-any.whl", "bytes": 536198, "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c"}
+  ],
+  "deliveryBytes": 75446950,
+  "probeBlobMaxReadBytes": 4194304,
+  "ptylLineMaxChars": 3000,
+  "runIdPattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$"
+}

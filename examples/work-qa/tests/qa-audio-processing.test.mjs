@@ -4,14 +4,14 @@ import {createHash, randomBytes, randomUUID} from "node:crypto";
 import {createRequire} from "node:module";
 import {join, resolve} from "node:path";
 import {fileURLToPath} from "node:url";
-import {claimAudioProcessing, checkpointRecording} from "../server/audio-processing.js";
-import fullInterviewAudio from "../server/qa-full-interview-audio.js";
+import {claimAudioProcessing, checkpointRecording} from "../dist/server/audio-processing.js";
+import fullInterviewAudio from "../dist/server/qa-full-interview-audio.js";
 
 const [wranglerProject] = process.argv.slice(2);
 if (!wranglerProject) throw new Error("Pass the installed Wrangler project path.");
 const require = createRequire(resolve(wranglerProject, "package.json"));
 const {Miniflare, Response} = createRequire(require.resolve("wrangler/package.json"))("miniflare");
-const root = fileURLToPath(new URL("../server/", import.meta.url));
+const root = fileURLToPath(new URL("../dist/server/", import.meta.url));
 const owner = "d2-test-owner";
 const unrelated = "other-owner";
 const site = "http://localhost";

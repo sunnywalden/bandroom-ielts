@@ -1,5 +1,9 @@
 import {advanceAudioProcessing} from "./audio-processing.js";
-import {acousticTool, acousticTools, pendingAcoustics} from "./acoustic-checkpoints.js";
+import {acousticTool, acousticTools, pendingAcoustics, prepareAcoustics} from "./acoustic-checkpoints.js";
+import {completionProperties} from "./acoustic-completion.js";
+import {analysisBundleTool, analysisBundleRequest, getAnalysisBundle} from "./analysis-bundle.js";
+import {probeAssetRequest, probeTool, probeTools} from "./runtime-probe.js";
+import {adminTool, adminTools, recordWake, subscriptionSnapshot} from "./qa-admin.js";
 import qaAudio from "./qa-audio.js";
 import fullInterviewAudio from "./qa-full-interview-audio.js";
 import {eventName, eventDefinition, fixture, hostedBrowserReview, hostedJobPattern, hostedServiceReview, pendingReviews, pumpHostedReviews, recordingBytesTool, relay, reviewRecording, reviewStatus, reviewTool, speakingQuestion, startReview, subscribe, unsubscribe} from "./work-events.js";
@@ -12,7 +16,10 @@ const jobId = {type: "string"};
 const hostedJobId = new RegExp(hostedJobPattern);
 const toolDefinitions = [
   ...acousticTools,
-  {name: "read_qa_status", description: "Read isolated QA status, pending reviews and pending acoustic checkpoints owned by the signed-in account. A scheduled run can pick up pendingAcoustics when availableAt (Unix milliseconds) is due. No learner records.", inputSchema: noArgs, annotations: {readOnlyHint: true, destructiveHint: false, openWorldHint: false}},
+  ...probeTools,
+  ...adminTools,
+  analysisBundleTool,
+  {name: "read_qa_status", description: "Read isolated QA status, pending reviews, pending acoustic checkpoints, and durable subscription liveness/expiry owned by the signed-in account. Each call appends one immutable wake row to the owner-only site event log. A scheduled run can pick up pendingAcoustics when availableAt (Unix milliseconds) is due. No learner records.", inputSchema: noArgs, annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false}},
   {
     name: "recover_qa_reviews",
     description: "Recover one due isolated review owned by this account, including delivery acknowledged but feedback not saved. Safe for a cloud recovery schedule. Returns jobId null when nothing is due. No learner data.",
@@ -36,11 +43,12 @@ const toolDefinitions = [
     inputSchema: textReviewSchema({jobId}), annotations: {readOnlyHint: true, destructiveHint: false, openWorldHint: false},
   },
   {
-    name: "write_qa_text_feedback", description: "Add feedback and an exact answer quote to one private QA attempt identified by jobId and owned by the signed-in account. Existing feedback is preserved. No learner records or external recipients.",
+    name: "write_qa_text_feedback", description: "Write one owner-scoped QA result. Full speech requires recipeSha256, runId, current fence, outputSha256 and outputIndex matching the final committed acoustic output. Retry identical arguments after a lost receipt; old fences and changed feedback are rejected. No learner records.",
     inputSchema: {
       ...textReviewSchema({jobId, quote: {type: "string"}, feedback: {type: "string"}}),
       properties: {
         jobId, quote: {type: "string"}, feedback: {type: "string"},
+        ...completionProperties,
         evidenceReceipt: {type: "string", description: "For full spontaneous speech, copy the receipt returned by read_qa_text_answer."},
         evidenceIds: {type: "array", maxItems: 6, items: {type: "string"}, description: "For full spontaneous speech, cite measured sound IDs from this job."},
       },
@@ -97,6 +105,15 @@ const worker = {
         return subscribe(env, principal, params, reply, error);
       }
       if (method === "events/unsubscribe") return unsubscribe(env, principal, params, reply);
+      if (method === "tools/call" && params?.name === "get_analysis_bundle") {
+        return getAnalysisBundle(env, principal, params.arguments, reply, error);
+      }
+      if (method === "tools/call" && probeTools.some(tool => tool.name === params?.name)) {
+        return probeTool(env, principal, params.name, params.arguments, reply, error, prepareAcoustics);
+      }
+      if (method === "tools/call" && adminTools.some(tool => tool.name === params?.name)) {
+        return adminTool(env, principal, params.name, params.arguments, reply, error);
+      }
       if (method === "tools/call" && acousticTools.some(tool => tool.name === params?.name)) {
         return acousticTool(env, principal, params.name, params.arguments, reply, error);
       }
@@ -122,7 +139,17 @@ const worker = {
         const [siteStatus, reviews, acousticJobs] = await Promise.all([
           status(env), pendingReviews(env, principal), pendingAcoustics(env, principal),
         ]);
-        const data = {...siteStatus, ...reviews, pendingAcoustics: acousticJobs};
+        // Durable subscription observation (M7) and append-only wake history (M13).
+        // An empty queue is accepted only while the owner's subscription is live.
+        const subscription = await subscriptionSnapshot(env, principal);
+        const wake = await recordWake(env, principal, {
+          pendingCount: reviews.pendingCount, pendingAcoustics: acousticJobs.length,
+          jobId: reviews.pendingReviews.length === 1 ? reviews.pendingReviews[0].jobId : null,
+          subscription, source: "read_qa_status",
+        });
+        const data = {...siteStatus, ...reviews, pendingAcoustics: acousticJobs,
+          subscription, subscriptionActive: subscription.active, subscriptionVerified: subscription.verified,
+          subscriptionExpiresAt: subscription.expiresAt, wake};
         return reply({structuredContent: data, content: [{type: "text", text: JSON.stringify(data)}]});
       }
       if (method === "tools/call" && params?.name === "retry_qa_work_delivery") {
@@ -154,6 +181,11 @@ const worker = {
       return error(-32601, "Method not found");
     }
     if (pathname === "/qa/relay") return relay(request, env);
+    if (pathname === "/qa/analysis-bundle/upload") {
+      const url = new URL(request.url);
+      if (url.searchParams.get("kind") === "runtime-probe") return probeAssetRequest(request, env, url);
+    }
+    if (pathname.startsWith("/qa/analysis-bundle/")) return analysisBundleRequest(request, env);
     if (pathname === "/qa/hosted-review" || (pathname === "/qa/hosted-retry" && request.method === "POST")) {
       // Sites validates and consumes service credentials at the owner-private boundary.
       if (request.headers.has("oai-authenticated-user-id") || request.headers.has("origin")) {
@@ -161,6 +193,9 @@ const worker = {
       }
       if (pathname === "/qa/hosted-review") {
         if (!["GET", "POST"].includes(request.method)) return json({error: "Method not allowed"}, 405);
+        if (request.method === "GET" && new URL(request.url).searchParams.has("bundlePart")) {
+          return analysisBundleRequest(request, env);
+        }
         return hostedServiceReview(env, request, ctx);
       }
       const result = await pumpHostedReviews(env);
@@ -280,9 +315,10 @@ const worker = {
             }
             fullFeedback.textContent = job.feedback ?? "";
             const transportTest = job.processingStage === "qa_transport_fixture" && Boolean(job.feedback);
-            const observations = transportTest ? [{start: 12, word: "回听测试点"}] : job.acousticEvidence?.observations;
+            const diagnostic = job.completion?.mode === "diagnostic";
+            const observations = diagnostic ? job.completion.markers : transportTest ? [{start: 12, word: "回听测试点"}] : job.acousticEvidence?.observations;
             if (!sounds.childElementCount && observations?.length) {
-              soundSummary.textContent = transportTest ? "回听测试" : "回听可对照的音素";
+              soundSummary.textContent = diagnostic ? "人工真值回听点（非模型纠音结论）" : transportTest ? "回听测试" : "回听可对照的音素";
               for (const sound of observations) {
                 const item = document.createElement("li");
                 const button = document.createElement("button");

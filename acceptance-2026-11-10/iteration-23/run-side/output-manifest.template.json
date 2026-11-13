@@ -1,0 +1,52 @@
+{
+  "schema": "bandroom.qa.acoustic-output.v1",
+  "mode": "diagnostic",
+  "recordingSha256": "55ecb210cf3490448df0372344d2618086709bf2c6112e6f6354e18ac6b232d1",
+  "recipeSha256": "9022a23414fc0201753c3a06e81209d058c9ae0fbe5c6dff5893042e909e95c2",
+  "runId": "<C_RUN_ID_LOWERCASE_HEX_UUID>",
+  "fence": 3,
+  "coldOutputSha256": "<MEASURED_HJK_COLD_OUTPUT_SHA256_64_LOWER_HEX>",
+  "resumedOutputSha256": "<MEASURED_HJK_RESUMED_OUTPUT_SHA256_64_LOWER_HEX>",
+  "windows": 859,
+  "duration": 68.699728,
+  "rawOutputBytes": 1718000,
+  "pcmSha256": "<MEASURED_CLOUD_DECODE_PCM_SHA256_64_LOWER_HEX>",
+  "modelSha256": "913f30b95735bbf2e7d80dc93066e2730dc02bd0d19fb4a6b7cfefab657ed07c",
+  "runtime": {
+    "ort": "1.24.4",
+    "onnxruntime": "1.24.4",
+    "numpy": "<MEASURED_NUMPY_VERSION>",
+    "python": "<MEASURED_PYTHON_VERSION>",
+    "provider": "CPUExecutionProvider",
+    "intraOpThreads": 2,
+    "interOpThreads": 1,
+    "machine": "<MEASURED_MACHINE>",
+    "system": "<MEASURED_SYSTEM>"
+  },
+  "prefixSha256": "<MEASURED_PREFIX_SHA256_64_LOWER_HEX>",
+  "prefixBytes": 125976,
+  "feedback": "声学链路验收（不代表纠音盲测达标）。v26 诊断链路：859 窗，前缀 8 窗，cold==resumed 逐字节一致；business/and/suitcase 三个标记来自人工锚点，不代表纠音盲测结论。",
+  "markers": [
+    {
+      "word": "business",
+      "source": "human_annotation",
+      "truthSha256": "394fcb74a4221278aa7df02ead49a3743da6293c527617c7f973b1a52c062e28",
+      "start": 3.36,
+      "end": 3.66
+    },
+    {
+      "word": "and",
+      "source": "human_annotation",
+      "truthSha256": "394fcb74a4221278aa7df02ead49a3743da6293c527617c7f973b1a52c062e28",
+      "start": 11.44,
+      "end": 11.74
+    },
+    {
+      "word": "suitcase",
+      "source": "human_annotation",
+      "truthSha256": "394fcb74a4221278aa7df02ead49a3743da6293c527617c7f973b1a52c062e28",
+      "start": 55.209724,
+      "end": 55.509724
+    }
+  ]
+}
