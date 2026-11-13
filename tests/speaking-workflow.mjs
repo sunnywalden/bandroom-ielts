@@ -47,7 +47,7 @@ async function stop(){await click(document.querySelector('[aria-label="停止录
 async function writeDraft(value){const area=document.querySelector('textarea');await act(async()=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(area,value);area.dispatchEvent(new Event('input',{bubbles:true}))});}
 function preserved(){assert.equal(state.day,12);assert.equal(state.stage,'speak');assert.equal(state.finished,false);assert.equal(state.entries[12].speakingPart2,part2);assert.deepEqual(state.completed,Array.from({length:11},(_,i)=>i+1));assert.equal(state.entries[11].speakingReview,'Earlier feedback');}
 beforeEach(()=>{
-  globalThis.indexedDB=new IDBFactory();localStorage.clear();globalThis.MediaRecorder=Recorder;
+  globalThis.indexedDB=new IDBFactory();localStorage.clear();globalThis.MediaRecorder=Recorder;Recorder.last=null;
   Object.defineProperty(navigator,'mediaDevices',{configurable:true,value:{getUserMedia:async()=>({getTracks:()=>[{stop(){}}]})}});
   revision=6;calls=[];audioFault=stateFault=coachFault=null;pendingState=null;stopDelay=0;holdStop=false;
   state={version:1,day:12,stage:'speak',finished:false,completed:Array.from({length:11},(_,i)=>i+1),checked:{11:'2026-11-09'},started:{11:'2026-11-02',12:'2026-11-09'},exam:'未选择',practice:{},entries:{11:{speakingReview:'Earlier feedback'},12:{speakingPart2:part2,speakingPhase:'followup'}}};
@@ -203,12 +203,33 @@ test('a recording draft can be discarded before submitting',async()=>{
   assert.ok(!document.querySelector('audio[aria-label="试听本次录音"]'));
   assert.ok(!state.entries[12].speakingFollowup);preserved();
 });
+test('a failed local delete does not report the recording as removed',async()=>{
+  await mount();await record();await stop();await flush(20);
+  globalThis.indexedDB={open:()=>({})};
+  await click(button('移除这段录音，改为文字或自报作答'));await flush(70);
+  assert.ok(document.querySelector('audio[aria-label="试听本次录音"]'));
+  assert.match(text(),/未能删除/);
+});
 test('an account lock stops an active recording instead of hiding it',async()=>{
-  await mount();await record();
+  await mount();await record();holdStop=true;
   const recorder=Recorder.last;
   assert.equal(recorder.state,'recording');
   await act(async()=>{window.dispatchEvent(new dom.window.Event('bandroom:access-locked'))});
   assert.equal(recorder.state,'inactive');
-  await flush(20);
+  // The lock path must arm the same lost-stop recovery as a manual stop.
+  await flush(70);
+  assert.ok(document.querySelector('[aria-label="开始录音"]'));
+  assert.ok(!state.entries[12].speakingFollowup);preserved();
+});
+test('an account lock during microphone permission prevents recording',async()=>{
+  let resolveMedia;
+  Object.defineProperty(navigator,'mediaDevices',{configurable:true,value:{getUserMedia:()=>new Promise(resolve=>{resolveMedia=resolve})}});
+  await mount();
+  await click(document.querySelector('[aria-label="开始录音"]'));
+  assert.ok(resolveMedia);
+  await act(async()=>{window.dispatchEvent(new dom.window.Event('bandroom:access-locked'))});
+  await act(async()=>resolveMedia({getTracks:()=>[{stop(){}}]}));
+  await flush(30);
+  assert.ok(!Recorder.last||Recorder.last.state!=='recording');
   assert.ok(!state.entries[12].speakingFollowup);preserved();
 });

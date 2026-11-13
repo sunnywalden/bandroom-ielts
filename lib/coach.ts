@@ -3,7 +3,7 @@ import { env } from "cloudflare:workers";
 import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod/v4";
 import { getDb } from "@/db";
-import { learnerStates, reviewTasks, schedulerHeartbeats, teacherFeedback, teacherLessons } from "@/db/schema";
+import { automationHeartbeats, learnerStates, reviewTasks, teacherFeedback, teacherLessons } from "@/db/schema";
 import { getExercises, type Lesson } from "@/app/curriculum";
 import { targets, overallTarget } from "@/app/goals";
 import { frozenReviews } from "./review-jobs";
@@ -11,7 +11,7 @@ import { reviewContext } from "./review-context";
 import { listRecoverable } from "./recording-recovery";
 import { initial, oldResults, part3, writings, type Ledger } from "@/app/ledger";
 import { callReviewTool, reviewTools } from "./review-tools";
-import { claimManualReviewTask, completeReviewTask, findReviewTaskByAttempt, ReviewTaskError, type ReviewTaskDb } from "./review-tasks";
+import { claimManualReviewTask, completeReviewTask, createReviewTaskStatement, findReviewTaskByAttempt, reviewTaskDb, ReviewTaskError } from "./review-tasks";
 
 const text = (max: number, description: string) => z.string().trim().min(1).max(max).describe(description);
 const term = text(160, "English word, phrase or collocation.");
@@ -108,29 +108,30 @@ async function reviews(userId:string, day?:number) {
   }));
 }
 export async function coachData(userId:string) {
-  const [lessons,feedback,jobs,tasks] = await Promise.all([
+  const [lessons,feedback,jobs,tasks,heartbeats] = await Promise.all([
     getDb().select({day:teacherLessons.day,lesson:teacherLessons.lesson}).from(teacherLessons).where(eq(teacherLessons.userId,userId)), reviews(userId), frozenReviews(userId),
     getDb().select({
       id:reviewTasks.id, attemptId:reviewTasks.attemptId, kind:reviewTasks.kind, state:reviewTasks.state,
       stage:reviewTasks.stage, nextAt:reviewTasks.nextAt, lastError:reviewTasks.lastError, updatedAt:reviewTasks.updatedAt,
     }).from(reviewTasks).where(eq(reviewTasks.userId,userId)).orderBy(desc(reviewTasks.updatedAt)).limit(50),
+    // A rolling deploy may reach this code before migration 0006 lands; treat
+    // a missing table as "no connected automation" instead of failing /coach.
+    Promise.resolve(getDb().select({
+      startedAt:automationHeartbeats.startedAt,lastSuccessAt:automationHeartbeats.lastSuccessAt,
+      nextExpectedAt:automationHeartbeats.nextExpectedAt,status:automationHeartbeats.status,
+    }).from(automationHeartbeats).where(eq(automationHeartbeats.userId,userId))
+      .orderBy(desc(automationHeartbeats.startedAt)).limit(1)).catch(()=>[]),
   ]);
-  const automation:{connected:boolean;lastSuccessAt:number|null;nextExpectedAt:number|null;status:string|null}={
-    connected:false,lastSuccessAt:null,nextExpectedAt:null,status:null,
+  const heartbeat=heartbeats[0],now=Date.now();
+  const last=heartbeat?.lastSuccessAt??heartbeat?.startedAt??null;
+  const next=heartbeat?.nextExpectedAt??null;
+  const automation={
+    connected:Boolean(heartbeat&&heartbeat.status!=='failed'&&
+      ((last!==null&&now-last<=2*60*60_000)||(next!==null&&now<=next+15*60_000))),
+    lastSuccessAt:heartbeat?.lastSuccessAt??null,
+    nextExpectedAt:next,
+    status:heartbeat?.status??null,
   };
-  try{
-    const [heartbeat]=await getDb().select({
-      lastSuccessAt:schedulerHeartbeats.lastSuccessAt, nextExpectedAt:schedulerHeartbeats.nextExpectedAt,
-      status:schedulerHeartbeats.status,
-    }).from(schedulerHeartbeats).where(eq(schedulerHeartbeats.ownerUserId,userId))
-      .orderBy(desc(schedulerHeartbeats.lastSuccessAt)).limit(1);
-    if(heartbeat){
-      automation.lastSuccessAt=heartbeat.lastSuccessAt??null;
-      automation.nextExpectedAt=heartbeat.nextExpectedAt??null;
-      automation.status=heartbeat.status??null;
-      automation.connected=Boolean(heartbeat.lastSuccessAt&&Date.now()-heartbeat.lastSuccessAt<=2*60*60_000);
-    }
-  }catch{/* A rolling deploy may reach this code before migration 0005 lands. */}
   return {account:userId,extras:Object.fromEntries(lessons.map(({day,lesson})=>[day,lesson])),feedback,
     reviewLinks:jobs.map(({id,day,snapshot})=>({id,day,sourceId:snapshot.sourceId})),reviewTasks:tasks,automation};
 }
@@ -286,30 +287,51 @@ export async function callCoach(userId:string, name:string, args:unknown) {
         // through the same fence/receipt transaction so automatic and manual
         // completions cannot both write a formal result for one attempt.
         if(fixed){
-          const taskDb=getDb().$client as unknown as ReviewTaskDb;
-          const task=await findReviewTaskByAttempt(taskDb,userId,values.attempt);
-          if(task){
+          const taskDb=reviewTaskDb();
+          let task=await findReviewTaskByAttempt(taskDb,userId,values.attempt);
+          if(!task){
+            // Restored review_jobs do not carry tasks. Create the missing task
+            // so manual feedback still uses the same fence/receipt contract.
+            await createReviewTaskStatement(taskDb,{
+              taskId:crypto.randomUUID(),reviewJobId:values.attempt,userId,
+              kind:fixed.stage==="speak"&&fixed.recordingId?"speaking":"text",
+              attemptId:values.attempt,day:values.day,attemptRevision:frozen?.revision??0,
+              recordingId:fixed.recordingId??null,analysisVersion:null,now:Date.now(),
+            }).run();
+            task=await findReviewTaskByAttempt(taskDb,userId,values.attempt);
+          }
+          if(!task)throw new CoachError("This submission has no review task and one could not be created.");
+          // Concurrent manual calls may steal the fence from one another. Retry
+          // by re-reading the task; if another call completed the same output,
+          // completeReviewTask returns its receipt instead of writing twice.
+          for(let attempt=0;attempt<6;attempt++){
+            const current=await findReviewTaskByAttempt(taskDb,userId,values.attempt);
+            if(!current)throw new CoachError("This submission has no review task.");
+            const claimed=current.state==="completed"?current:await claimManualReviewTask(taskDb,userId,current.id);
+            const target=claimed??current;
             try{
-              const claimed=task.state==="completed"?task:await claimManualReviewTask(taskDb,userId,task.id);
-              if(!claimed)throw new CoachError("This review is already being completed. Read the task again before writing.");
               const completed=await completeReviewTask(taskDb,userId,{
-                taskId:task.id,fence:claimed.fence,
+                taskId:target.id,fence:target.fence,
                 output:{feedback:values.feedback,evidence:values.evidence,analysis:null},
-                feedback:{id:`rt:${task.id}`,day:values.day,stage:values.stage,attempt:values.attempt,
+                feedback:{id:`rt:${target.id}`,day:values.day,stage:values.stage,attempt:values.attempt,
                   evidence:values.evidence,feedback:values.feedback,pronunciation:rating??undefined},
+                manualGrantSha256:target.claimKind==="manual"?target.manualGrantSha256??undefined:undefined,
                 receipt:{recordingSha256:frozen?.snapshot.recording?.sha256??null,
-                  analysisVersion:task.analysisVersion??null,payload:{source:"manual_coach"}},
+                  analysisVersion:target.analysisVersion??null,payload:{source:"manual_coach",
+                    ...(target.claimKind==="manual"&&target.manualGrantSha256?{grant:target.manualGrantSha256}:{})}},
               });
               return content({saved:true,id:completed.receipt.feedbackId,receiptId:completed.receipt.id,
                 duplicate:completed.duplicate,day:values.day,attempt:values.attempt});
             }catch(error){
+              if(error instanceof ReviewTaskError && (error.code==="stale_lease"||error.code==="task_not_found"))continue;
               if(error instanceof ReviewTaskError)throw new CoachError(error.message);
               throw error;
             }
           }
+          throw new CoachError("Another writer kept taking this review. Refresh and try again.");
         }
         const hash=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(rating?[userId,values,rating]:[userId,values])));
-        const id=fixed?.id??Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,"0")).join("");
+        const id=frozen?.snapshot.attempt.id??Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,"0")).join("");
         await getDb().insert(teacherFeedback).values({...values,id,userId,pronunciation:rating,createdAt:new Date().toISOString()}).onConflictDoNothing();
         return content({saved:true,id,day:values.day,attempt:values.attempt});
       }

@@ -105,9 +105,10 @@ assert.equal((await call('read_study_session',{day:11,attemptId:id})).isError,tr
 assert.equal((await call('add_coach_feedback',{...feedback,attempt:revisionAttempt.id})).isError,true);check();
 const fixedReview={...feedback,attempt:id,feedback:'First returned correction'};
 const reviews=await Promise.all(Array.from({length:4},()=>call('add_coach_feedback',fixedReview)));
-assert.ok(reviews.every(r=>unpack(r).id===id));
-const replay=unpack(await call('add_coach_feedback',{...fixedReview,feedback:'Late duplicate'}));
-assert.equal(replay.id,id);
+const reviewIds=reviews.map(result=>unpack(result).id);
+assert.ok(reviewIds.every(value=>value===reviewIds[0]&&value.startsWith('rt:')),'concurrent manual reviews share one task result');check();
+const replay=await call('add_coach_feedback',{...fixedReview,feedback:'Late duplicate'});
+assert.equal(replay.isError,true);check();
 assert.equal(unpack(await call('read_study_session',{day:12,attemptId:id})).feedback[0].feedback,'First returned correction');check();
 const coach=await(await http.GET()).json();
 assert.deepEqual(coach.reviewLinks,[{day:12,id,sourceId:revisionAttempt.id}]);check();
@@ -129,6 +130,15 @@ assert.equal((await call('add_coach_feedback',{...manualFeedback,feedback:'Diffe
 assert.equal(db.prepare('SELECT COUNT(*) n FROM teacher_feedback WHERE review_task_id=?').get('manual-task').n,1);check();
 assert.equal(db.prepare('SELECT state FROM review_tasks WHERE id=?').get('manual-task').state,'completed');check();
 assert.match(db.prepare('SELECT output_sha256_v2 AS digest FROM review_receipts WHERE task_id=?').get('manual-task').digest,/^[a-f0-9]{64}$/);check();
+const heartbeat=(status,startedAt,lastSuccessAt,nextExpectedAt)=>db.prepare(`INSERT OR REPLACE INTO automation_heartbeats
+ (user_id,automation_id,generation,client_run_id,started_at,finished_at,last_success_at,next_expected_at,status,detail)
+ VALUES (?,?,?,?,?,?,?,?,?,?)`).run(user.userId,'Automation_fixture',1,'run-heartbeat',startedAt,null,lastSuccessAt,nextExpectedAt,status,null);
+heartbeat('started',Date.now(),null,null);
+assert.equal((await(await http.GET()).json()).automation.connected,true);check();
+heartbeat('failed',Date.now(),null,null);
+assert.equal((await(await http.GET()).json()).automation.connected,false);check();
+heartbeat('finished',Date.now()-3*60*60_000,Date.now()-3*60*60_000,Date.now()+60*60_000);
+assert.equal((await(await http.GET()).json()).automation.connected,true);check();
 globalThis.user={userId:'other-fixture'};
 assert.equal((await call('read_study_session',{day:12,attemptId:id})).isError,true);
 assert.equal((await call('add_coach_feedback',fixedReview)).isError,true);check();

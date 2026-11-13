@@ -61,7 +61,7 @@ function insertTask(job,{taskId=randomUUID(),kind='text',recordingId=null,now=1_
 }
 const feedback=(task,text='Correction')=>({id:'fb-'+task.taskId,day:task.day,stage:'write',attempt:task.attemptId,evidence:'Fixture evidence',feedback:text,analysis:{errors:[]}});
 const output=(text='Correction')=>({feedback:text,errors:[]});
-function reset(){sql.exec('DELETE FROM review_tasks; DELETE FROM review_jobs; DELETE FROM review_receipts; DELETE FROM teacher_feedback; DELETE FROM analysis_events; DELETE FROM scheduler_heartbeats; DELETE FROM learner_states;')}
+function reset(){sql.exec('DELETE FROM review_tasks; DELETE FROM review_jobs; DELETE FROM review_receipts; DELETE FROM teacher_feedback; DELETE FROM analysis_events; DELETE FROM scheduler_heartbeats; DELETE FROM automation_heartbeats; DELETE FROM learner_states;')}
 
 // create task from a committed snapshot
 {
@@ -100,6 +100,7 @@ function reset(){sql.exec('DELETE FROM review_tasks; DELETE FROM review_jobs; DE
   await code(saveReviewCheckpoint(d1,owner,{taskId:task.taskId,fence:1,analysisVersion:'v2',stage:'decode',chunkIndex:1,inputSha256:'i',artifactSha256:'c',bytes:10,now:1_000_000}),'analysis_version_mismatch','mixed version');
   const failed=await failReviewTask(d1,owner,{taskId:task.taskId,fence:1,code:'temporary_read_failure',retryable:true,now:1_000_000});
   eq([failed.state,failed.nextAt],[ 'retry_wait',1_300_000],'retry wait'); // default 5 min
+  eq(failed.retryEpoch,1,'retry epoch increments');
   eq(await claimReviewTasks(d1,owner,{now:1_100_000,limit:1,clientRunId:'run-2'}),[],'not due yet');
   const [retried]=await claimReviewTasks(d1,owner,{now:1_300_000,limit:1,clientRunId:'run-2'});
   eq([retried.fence,retried.attempts,retried.state],[2,2,'running'],'retry claim');
@@ -177,13 +178,22 @@ function reset(){sql.exec('DELETE FROM review_tasks; DELETE FROM review_jobs; DE
   eq(await claimReviewTasks(d1,other,{now:1_000_000,limit:1,clientRunId:'other'}),[],'other owner sees no task');
   await code(completeReviewTask(d1,other,{taskId:task.taskId,fence:1,output:output(),feedback:feedback(task),receipt:{}}),'task_not_found','other owner cannot complete');
   await recordAnalysisEvent(d1,{taskId:task.taskId,fence:1,event:'claim_review_tasks',outcome:'ok',clientRunId:'run-1',at:1_000_000});
-  await reportSchedulerHeartbeat(d1,{automationId:'Automation_fixture',generation:1,clientRunId:'run-1',status:'finished',startedAt:990_000,finishedAt:1_010_000,nextExpectedAt:4_600_000,now:1_010_000});
+  await reportSchedulerHeartbeat(d1,{automationId:'Automation_fixture',generation:1,clientRunId:'run-1',status:'finished',startedAt:990_000,finishedAt:1_010_000,nextExpectedAt:4_600_000,now:1_010_000,ownerUserId:owner});
   eq(row('SELECT event,outcome FROM analysis_events WHERE task_id=?',task.taskId),{event:'claim_review_tasks',outcome:'ok'},'event recorded');
-  eq(row('SELECT status,last_success_at FROM scheduler_heartbeats WHERE automation_id=?','Automation_fixture'),{status:'finished',last_success_at:1_010_000},'heartbeat');
-  await reportSchedulerHeartbeat(d1,{automationId:'Automation_fixture',generation:2,clientRunId:'run-2',status:'failed',now:1_020_000,ownerUserId:owner});
-  await reportSchedulerHeartbeat(d1,{automationId:'Automation_fixture',generation:1,clientRunId:'run-old',status:'finished',now:1_030_000});
-  eq(row('SELECT generation,status,owner_user_id FROM scheduler_heartbeats WHERE automation_id=?','Automation_fixture'),
-    {generation:2,status:'failed',owner_user_id:owner},'older heartbeat cannot overwrite a newer generation');
+  eq(row('SELECT status,last_success_at FROM automation_heartbeats WHERE user_id=? AND automation_id=?',owner,'Automation_fixture'),{status:'finished',last_success_at:1_010_000},'heartbeat');
+  await reportSchedulerHeartbeat(d1,{automationId:'Automation_fixture',generation:2,clientRunId:'run-2',status:'failed',startedAt:1_020_000,now:1_020_000,ownerUserId:owner});
+  await reportSchedulerHeartbeat(d1,{automationId:'Automation_fixture',generation:1,clientRunId:'run-old',status:'finished',startedAt:980_000,now:1_030_000,ownerUserId:owner});
+  eq(row('SELECT generation,status,user_id FROM automation_heartbeats WHERE user_id=? AND automation_id=?',owner,'Automation_fixture'),
+    {generation:2,status:'failed',user_id:owner},'older heartbeat cannot overwrite a newer generation');
+  // A recreated automation may reset its generation; a newer startedAt may
+  // take over, and its matching finished heartbeat is accepted.
+  eq((await reportSchedulerHeartbeat(d1,{automationId:'Automation_fixture',generation:0,clientRunId:'run-reset',status:'started',startedAt:1_040_000,now:1_040_000,ownerUserId:owner})).updated,true,'reset start accepted');
+  eq((await reportSchedulerHeartbeat(d1,{automationId:'Automation_fixture',generation:0,clientRunId:'run-reset',status:'finished',startedAt:1_040_000,finishedAt:1_050_000,now:1_050_000,ownerUserId:owner})).updated,true,'reset finish accepted');
+  eq(row('SELECT generation,status FROM automation_heartbeats WHERE user_id=? AND automation_id=?',owner,'Automation_fixture'),
+    {generation:0,status:'finished'},'reset generation stored');
+  await reportSchedulerHeartbeat(d1,{automationId:'Automation_fixture',generation:1,clientRunId:'run-other',status:'started',startedAt:1_060_000,now:1_060_000,ownerUserId:other});
+  eq(row('SELECT COUNT(*) n FROM automation_heartbeats WHERE automation_id=?','Automation_fixture').n,2,'heartbeats are scoped per owner');
+  eq(row('SELECT generation FROM automation_heartbeats WHERE user_id=? AND automation_id=?',owner,'Automation_fixture').generation,0,'other owner cannot overwrite');
 }
 
 // completion never writes learner progress
@@ -207,19 +217,36 @@ function reset(){sql.exec('DELETE FROM review_tasks; DELETE FROM review_jobs; DE
   eq(claimed.claimedClientRunId,'manual:manual-1','manual claim identity');
   const recordingId=crypto.randomUUID();
   const pronunciation={band:7,reviewedWholeClip:true,observation:'fixture',recordingId,scope:'partial'};
+  await code(completeReviewTask(d1,owner,{taskId:task.taskId,fence:claimed.fence,
+    output:{...output(),analysis:null},feedback:{...feedback(task),pronunciation},receipt:{},now:1_000_001,
+    manualGrantSha256:'0'.repeat(64)}),'manual_grant_invalid','wrong manual grant');
   const first=await completeReviewTask(d1,owner,{taskId:task.taskId,fence:claimed.fence,
-    output:{...output(),analysis:null},feedback:{...feedback(task),pronunciation},receipt:{},now:1_000_001});
+    output:{...output(),analysis:null},feedback:{...feedback(task),pronunciation},receipt:{},now:1_000_001,
+    manualGrantSha256:claimed.manualGrantSha256??undefined});
   eq(first.duplicate,false,'manual first completion');
   assert.ok(typeof first.receipt.outputSha256V2==='string'&&first.receipt.outputSha256V2.length===64,'v2 receipt digest');checks++;
   const replay=await completeReviewTask(d1,owner,{taskId:task.taskId,fence:claimed.fence,
-    output:{...output(),analysis:null},feedback:{...feedback(task),pronunciation},receipt:{},now:1_000_002});
+    output:{...output(),analysis:null},feedback:{...feedback(task),pronunciation},receipt:{},now:1_000_002,
+    manualGrantSha256:claimed.manualGrantSha256??undefined});
   eq(replay.duplicate,true,'same manual output replays');
   eq(replay.receipt.id,first.receipt.id,'same manual receipt');
   await code(completeReviewTask(d1,owner,{taskId:task.taskId,fence:claimed.fence,
-    output:{...output(),analysis:null},feedback:{...feedback(task),pronunciation:{...pronunciation,band:6.5}},receipt:{},now:1_000_003}),
+    output:{...output(),analysis:null},feedback:{...feedback(task),pronunciation:{...pronunciation,band:6.5}},receipt:{},now:1_000_003,
+    manualGrantSha256:claimed.manualGrantSha256??undefined}),
     'receipt_conflict','different pronunciation cannot reuse receipt');
   eq(await claimManualReviewTask(d1,owner,task.taskId,{now:1_000_002}),null,'completed task cannot be reclaimed');
   eq(row('SELECT COUNT(*) n FROM teacher_feedback WHERE review_task_id=?',task.taskId).n,1,'one manual feedback');
+  // Pre-upgrade receipts have no v2 digest; pronunciation still must match the
+  // stored feedback row rather than being silently replaced.
+  sql.prepare('UPDATE review_receipts SET output_sha256_v2=NULL WHERE task_id=?').run(task.taskId);
+  const legacySame=await completeReviewTask(d1,owner,{taskId:task.taskId,fence:claimed.fence,
+    output:{...output(),analysis:null},feedback:{...feedback(task),pronunciation},receipt:{},now:1_000_004,
+    manualGrantSha256:claimed.manualGrantSha256??undefined});
+  eq(legacySame.duplicate,true,'legacy receipt replays the same pronunciation');
+  await code(completeReviewTask(d1,owner,{taskId:task.taskId,fence:claimed.fence,
+    output:{...output(),analysis:null},feedback:{...feedback(task),pronunciation:{...pronunciation,band:6.5}},receipt:{},now:1_000_005,
+    manualGrantSha256:claimed.manualGrantSha256??undefined}),
+    'receipt_conflict','legacy receipt rejects a changed pronunciation');
 }
 
 // manual takeover revokes a live automatic lease
@@ -232,7 +259,8 @@ function reset(){sql.exec('DELETE FROM review_tasks; DELETE FROM review_jobs; DE
   eq(manual.fence,2,'takeover fence');
   await code(completeReviewTask(d1,owner,{taskId:task.taskId,fence:1,output:output(),feedback:feedback(task),receipt:{},now:1_000_011}),
     'stale_lease','old automatic fence rejected');
-  const done=await completeReviewTask(d1,owner,{taskId:task.taskId,fence:2,output:output(),feedback:feedback(task),receipt:{},now:1_000_011});
+  const done=await completeReviewTask(d1,owner,{taskId:task.taskId,fence:2,output:output(),feedback:feedback(task),receipt:{},now:1_000_011,
+    manualGrantSha256:manual.manualGrantSha256??undefined});
   eq(done.duplicate,false,'manual completion wins');
   eq(row('SELECT COUNT(*) n FROM teacher_feedback WHERE review_task_id=?',task.taskId).n,1,'one result after takeover');
 }
