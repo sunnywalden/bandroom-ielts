@@ -1,7 +1,7 @@
 'use client';
 import {createContext,useContext,useEffect,useState,type ReactNode} from 'react';
 import {feedbackFor,reviewAttempts,reviewRequest,type AutomationStatus,type CoachFeedback,type ReviewAttempt,type ReviewLink,type ReviewTaskStatus} from './feedback-model';
-import {displayPhone} from './phonemes';
+import {displayPronunciationErrors} from './pronunciation-display';
 import RecordingClipPlayer from './recording-clip-player';
 import './feedback.css';
 
@@ -63,17 +63,21 @@ function taskBadge(task:ReviewTaskStatus|undefined,linked=false) {
   return '已排队';
 }
 
-const kindLabel:Record<string,string>={substitution:'替换',deletion:'漏音',addition:'添音'};
+// Precision gate not met: the pre-registered SpeechOcean762 random sample
+// produced 31.3% displayed-hint precision (80 hints, 16 speakers), below the
+// 50% gate. Keep hints hidden until a free-speech human review passes.
+const PRONUNCIATION_HINTS_ENABLED = false;
 function PronunciationErrors({analysis,recordingId}:{analysis:NonNullable<CoachFeedback['analysis']>;recordingId?:string}) {
-  const errors=analysis.errors??[];
+  if(!PRONUNCIATION_HINTS_ENABLED)return null;
+  const errors=displayPronunciationErrors(analysis.errors);
   if(!errors.length)return null;
-  return <div className="af-errors" aria-label="发音错误与回听">
+  return <div className="af-errors" aria-label="实验性发音提示与回听">
+    <p className="af-hint">实验性提示：只显示高置信发音提示，可能包含误报；仅用于回听练习，不作为评分依据。</p>
     {errors.map((error,index)=>{
       const label=error.word??`词 ${error.wordIndex??index}`;
       return <article className="af-error-card" key={`${index}:${error.wordIndex}:${error.phoneIndex}:${error.kind}:${error.target}:${error.actual}`}>
-        <div className="af-error-head"><strong>{label}</strong><span>{kindLabel[error.kind]??error.kind}</span></div>
-        <p className="af-error-ipa">目标 /{displayPhone(error.target)}/ · 实际 {error.actual==='∅'?'漏音':`/${displayPhone(error.actual)}/`}</p>
-        {error.probability!=null&&<small>校准后置信度 {Math.round(error.probability*100)}%</small>}
+        <div className="af-error-head"><strong>{label}</strong><span>可能值得回听</span></div>
+        <p className="af-error-ipa">实验性提示，请回听确认。</p>
         {recordingId
           ? <RecordingClipPlayer recordingId={recordingId} startMs={error.startMs??error.anchorMs??0} endMs={error.endMs} anchorMs={error.anchorMs} label={label}/>
           : <p className="af-hint">原录音引用不可用，无法定位回听。</p>}
