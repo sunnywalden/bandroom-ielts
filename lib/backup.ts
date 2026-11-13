@@ -23,7 +23,10 @@ function equalSig(a:unknown,b:string) {
 }
 const ownerTag=(uid:string)=>hash(utf8.encode(uid));
 const path=(uid:string,id:string)=>'speaking/'+encodeURIComponent(uid)+'/'+id;
-const ticket=(key:string,uid:string,c:Clip)=>sign(key,JSON.stringify(['clip',uid,c.id,c.size,c.type,c.hash]));
+type StoredClip=Clip&{meta?:Record<string,string>};
+const ticket=(key:string,uid:string,c:StoredClip)=>sign(key,JSON.stringify(c.meta
+  ?['clip',uid,c.id,c.size,c.type,c.hash,c.meta]
+  :['clip',uid,c.id,c.size,c.type,c.hash]));
 const recordSignature=(key:string,m:Manifest)=>sign(key,'manifest\n'+canonical(m));
 function refs(state:Data['state'],reviewJobs:SavedReviewJob[]=[]){
   const cloud=new Set<string>(),device=new Set<string>();
@@ -43,7 +46,7 @@ function refs(state:Data['state'],reviewJobs:SavedReviewJob[]=[]){
 async function snapshot(db:D1Database,uid:string):Promise<Data>{
   const [states,feedback,lessons,jobs]=await db.batch([
     db.prepare('SELECT revision,state FROM learner_states WHERE user_id=?').bind(uid),
-    db.prepare('SELECT id,day,stage,attempt,evidence,feedback,created_at AS createdAt,pronunciation FROM teacher_feedback WHERE user_id=? ORDER BY id').bind(uid),
+    db.prepare('SELECT id,day,stage,attempt,evidence,feedback,created_at AS createdAt,pronunciation,analysis_json AS analysisJson FROM teacher_feedback WHERE user_id=? ORDER BY id').bind(uid),
     db.prepare('SELECT day,lesson FROM teacher_lessons WHERE user_id=? ORDER BY day').bind(uid),
     db.prepare(`SELECT id,day,submission_key AS submissionKey,request_hash AS requestHash,revision,snapshot,created_at AS createdAt
       FROM review_jobs WHERE user_id=? ORDER BY id`).bind(uid)
@@ -51,15 +54,32 @@ async function snapshot(db:D1Database,uid:string):Promise<Data>{
   const state=states.results[0] as {revision:number;state:string}|undefined;
   const reviewJobs=(jobs.results as (Omit<SavedReviewJob,'snapshot'>&{snapshot:string})[])
     .map(({snapshot,...job})=>({...job,snapshot:JSON.parse(snapshot) as SavedReviewJob['snapshot']}));
+  const maxAnalysisBytes=96*1024;
+  const feedbackRows=feedback.results as (Omit<Review,'analysis'> & {pronunciation:string|null;analysisJson:string|null})[];
+  const savedFeedback=feedbackRows.map(({pronunciation,analysisJson,...row})=>{
+    const base:Review=pronunciation?{...row,pronunciation:JSON.parse(pronunciation)}:row;
+    if(!analysisJson)return base;
+    try{
+      const analysis=JSON.parse(analysisJson) as unknown;
+      return utf8.encode(JSON.stringify(analysis)).length>maxAnalysisBytes
+        ?{...base,analysisOmitted:true as const}
+        :{...base,analysis};
+    }catch{return {...base,analysisOmitted:true as const};}
+  });
   return {...(reviewJobs.length?{reviewJobs}:{}),state:state?JSON.parse(String(state.state)):null,revision:Number(state?.revision||0),
-    feedback:(feedback.results as (Review & {pronunciation:string|null})[]).map(({pronunciation,...r})=>pronunciation?{...r,pronunciation:JSON.parse(pronunciation)}:r),lessons:(lessons.results as {day:number;lesson:string}[]).map(r=>({day:Number(r.day),lesson:JSON.parse(String(r.lesson))}))};
+    feedback:savedFeedback,lessons:(lessons.results as {day:number;lesson:string}[]).map(r=>({day:Number(r.day),lesson:JSON.parse(String(r.lesson))}))};
 }
-async function inspect(bucket:R2Bucket,uid:string,id:string):Promise<Clip|null>{
+async function inspect(bucket:R2Bucket,uid:string,id:string):Promise<StoredClip|null>{
   const obj=await bucket.get(path(uid,id));if(!obj)return null;
   if(obj.size<=0||obj.size>clipLimit){await obj.body.cancel();return reject(422,'录音超出支持的大小。');}
   const type=obj.httpMetadata?.contentType?.split(';')[0].toLowerCase()||'';
   if(!/^audio\/[\w.+-]+$/.test(type)){await obj.body.cancel();return reject(422,'录音缺少可识别的音频类型。');}
-  return {id,type,size:obj.size,hash:await hash(await obj.arrayBuffer())};
+  const meta:Record<string,string>={};
+  for(const name of ['purpose','day','phase','digest']){
+    const value=obj.customMetadata?.[name];
+    if(typeof value==='string'&&value)meta[name]=value;
+  }
+  return {id,type,size:obj.size,hash:await hash(await obj.arrayBuffer()),...(Object.keys(meta).length?{meta}:{})};
 }
 export async function exportBackup(db:D1Database,bucket:R2Bucket,uid:string,key:string,created=new Date().toISOString()):Promise<Signed>{
   const data=await snapshot(db,uid),ids=refs(data.state,data.reviewJobs),audio:RemoteClip[]=[];
@@ -69,7 +89,8 @@ export async function exportBackup(db:D1Database,bucket:R2Bucket,uid:string,key:
     bytes+=c.size;if(bytes>archiveLimit)return reject(413,'云端录音超过单份备份的 512 MiB 上限。');
     audio.push({...c,ticket:await ticket(key,uid,c)});
   }
-  const manifest:Manifest={format:data.reviewJobs?.length?2:1,owner:await ownerTag(uid),created,...data,audio,local:ids.device};
+  const hasEvidence=data.feedback.some(row=>row.analysis!==undefined||row.analysisOmitted)||audio.some(clip=>clip.meta!==undefined);
+  const manifest:Manifest={format:hasEvidence?3:(data.reviewJobs?.length?2:1),owner:await ownerTag(uid),created,...data,audio,local:ids.device};
   if(utf8.encode(JSON.stringify(manifest)).length>metadataLimit-1024)return reject(413,'课程记录超出单份备份的 8 MiB 上限。');
   return {manifest,signature:await recordSignature(key,manifest)};
 }
@@ -107,7 +128,7 @@ export async function downloadBackup(db:D1Database,bucket:R2Bucket,uid:string,ke
 }
 async function authentic(uid:string,key:string,signed:Signed){
   const m=signed?.manifest;
-  if(!m||![1,2].includes(m.format)||(m.format===2&&!Array.isArray(m.reviewJobs))||!Array.isArray(m.audio)||!Array.isArray(m.feedback)||!Array.isArray(m.lessons)||!Array.isArray(m.local))return reject(422,'备份格式无效。');
+  if(!m||![1,2,3].includes(m.format)||((m.format===2||m.format===3)&&!Array.isArray(m.reviewJobs))||!Array.isArray(m.audio)||!Array.isArray(m.feedback)||!Array.isArray(m.lessons)||!Array.isArray(m.local))return reject(422,'备份格式无效。');
   if(m.owner!==await ownerTag(uid))return reject(403,'此备份属于其他账号或站点。');
   if(!equalSig(signed.signature,await recordSignature(key,m)))return reject(422,'备份签名无效或内容已被修改。');
   return m;
@@ -134,8 +155,12 @@ function compareRows<T,K>(present:T[],archived:T[],id:(v:T)=>K){
 export async function restoreAudio(bucket:R2Bucket,uid:string,key:string,c:RemoteClip,bytes:Uint8Array<ArrayBuffer>){
   if(!c||!uuid.test(c.id)||!Number.isSafeInteger(c.size)||c.size<1||c.size>clipLimit||bytes.length!==c.size||
     !equalSig(c.ticket,await ticket(key,uid,c))||await hash(bytes)!==c.hash)return reject(422,'录音凭据或校验值无效。');
-  const existing=await bucket.put(path(uid,c.id),bytes,{onlyIf:{etagDoesNotMatch:'*'},httpMetadata:{contentType:c.type},sha256:c.hash});
-  if(!existing){const current=await inspect(bucket,uid,c.id);if(current?.type!==c.type||current.hash!==c.hash)return reject(409,'相同录音标识下存在其他内容，已停止恢复。');}
+  if(c.meta?.digest&&c.meta.digest!==c.hash)return reject(422,'录音摘要与备份元数据不一致。');
+  const existing=await bucket.put(path(uid,c.id),bytes,{onlyIf:{etagDoesNotMatch:'*'},httpMetadata:{contentType:c.type},
+    sha256:c.hash,...(c.meta?{customMetadata:c.meta}:{})});
+  if(!existing){const current=await inspect(bucket,uid,c.id);
+    if(current?.type!==c.type||current.hash!==c.hash||canonical(current?.meta??{})!==canonical(c.meta??{}))
+      return reject(409,'相同录音标识下存在其他内容，已停止恢复。');}
 }
 export async function restoreBackup(db:D1Database,bucket:R2Bucket,uid:string,key:string,signed:Signed,apply:boolean){
   const m=await authentic(uid,key,signed),data=await snapshot(db,uid);
@@ -164,8 +189,8 @@ export async function restoreBackup(db:D1Database,bucket:R2Bucket,uid:string,key
     for(let i=0;i<rows.length;i+=35)commands.push(db.prepare(query).bind(uid,JSON.stringify(rows.slice(i,i+35))));
   }
   batches(lessons,"INSERT INTO teacher_lessons(user_id,day,lesson) SELECT ?,value->>'$.day',value->'$.lesson' FROM json_each(?)");
-  batches(feedback,`INSERT INTO teacher_feedback(user_id,id,day,stage,attempt,evidence,feedback,created_at,pronunciation)
-    SELECT ?,value->>'$.id',value->>'$.day',value->>'$.stage',value->>'$.attempt',value->>'$.evidence',value->>'$.feedback',value->>'$.createdAt',value->'$.pronunciation' FROM json_each(?)`);
+  batches(feedback,`INSERT INTO teacher_feedback(user_id,id,day,stage,attempt,evidence,feedback,created_at,pronunciation,analysis_json)
+    SELECT ?,value->>'$.id',value->>'$.day',value->>'$.stage',value->>'$.attempt',value->>'$.evidence',value->>'$.feedback',value->>'$.createdAt',value->'$.pronunciation',value->'$.analysis' FROM json_each(?)`);
   batches(reviewJobs,`INSERT INTO review_jobs(user_id,id,day,submission_key,request_hash,revision,snapshot,created_at)
     SELECT ?,value->>'$.id',value->>'$.day',value->>'$.submissionKey',value->>'$.requestHash',
       value->>'$.revision',value->'$.snapshot',value->>'$.createdAt' FROM json_each(?)`);

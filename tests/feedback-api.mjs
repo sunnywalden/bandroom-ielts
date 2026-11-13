@@ -7,7 +7,23 @@ import {readFileSync,readdirSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
 const root=pathToFileURL(process.cwd()+'/'),db=new DatabaseSync(':memory:');
 for(const file of readdirSync('drizzle').filter(f=>f.endsWith('.sql')).sort())db.exec(readFileSync('drizzle/'+file,'utf8'));
-globalThis.testCloud={DB:{prepare(q){const stmt=db.prepare(q);stmt.setReturnArrays(true);return {bind:(...v)=>({raw:async()=>stmt.all(...v),run:async()=>stmt.run(...v)})}}}};
+globalThis.testCloud={DB:{
+ prepare(q){
+  const raw=db.prepare(q);raw.setReturnArrays(true);
+  const normal=db.prepare(q);
+  return {bind:(...v)=>({
+   raw:async()=>raw.all(...v),
+   all:async()=>({results:normal.all(...v)}),
+   first:async()=>normal.get(...v),
+   run:async()=>raw.run(...v),
+  })}
+ },
+ async batch(statements){
+  const results=[];db.exec('BEGIN');
+  try{for(const statement of statements)results.push(await statement.run());db.exec('COMMIT');return results}
+  catch(error){db.exec('ROLLBACK');throw error}
+ },
+}};
 globalThis.user={userId:'feedback-fixture'};
 registerHooks({resolve(spec,ctx,next){
  const mock=src=>({url:'data:text/javascript,'+encodeURIComponent(src),shortCircuit:true});
@@ -95,6 +111,24 @@ assert.equal(replay.id,id);
 assert.equal(unpack(await call('read_study_session',{day:12,attemptId:id})).feedback[0].feedback,'First returned correction');check();
 const coach=await(await http.GET()).json();
 assert.deepEqual(coach.reviewLinks,[{day:12,id,sourceId:revisionAttempt.id}]);check();
+// A v2 submission with a queued task uses the same fence/receipt transaction
+// for manual feedback; a second different result is rejected.
+const taskKey='11111111-1111-4111-8111-111111111113',taskId='v2:'+taskKey;
+const taskSnapshot={sourceId:revisionAttempt.id,attempt:{...revisionAttempt,id:taskId,response:'Manual task response'},context:{prompt:'Manual task prompt'}};
+db.prepare('INSERT INTO review_jobs VALUES (?,?,?,?,?,?,?,?)').run(taskId,user.userId,12,taskKey,'c'.repeat(64),21,JSON.stringify(taskSnapshot),'2026-11-09T01:00:00Z');
+db.prepare(`INSERT INTO review_tasks(id,review_job_id,user_id,kind,attempt_id,day,attempt_revision,stage,state,fence,attempts,next_at,created_at,updated_at)
+ VALUES (?,?,?,?,?,?,?,'read_input','queued',0,0,?,?,?)`).run('manual-task',taskId,user.userId,'text',taskId,12,21,Date.now(),Date.now(),Date.now());
+const manualFeedback={day:12,stage:'write',attempt:taskId,evidence:'Manual evidence',feedback:'Manual correction'};
+const manual=unpack(await call('add_coach_feedback',manualFeedback));
+assert.equal(manual.id,'rt:manual-task');check();
+assert.ok(manual.receiptId);check();
+const manualReplay=unpack(await call('add_coach_feedback',manualFeedback));
+assert.equal(manualReplay.receiptId,manual.receiptId);check();
+assert.equal(manualReplay.duplicate,true);check();
+assert.equal((await call('add_coach_feedback',{...manualFeedback,feedback:'Different manual correction'})).isError,true);check();
+assert.equal(db.prepare('SELECT COUNT(*) n FROM teacher_feedback WHERE review_task_id=?').get('manual-task').n,1);check();
+assert.equal(db.prepare('SELECT state FROM review_tasks WHERE id=?').get('manual-task').state,'completed');check();
+assert.match(db.prepare('SELECT output_sha256_v2 AS digest FROM review_receipts WHERE task_id=?').get('manual-task').digest,/^[a-f0-9]{64}$/);check();
 globalThis.user={userId:'other-fixture'};
 assert.equal((await call('read_study_session',{day:12,attemptId:id})).isError,true);
 assert.equal((await call('add_coach_feedback',fixedReview)).isError,true);check();
@@ -104,5 +138,5 @@ globalThis.user=null;
 assert.equal((await http.GET()).status,401);assert.equal((await rpc('add_coach_feedback',feedback)).status,401);check();
 const unchanged=db.prepare('SELECT revision,state FROM learner_states WHERE user_id=?').get('feedback-fixture');
 assert.equal(unchanged.revision,21);assert.equal(unchanged.state,snapshot);
-assert.equal(db.prepare('SELECT COUNT(*) n FROM teacher_feedback').get().n,2);check();
+assert.equal(db.prepare('SELECT COUNT(*) n FROM teacher_feedback').get().n,3);check();
 console.log(JSON.stringify({suite:'feedback-api',checks:assertions,passed:true,learnerStateUnchanged:true}));

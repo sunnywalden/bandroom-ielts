@@ -31,6 +31,11 @@ export type ReviewTask = {
   state: string;
   fence: number;
   attempts: number;
+  claimKind: "auto" | "manual";
+  manualGrantSha256: string | null;
+  notificationEpoch: number;
+  retryEpoch: number;
+  claimedClientRunId: string | null;
   leaseUntil: number | null;
   nextAt: number;
   analysisVersion: string | null;
@@ -53,6 +58,7 @@ export type ReviewReceipt = {
   fence: number;
   feedbackId: string;
   outputSha256: string;
+  outputSha256V2: string | null;
   payload: Record<string, unknown>;
   createdAt: number;
 };
@@ -68,6 +74,9 @@ export class ReviewTaskError extends Error {
 
 const taskColumns = `id, review_job_id AS reviewJobId, user_id AS userId, kind, attempt_id AS attemptId,
   day, attempt_revision AS attemptRevision, recording_id AS recordingId, stage, state, fence, attempts,
+  claim_kind AS claimKind, manual_grant_sha256 AS manualGrantSha256,
+  notification_epoch AS notificationEpoch, retry_epoch AS retryEpoch,
+  claimed_client_run_id AS claimedClientRunId,
   lease_until AS leaseUntil, next_at AS nextAt, analysis_version AS analysisVersion,
   checkpoint_sha256 AS checkpointSha256, coverage, last_error AS lastError, receipt_id AS receiptId,
   created_at AS createdAt, updated_at AS updatedAt`;
@@ -85,6 +94,7 @@ function toReceipt(row: Record<string, unknown> | null): ReviewReceipt | null {
     recordingSha256: row.recordingSha256 == null ? null : String(row.recordingSha256),
     analysisVersion: row.analysisVersion == null ? null : String(row.analysisVersion),
     fence: Number(row.fence), feedbackId: String(row.feedbackId), outputSha256: String(row.outputSha256),
+    outputSha256V2: row.outputSha256V2 == null ? null : String(row.outputSha256V2),
     payload: typeof row.payloadJson === "string" ? JSON.parse(row.payloadJson) : (row.payloadJson as Record<string, unknown>),
     createdAt: Number(row.createdAt),
   };
@@ -130,7 +140,8 @@ async function markExhausted(db: D1Like, userId: string, now: number) {
 
 async function claimOne(db: D1Like, userId: string, now: number, clientRunId: string) {
   const row = await db.prepare(`UPDATE review_tasks
-    SET state='running', fence=fence+1, attempts=attempts+1, lease_until=?, updated_at=?, claimed_by=?
+    SET state='running', fence=fence+1, attempts=attempts+1, lease_until=?, updated_at=?,
+        claimed_by=?, claim_kind='auto', manual_grant_sha256=NULL, claimed_client_run_id=?
     WHERE id = (
       SELECT id FROM review_tasks
       WHERE user_id=?
@@ -140,7 +151,8 @@ async function claimOne(db: D1Like, userId: string, now: number, clientRunId: st
       ORDER BY next_at, id LIMIT 1
     )
     RETURNING ${taskColumns}`)
-    .bind(now + LEASE_MS, now, clientRunId, userId, now, now, MAX_ATTEMPTS, now - MAX_AGE_MS).first<Record<string, unknown>>();
+    .bind(now + LEASE_MS, now, clientRunId, clientRunId, userId, now, now, MAX_ATTEMPTS, now - MAX_AGE_MS)
+    .first<Record<string, unknown>>();
   return toTask(row);
 }
 
@@ -318,10 +330,19 @@ export async function completeReviewTask(db: D1Like, userId: string, input: {
   now?: number;
 }) {
   const outputSha256 = await sha256Json(input.output);
+  const outputSha256V2 = await sha256Json({
+    ...input.output,
+    pronunciation: input.feedback.pronunciation ?? null,
+  });
   const matchingReceipt = async () => {
     const receipt = await readReviewReceipt(db, userId, input.taskId);
-    if (receipt && receipt.outputSha256 !== outputSha256)
-      throw new ReviewTaskError("receipt_conflict", "A different result was already committed for this task.");
+    if (receipt) {
+      // Legacy receipts used the v1 digest; new receipts bind pronunciation too.
+      const stored = receipt.outputSha256V2 ?? receipt.outputSha256;
+      const expected = receipt.outputSha256V2 ? outputSha256V2 : outputSha256;
+      if (stored !== expected)
+        throw new ReviewTaskError("receipt_conflict", "A different result was already committed for this task.");
+    }
     return receipt;
   };
   const existing = await matchingReceipt();
@@ -354,13 +375,14 @@ export async function completeReviewTask(db: D1Like, userId: string, input: {
         new Date(now).toISOString(), input.taskId, userId, input.fence, now),
     db.prepare(`INSERT INTO review_receipts
       (id, task_id, user_id, attempt_id, attempt_revision, recording_sha256, analysis_version, fence,
-       feedback_id, output_sha256, payload_json, created_at)
-      SELECT ?,?,?,?,?,?,?,?,?,?,?,?
+       feedback_id, output_sha256, output_sha256_v2, payload_json, created_at)
+      SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?
       WHERE EXISTS (SELECT 1 FROM review_tasks WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?)
       ON CONFLICT(task_id) DO NOTHING`)
       .bind(receiptId, input.taskId, userId, task.attemptId, task.attemptRevision,
         input.receipt.recordingSha256 ?? null, input.receipt.analysisVersion ?? task.analysisVersion ?? null,
-        input.fence, input.feedback.id, outputSha256, JSON.stringify(input.receipt.payload ?? {}), now,
+        input.fence, input.feedback.id, outputSha256, outputSha256V2,
+        JSON.stringify(input.receipt.payload ?? {}), now,
         input.taskId, userId, input.fence, now),
     db.prepare(`UPDATE review_tasks
       SET state='completed', receipt_id=?, last_error=NULL, lease_until=NULL, updated_at=?
@@ -375,6 +397,34 @@ export async function completeReviewTask(db: D1Like, userId: string, input: {
   return { receipt, duplicate: receipt.id !== receiptId };
 }
 
+export async function findReviewTaskByAttempt(db: D1Like, userId: string, attemptId: string) {
+  return toTask(await db.prepare(`SELECT ${taskColumns} FROM review_tasks
+    WHERE user_id=? AND attempt_id=?`).bind(userId, attemptId).first<Record<string, unknown>>());
+}
+
+/**
+ * Claim a task for a human/coach completion. Manual takeover invalidates any
+ * live automatic lease by increasing the fence; old auto writes then fail.
+ * A completed task is not claimable, so the caller must read its receipt.
+ */
+export async function claimManualReviewTask(db: D1Like, userId: string, taskId: string, options: {
+  now?: number; nonce?: string;
+} = {}) {
+  const now = options.now ?? Date.now();
+  const nonce = options.nonce ?? crypto.randomUUID();
+  const grantSha256 = await sha256Json({ userId, taskId, now, nonce });
+  const row = await db.prepare(`UPDATE review_tasks
+    SET state='running', fence=fence+1, claim_kind='manual', manual_grant_sha256=?,
+        notification_epoch=notification_epoch+1, claimed_client_run_id=?,
+        lease_until=?, next_at=?, updated_at=?
+    WHERE id=? AND user_id=?
+      AND state IN ('queued','retry_wait','blocked','needs_attention','running')
+    RETURNING ${taskColumns}`)
+    .bind(grantSha256, `manual:${nonce}`, now + LEASE_MS, now, now, taskId, userId)
+    .first<Record<string, unknown>>();
+  return toTask(row);
+}
+
 export async function getReviewTask(db: D1Like, userId: string, taskId: string) {
   return toTask(await db.prepare(`SELECT ${taskColumns} FROM review_tasks WHERE id=? AND user_id=?`)
     .bind(taskId, userId).first<Record<string, unknown>>());
@@ -384,7 +434,7 @@ export async function readReviewReceipt(db: D1Like, userId: string, taskId: stri
   return toReceipt(await db.prepare(`SELECT id, task_id AS taskId, user_id AS userId,
       attempt_id AS attemptId, attempt_revision AS attemptRevision, recording_sha256 AS recordingSha256,
       analysis_version AS analysisVersion, fence, feedback_id AS feedbackId, output_sha256 AS outputSha256,
-      payload_json AS payloadJson, created_at AS createdAt
+      output_sha256_v2 AS outputSha256V2, payload_json AS payloadJson, created_at AS createdAt
     FROM review_receipts WHERE task_id=? AND user_id=?`)
     .bind(taskId, userId).first<Record<string, unknown>>());
 }
@@ -415,20 +465,23 @@ export async function recordAnalysisEvent(db: D1Like, input: {
 
 export async function reportSchedulerHeartbeat(db: D1Like, input: {
   automationId: string; generation: number; clientRunId: string; status: string;
+  ownerUserId?: string | null;
   startedAt?: number; finishedAt?: number; nextExpectedAt?: number; detail?: string | null; now?: number;
 }) {
   const now = input.now ?? Date.now();
   await db.prepare(`INSERT INTO scheduler_heartbeats
-    (automation_id, generation, client_run_id, started_at, finished_at, last_success_at, next_expected_at, status, detail)
-    VALUES (?,?,?,?,?,?,?,?,?)
+    (automation_id, owner_user_id, generation, client_run_id, started_at, finished_at, last_success_at, next_expected_at, status, detail)
+    VALUES (?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(automation_id) DO UPDATE SET
+      owner_user_id=COALESCE(excluded.owner_user_id, scheduler_heartbeats.owner_user_id),
       generation=excluded.generation, client_run_id=excluded.client_run_id,
       started_at=COALESCE(excluded.started_at, scheduler_heartbeats.started_at),
       finished_at=COALESCE(excluded.finished_at, scheduler_heartbeats.finished_at),
       last_success_at=CASE WHEN excluded.status='finished' THEN ? ELSE scheduler_heartbeats.last_success_at END,
       next_expected_at=COALESCE(excluded.next_expected_at, scheduler_heartbeats.next_expected_at),
-      status=excluded.status, detail=excluded.detail`)
-    .bind(input.automationId, input.generation, input.clientRunId, input.startedAt ?? null,
-      input.finishedAt ?? null, input.status === "finished" ? now : null,
+      status=excluded.status, detail=excluded.detail
+    WHERE excluded.generation >= scheduler_heartbeats.generation`)
+    .bind(input.automationId, input.ownerUserId ?? null, input.generation, input.clientRunId,
+      input.startedAt ?? null, input.finishedAt ?? null, input.status === "finished" ? now : null,
       input.nextExpectedAt ?? null, input.status, input.detail ?? null, now).run();
 }

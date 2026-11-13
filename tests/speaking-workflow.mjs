@@ -188,3 +188,27 @@ test('recorder errors with no subsequent stop cannot leave the controls stuck',a
   assert.equal(document.querySelector('[aria-label="开始录音"]').disabled,false);
   assert.ok(!state.entries[12].speakingFollowup);preserved();
 });
+test('a recording draft can be discarded before submitting',async()=>{
+  await mount();await record();await stop();await flush(20);
+  assert.ok(document.querySelector('audio[aria-label="试听本次录音"]'));
+  await click(button('移除这段录音，改为文字或自报作答'));
+  assert.ok(!document.querySelector('audio[aria-label="试听本次录音"]'));
+  assert.match(text(),/已移除录音/);
+  assert.equal(button('保存回答，进入自评').disabled,true);
+  const attest=document.querySelector('input[type="checkbox"]');
+  assert.ok(attest);
+  await act(async()=>attest.click());
+  assert.equal(button('保存回答，进入自评').disabled,false);
+  await unmount();await mount();
+  assert.ok(!document.querySelector('audio[aria-label="试听本次录音"]'));
+  assert.ok(!state.entries[12].speakingFollowup);preserved();
+});
+test('an account lock stops an active recording instead of hiding it',async()=>{
+  await mount();await record();
+  const recorder=Recorder.last;
+  assert.equal(recorder.state,'recording');
+  await act(async()=>{window.dispatchEvent(new dom.window.Event('bandroom:access-locked'))});
+  assert.equal(recorder.state,'inactive');
+  await flush(20);
+  assert.ok(!state.entries[12].speakingFollowup);preserved();
+});

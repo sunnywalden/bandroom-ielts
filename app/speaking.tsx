@@ -125,6 +125,18 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive}:{
     };
   }, [stopRequestRef]);
   useEffect(() => {
+    // Studio hides this surface when the account lock is triggered; keep the
+    // microphone from capturing behind the login gate.
+    const stop = () => {
+      if (recorder.current?.state === "recording") {
+        try { recorder.current.stop(); } catch { /* already stopped */ }
+      }
+      activeStream.current?.getTracks().forEach(t => t.stop());
+    };
+    window.addEventListener("bandroom:access-locked", stop);
+    return () => window.removeEventListener("bandroom:access-locked", stop);
+  }, []);
+  useEffect(() => {
     // Object URLs must be allocated and revoked in an effect, outside render.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!clip) {setUrl(""); return;}
@@ -246,6 +258,13 @@ function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Pro
     // Each question is keyed by day/phase/account; submissions are reloaded by Studio on remote conflicts.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[scope]);
+  async function removeVoice(){
+    if(!voice||busy||recording)return;
+    const id=voice.id;
+    setVoice(null);
+    setMessage("已移除录音。可重新录制，或在页面外作答后勾选自报记录。");
+    await changeDraft(scope,discardIfMatch(id)).catch(()=>{});
+  }
   async function keep(draft:RecordingDraft){
     if(mounted.current){setVoice(draft);setPreparing(true);setMessage("正在保留录音草稿…");}
     try{
@@ -297,6 +316,7 @@ function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Pro
       void keep(draft).then(()=>{if(commit&&mounted.current)void submit(false,draft)});
     }} onActive={mode=>{if(mode==="waiting"||mode==="idle")saveOnStop.current=false;setMic(mode)}}/>
     {voice?.audio&&!voice.blob&&<Playback answer={{audio:voice.audio,at:voice.at,text:'',spoken:true}}/>}
+    {voice&&<button className="sp-link" type="button" disabled={busy||preparing||recording} onClick={()=>void removeVoice()}>移除这段录音，改为文字或自报作答</button>}
     {!voice&&<details className="sp-history"><summary>使用已保存的录音文件</summary>
       <label className="sp-label">选择本题录音（WebM、M4A、OGG 或 WAV，最多 12 MiB）
         <input type="file" accept="audio/webm,audio/mp4,audio/ogg,audio/wav,.webm,.m4a,.mp4,.ogg,.oga,.wav" disabled={busy||preparing||recording}

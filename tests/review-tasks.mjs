@@ -32,6 +32,7 @@ const d1={
 };
 
 const {claimReviewTasks,renewReviewLease,saveReviewCheckpoint,readReviewCheckpoint,failReviewTask,completeReviewTask,
+  claimManualReviewTask,findReviewTaskByAttempt,
   readReviewReceipt,listReviewTasks,recordAnalysisEvent,reportSchedulerHeartbeat,createReviewTaskStatement,
   ReviewTaskError}=await import('../lib/review-tasks.ts');
 
@@ -179,6 +180,10 @@ function reset(){sql.exec('DELETE FROM review_tasks; DELETE FROM review_jobs; DE
   await reportSchedulerHeartbeat(d1,{automationId:'Automation_fixture',generation:1,clientRunId:'run-1',status:'finished',startedAt:990_000,finishedAt:1_010_000,nextExpectedAt:4_600_000,now:1_010_000});
   eq(row('SELECT event,outcome FROM analysis_events WHERE task_id=?',task.taskId),{event:'claim_review_tasks',outcome:'ok'},'event recorded');
   eq(row('SELECT status,last_success_at FROM scheduler_heartbeats WHERE automation_id=?','Automation_fixture'),{status:'finished',last_success_at:1_010_000},'heartbeat');
+  await reportSchedulerHeartbeat(d1,{automationId:'Automation_fixture',generation:2,clientRunId:'run-2',status:'failed',now:1_020_000,ownerUserId:owner});
+  await reportSchedulerHeartbeat(d1,{automationId:'Automation_fixture',generation:1,clientRunId:'run-old',status:'finished',now:1_030_000});
+  eq(row('SELECT generation,status,owner_user_id FROM scheduler_heartbeats WHERE automation_id=?','Automation_fixture'),
+    {generation:2,status:'failed',owner_user_id:owner},'older heartbeat cannot overwrite a newer generation');
 }
 
 // completion never writes learner progress
@@ -189,6 +194,47 @@ function reset(){sql.exec('DELETE FROM review_tasks; DELETE FROM review_jobs; DE
   await claimReviewTasks(d1,owner,{now:1_000_000,limit:1,clientRunId:'run-1'});
   await completeReviewTask(d1,owner,{taskId:task.taskId,fence:1,output:output(),feedback:feedback(task),receipt:{},now:1_000_001});
   eq(row('SELECT revision,state FROM learner_states WHERE user_id=?',owner),{revision:21,state:JSON.stringify({day:12,stage:'write',finished:false,completed:[1],entries:{12:{}}})},'learner state unchanged');
+}
+
+// manual takeover: one formal result, v2 receipt binds pronunciation
+{
+  reset();
+  const job=insertJob(),task=insertTask(job);
+  eq((await findReviewTaskByAttempt(d1,owner,job.id)).id,task.taskId,'find task by exact attempt');
+  eq(await findReviewTaskByAttempt(d1,other,job.id),null,'attempt lookup is owner scoped');
+  const claimed=await claimManualReviewTask(d1,owner,task.taskId,{now:1_000_000,nonce:'manual-1'});
+  eq([claimed.state,claimed.claimKind,claimed.fence,claimed.attempts],['running','manual',1,0],'manual claim');
+  eq(claimed.claimedClientRunId,'manual:manual-1','manual claim identity');
+  const recordingId=crypto.randomUUID();
+  const pronunciation={band:7,reviewedWholeClip:true,observation:'fixture',recordingId,scope:'partial'};
+  const first=await completeReviewTask(d1,owner,{taskId:task.taskId,fence:claimed.fence,
+    output:{...output(),analysis:null},feedback:{...feedback(task),pronunciation},receipt:{},now:1_000_001});
+  eq(first.duplicate,false,'manual first completion');
+  assert.ok(typeof first.receipt.outputSha256V2==='string'&&first.receipt.outputSha256V2.length===64,'v2 receipt digest');checks++;
+  const replay=await completeReviewTask(d1,owner,{taskId:task.taskId,fence:claimed.fence,
+    output:{...output(),analysis:null},feedback:{...feedback(task),pronunciation},receipt:{},now:1_000_002});
+  eq(replay.duplicate,true,'same manual output replays');
+  eq(replay.receipt.id,first.receipt.id,'same manual receipt');
+  await code(completeReviewTask(d1,owner,{taskId:task.taskId,fence:claimed.fence,
+    output:{...output(),analysis:null},feedback:{...feedback(task),pronunciation:{...pronunciation,band:6.5}},receipt:{},now:1_000_003}),
+    'receipt_conflict','different pronunciation cannot reuse receipt');
+  eq(await claimManualReviewTask(d1,owner,task.taskId,{now:1_000_002}),null,'completed task cannot be reclaimed');
+  eq(row('SELECT COUNT(*) n FROM teacher_feedback WHERE review_task_id=?',task.taskId).n,1,'one manual feedback');
+}
+
+// manual takeover revokes a live automatic lease
+{
+  reset();
+  const job=insertJob(),task=insertTask(job);
+  const [automatic]=await claimReviewTasks(d1,owner,{now:1_000_000,limit:1,clientRunId:'run-1'});
+  eq(automatic.fence,1,'automatic fence');
+  const manual=await claimManualReviewTask(d1,owner,task.taskId,{now:1_000_010,nonce:'takeover'});
+  eq(manual.fence,2,'takeover fence');
+  await code(completeReviewTask(d1,owner,{taskId:task.taskId,fence:1,output:output(),feedback:feedback(task),receipt:{},now:1_000_011}),
+    'stale_lease','old automatic fence rejected');
+  const done=await completeReviewTask(d1,owner,{taskId:task.taskId,fence:2,output:output(),feedback:feedback(task),receipt:{},now:1_000_011});
+  eq(done.duplicate,false,'manual completion wins');
+  eq(row('SELECT COUNT(*) n FROM teacher_feedback WHERE review_task_id=?',task.taskId).n,1,'one result after takeover');
 }
 
 console.log(JSON.stringify({suite:'review-tasks',checks,passed:true}));
