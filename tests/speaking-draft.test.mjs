@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {registerHooks} from 'node:module';
 registerHooks({resolve(specifier,ctx,next){
-  if(specifier==='./request-json'&&ctx.parentURL?.endsWith('/app/speaking-draft.ts'))return {url:new URL('../app/request-json.ts',import.meta.url).href,shortCircuit:true};
+  if(ctx.parentURL?.endsWith('/app/speaking-draft.ts')){
+    if(specifier==='./request-json')return {url:new URL('../app/request-json.ts',import.meta.url).href,shortCircuit:true};
+    if(specifier==='./client-id')return {url:new URL('../app/client-id.ts',import.meta.url).href,shortCircuit:true};
+  }
   return next(specifier,ctx);
 }});
 const {answers,changeDraft,currentPhase,discardIfMatch,draftKey,submitted,uploadDraft,newRecordingId}=await import('../app/speaking-draft.ts');
