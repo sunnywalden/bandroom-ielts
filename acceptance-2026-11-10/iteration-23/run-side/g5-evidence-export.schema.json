@@ -1,0 +1,281 @@
+{
+  "schema": "bandroom.g5.evidence-contract.v1",
+  "generatedUtc": "2026-11-13",
+  "purpose": "Machine-readable map of the signed G5 evidence bundle for protocol bandroom-d2-cloud-recovery-v1, route A. Structure mirrors analysis/scripts/verify_cloud_release.py and verify_release.py. This is a schema, not evidence.",
+  "authority": {
+    "verifier": "analysis/scripts/verify_cloud_release.py",
+    "baseVerifier": "analysis/scripts/verify_release.py",
+    "namespace": "bandroom-d2-cloud-recovery-v1",
+    "baselineFiles": "verify_release.FILES (32 entries before cloud-recovery additions)",
+    "effectiveFiles": "verify_cloud_release.FILES = baseline - 6 files + 6 files = 32 regular files"
+  },
+  "protocol": "bandroom-d2-cloud-recovery-v1",
+  "route": "A",
+  "bundle": {
+    "manifest": "manifest.json",
+    "manifestIsCountedInFiles": false,
+    "signatureFiles": "<role>.sig per role, detached over the exact manifest.json bytes, not listed in manifest.files",
+    "trustFileLocation": "outside the bundle (allowed-signers: '<role> ssh-ed25519 <base64>' per line)",
+    "regularFileCount": 32,
+    "acousticChunkPattern": "acoustic-%02d.bin",
+    "prefixMetadata": "checkpoint-0.json",
+    "prefixParts": "checkpoint-1.bin … checkpoint-6.bin, each <= 24576 B, contiguous",
+    "outputManifest": "checkpoint-7.json (server checkpoint index/outputIndex 7; older notes call it checkpoint-2.json)"
+  },
+  "manifest": {
+    "requiredKeys": ["schemaVersion", "protocol", "route", "sourceSha", "sourceTreeSha", "analysisVersion", "environmentId", "buildSha256", "runtimeBundleSha256", "modelWeightsSha256", "configSha256", "files"],
+    "schemaVersion": 1,
+    "protocol": "bandroom-d2-cloud-recovery-v1",
+    "route": "A",
+    "sourceSha": "40 lowercase hex",
+    "sourceTreeSha": "40 lowercase hex; candidate HEAD tree or release HEAD^{tree}",
+    "analysisVersion": "non-empty",
+    "environmentId": "non-empty",
+    "buildSha256": "64 lowercase hex; equals files['site-build.tar.gz']",
+    "runtimeBundleSha256": "64 lowercase hex; equals files['runtime-bundle.zip']",
+    "modelWeightsSha256": "64 lowercase hex; equals files['model-weights.bin']",
+    "configSha256": "64 lowercase hex; equals files['analysis-config.json']",
+    "files": "map filename -> 64 lowercase hex; must be exactly FILES union acoustic chunks"
+  },
+  "roles": [
+    {"name": "release-owner", "requiredForG3": false, "requiredForG5": true, "keyType": "Ed25519", "namespace": "bandroom-d2-cloud-recovery-v1"},
+    {"name": "holdout-custodian", "requiredForG3": false, "requiredForG5": true, "keyType": "Ed25519", "namespace": "bandroom-d2-cloud-recovery-v1"},
+    {"name": "work-auditor", "requiredForG3": true, "requiredForG5": true, "keyType": "Ed25519", "namespace": "bandroom-d2-cloud-recovery-v1"},
+    {"name": "site-auditor", "requiredForG3": true, "requiredForG5": true, "keyType": "Ed25519", "namespace": "bandroom-d2-cloud-recovery-v1"}
+  ],
+  "releaseGuard": {
+    "tool": "delivery-d2/release_guard.py",
+    "role": "Separate release-entry check; not part of the signed 32-file bundle and not a substitute for verify_cloud_release.py.",
+    "inputs": ["--candidate final/candidate.json", "--preflight", "--score", "--offline", "--gates final/release-gates.json", "--zero-cost", "--repo"],
+    "releaseGates": {
+      "releaseEligible": true,
+      "note": "release-gates.json is the guard input; the signed bundle carries gates.json. Both must say eligible/passed, but they are different files with different paths."
+    }
+  },
+  "regularFiles": [
+    {"name": "site-build.tar.gz", "gate": "G0/G2", "producer": "site build archive", "manifestBinding": "buildSha256"},
+    {"name": "analysis-bundle.tar.zst", "gate": "G2", "producer": "analysis bundle", "manifestBinding": null},
+    {"name": "model-weights.bin", "gate": "G2", "producer": "frozen model weights", "manifestBinding": "modelWeightsSha256"},
+    {"name": "analysis-config.json", "gate": "G2", "producer": "frozen analysis configuration", "manifestBinding": "configSha256"},
+    {"name": "zero-cost.json", "gate": "G5", "producer": "owner zero-cost attestation", "schemaRef": "shape.zeroCost"},
+    {"name": "gates.json", "gate": "G5", "producer": "release gate ledger", "schemaRef": "shape.gates"},
+    {"name": "preflight.json", "gate": "G1", "producer": "holdout preflight", "manifestBinding": null},
+    {"name": "score.json", "gate": "G1", "producer": "holdout scoring", "manifestBinding": null},
+    {"name": "stratified-score.json", "gate": "G1", "producer": "stratified holdout scoring", "manifestBinding": null},
+    {"name": "holdout-inventory.json", "gate": "G1", "producer": "holdout custodian", "manifestBinding": null},
+    {"name": "annotator-a.json", "gate": "G1", "producer": "independent annotator A", "manifestBinding": null},
+    {"name": "annotator-b.json", "gate": "G1", "producer": "independent annotator B", "manifestBinding": null},
+    {"name": "adjudicated.json", "gate": "G1", "producer": "adjudication", "schemaRef": "shape.adjudicated"},
+    {"name": "predictions.json", "gate": "G2", "producer": "frozen predictions", "manifestBinding": null},
+    {"name": "aligned-predictions.json", "gate": "G2", "producer": "aligned predictions", "manifestBinding": null},
+    {"name": "word-map.json", "gate": "G2", "producer": "word map", "manifestBinding": null},
+    {"name": "reference-words.json", "gate": "G1", "producer": "reference words", "schemaRef": "shape.referenceWords"},
+    {"name": "holdout-ledger.json", "gate": "G1", "producer": "holdout ledger", "manifestBinding": null},
+    {"name": "inference-windows.json", "gate": "G2", "producer": "inference window ledger", "manifestBinding": null},
+    {"name": "offline.json", "gate": "G3", "producer": "v26 A/B/C orchestration export", "schemaRef": "shape.offline"},
+    {"name": "platform-probe.json", "gate": "G0/G3", "producer": "cloud platform probes", "schemaRef": "shape.platformProbe"},
+    {"name": "browser-acceptance.json", "gate": "G4", "producer": "Chrome acceptance run", "schemaRef": "shape.browserAcceptance"},
+    {"name": "site-event-export.json", "gate": "G3", "producer": "isolated site append-only event log", "schemaRef": "shape.siteEventExport"},
+    {"name": "offline-checkpoint.bin", "gate": "G3", "producer": "decode/feature checkpoint", "schemaRef": "shape.offlineCheckpoint"},
+    {"name": "offline-output.json", "gate": "G3", "producer": "completed acoustic output", "schemaRef": "shape.offlineOutput"},
+    {"name": "browser-playback-events.json", "gate": "G4", "producer": "Chrome playback evidence", "schemaRef": "shape.browserPlaybackEvents"},
+    {"name": "runtime-bundle.zip", "gate": "G3", "producer": "cloud runtime bundle", "manifestBinding": "runtimeBundleSha256", "schemaRef": "shape.runtimeBundle"},
+    {"name": "runtime-profile.json", "gate": "G3", "producer": "cold-cache runtime profile", "schemaRef": "shape.runtimeProfile"},
+    {"name": "official-run-history.json", "gate": "G3", "producer": "official Work run history export", "schemaRef": "shape.officialRunHistory"},
+    {"name": "executor-event-export.json", "gate": "G3", "producer": "cloud executor receipts", "schemaRef": "shape.executorEventExport"},
+    {"name": "acoustic-recovery.json", "gate": "G3", "producer": "v26 prefix/resume/cold recovery", "schemaRef": "shape.acousticRecovery"},
+    {"name": "offline-cold-output.json", "gate": "G3", "producer": "independent cold output", "schemaRef": "shape.offlineOutput"}
+  ],
+  "acousticChunks": {
+    "pattern": "acoustic-%02d.bin",
+    "countRule": "N = len(acoustic-recovery.json:resumed); N in [1,24]",
+    "indexing": "zero-based, acoustic-00.bin through acoustic-{N-1:02}.bin",
+    "hashBinding": "manifest.files[acoustic-NN.bin] equals the transfer-chunk SHA at that plan index",
+    "format": "bandroom-acoustic transfer chunk: 4-byte big-endian header length + canonical JSON header + raw payload; read_chunk() validates digest, identity and predecessor",
+    "fileCountFormula": "32 regular files + N acoustic chunks + manifest.json + 4 role signatures"
+  },
+  "shape": {
+    "offline": {
+      "runs": "exactly 3, step order ['A','B','C']; each carries officialRunId, fence, startedAt, endedAt, automationId, taskId plus SUBJECT and CANDIDATE fields; offline.isolated must be true and every run.automationId must equal history.automationId",
+      "coldRunId": "run D officialRunId; must differ from all three runs and appear as the fourth history record",
+      "identity": ["jobId", "taskId", "attemptId", "recordingId", "recordingSha256", "inputBytes", "attemptRevision", "isolated", "automationId", "coldRunId", "analysisVersion", "sourceSha", "buildSha256", "environmentId", "route", "sourceTreeSha", "runtimeBundleSha256", "modelWeightsSha256", "configSha256"],
+      "auditRows": "one site event type=offline_run per A/B/C with automationId and isolated=true; filtered out of site-event-export.json",
+      "page": {"browser": "Chrome", "closeReceipt": "non-empty", "reopenReceipt": "non-empty", "closedAt": "UTC before A.startedAt", "reopenedAt": "UTC after C.endedAt"},
+      "feedbackReceipt": ["jobId", "taskId", "attemptId", "attemptRevision", "recordingId", "recordingSha256", "inputBytes", "analysisVersion", "fence", "id", "feedbackId", "outputSha256"],
+      "state": {"jobState": "completed", "duplicateFeedbackCount": 1, "feedbackVisible": true},
+      "fairness": ["officialRunId", "blockedTaskId", "laterTaskId", "blockedTaskRetried", "laterTaskCompleted"],
+      "note": "fairness is embedded in offline.json per M5"
+    },
+    "officialRunHistory": {
+      "automationId": "non-empty",
+      "runs": "four records: A/B/C plus the read-only cold reference D; fields officialRunId, startedAt, endedAt, automationId, taskId, officialRecordRef, source='scheduled-cloud', clientExecution=false, approvalPrompts=0, quotaObservation; 0 < duration <= 900 s; runs non-overlapping",
+      "emptyQueueWakes": ">=3 distinct officialRunId not in runs; derived from read_qa_site_events rows with kind='wake', pendingCount=0, pendingAcoustics=0, subscriptionActive=true, emptyQueueAccepted=true, mapped to platform records by at; fields officialRecordRef, automationId, source='scheduled-cloud', clientExecution=false, approvalPrompts=0, discoveredCount=0, createdCount=0, startedAt; span >= 86400 s. kind='drain_qa_queue' rows are excluded.",
+      "note": "A/B/C official platform refs (userTurnId/assistantMessageId/turnKey) ride here or in officialRecordRef; server runId/fence remain in offline/executor exports"
+    },
+    "siteEventExport": {
+      "clientOperationsDuringClosure": [],
+      "feedbackReceipt": "equals offline.feedbackReceipt",
+      "events": "exactly 11 cloud events and only the 9 G5 types; per run: A [claimed,retry_wait], B [claimed,recording_verified,checkpoint_saved,interrupted], C [claimed,checkpoint_restored,suffix_completed,feedback_committed,receipt_readback]. offline_run, wake and drain_qa_queue rows from read_qa_site_events MUST be filtered out.",
+      "eventFields": ["officialRunId", "type", "source='cloud'", "at (ISO UTC from read_qa_site_events.utc)", "jobId", "taskId", "attemptId", "attemptRevision", "recordingId", "recordingSha256", "inputBytes", "analysisVersion", "fence"],
+      "eventExtras": {
+        "retry_wait": ["reason in {recording_read_failed, recording_range_truncated}", "nextAttemptAt"],
+        "recording_verified": ["bytes == offline.inputBytes", "sha256 == offline.recordingSha256 and == executor.computedSha256/decoderInputSha256"],
+        "checkpoint_saved": ["nextChunk", "checkpointSha256"],
+        "interrupted": ["recoverableAt"],
+        "checkpoint_restored": ["nextChunk", "checkpointSha256"],
+        "suffix_completed": ["chunks"],
+        "feedback_committed": ["responseLost=true", "receiptId"],
+        "receipt_readback": ["receiptId", "feedbackId", "outputSha256"]
+      },
+      "source": "read_qa_site_events (owner-only) with type/officialRunId filters; record_qa_run_event writes the rows idempotently per (owner,officialRunId,type,fence)"
+    },
+    "siteEventRaw": {
+      "tool": "read_qa_site_events",
+      "fields": ["kind", "type", "at", "utc", "officialRunId", "fence", "jobId", "automationId", "isolated", "bytes", "sha256", "stage", "detail", "source", "pendingCount", "pendingAcoustics", "subscriptionActive", "subscriptionVerified", "subscriptionExpiresAt", "emptyQueueAccepted"],
+      "kinds": ["9 cloud event types", "offline_run", "wake", "drain_qa_queue"],
+      "note": "detail is flattened into the row by the server. Keep this raw export in the run directory; the signed site-event-export.json is the filtered 11-row view."
+    },
+    "executorEventExport": {
+      "runs": "exactly 3: B, C, cold D. Each executionId unique, officialRunId, TASK+ (fence for B/C), source='cloud-executor', localExecution=false, startedAt/endedAt inside the official run",
+      "B": ["readBytes", "computedSha256", "decoderInputSha256", "savedChunks == acoustic-recovery.prefix", "stageIndexSha256 == manifest(prefix chunks)"],
+      "C": ["readBytes", "restoredChunks == acoustic-recovery.prefix", "newChunks == resumed[cut:]", "stageIndexSha256 == manifest(all chunks)", "logits"],
+      "cold": ["officialRunId == offline.coldRunId (run D)", "readOnly=true", "cacheEmpty=true", "restoredChunks=[]", "newChunks == cold", "readBytes", "decoderInputSha256", "stageIndexSha256 == manifest(all chunks)", "logits", "outputSha256"],
+      "note": "Run D is the fourth official run; do not reuse C's runId for the cold executor row"
+    },
+    "runD": {
+      "officialRunId": "distinct from A/B/C; becomes offline.coldRunId and recovery.coldRunId",
+      "serverLease": "none; no claim/retry/checkpoint/feedback. fence is null in the run evidence; the official record still carries automationId/taskId/times",
+      "outputs": ["offline-checkpoint.bin (bandroom-decode-v1)", "acoustic-00.bin … acoustic-NN.bin (verifier plan, all cold)", "plan.json (sampleCount/identity/plan/chunks/cold/coldStageIndexSha256/coldLogits)", "cold-output.f32le for the v26 859-window cross-check"],
+      "siteEvent": "one offline_run audit row with automationId/isolated=true; no cloud event types"
+    },
+    "acousticPlan": {
+      "source": "bandroom_acoustic.acoustic_stage.windows(sample_count) and encode_chunk/read_chunk",
+      "constants": {"frameSamples": 320, "receptiveSamples": 400, "windowFrames": 800, "contextFrames": 100, "offsets": [0, 400], "features": 768, "transferFormat": "bandroom-acoustic-chunk-v1"},
+      "count": "HJK 1,099,196 samples -> 10 chunks; contract bound 1..24",
+      "chunk": "4-byte big-endian header length + canonical JSON header {format,chunkIndex,previousSha256,decodeSha256,bundleSha256,configSha256,featuresSha256} + raw little-endian float32 frames",
+      "identity": ["environment", "taskId", "attemptId", "revision", "inputSha256", "inputBytes", "decodeSha256", "bundleSha256", "configSha256"],
+      "configSha256": "sha256(canonical analysis-config.json.acousticConfig), not the file digest",
+      "persistence": "B writes plan chunks 0..5 and plan-b.json under /mnt/data/bandroom-g5/acoustic-plan; C verifies those exact bytes and computes 6..9. Missing prefix in C is a blocker, not a recompute.",
+      "stageHashes": "AcousticStore.manifest hashes raw-payload SHA/bytes; resumed/manifest.files/executor lists use transfer-blob SHA",
+      "prohibition": "v26 prefix parts (6 x 20,996 B) are a different plan and MUST NOT be renamed acoustic-NN.bin"
+    },
+    "acousticRecovery": {
+      "basis": "verifier plan windows(decoded.sample_count); v26 6-part prefix is separate G3 evidence",
+      "resumed": "array of 1..24 verifier-plan transfer-chunk digests; length N defines acoustic-NN.bin count",
+      "prefix": "strict prefix of resumed; 0 < len(prefix) < len(resumed); cut = len(prefix) = 6 (B persists 0..5, C restores and computes 6..9)",
+      "cold": "byte-identical chunk list to resumed, produced by run D",
+      "coldRunId": "run D officialRunId, distinct from A/B/C",
+      "identity": {"environment": "offline.environmentId", "taskId": "offline.taskId", "attemptId": "offline.attemptId", "revision": "offline.attemptRevision", "inputSha256": "offline.recordingSha256", "inputBytes": "offline.inputBytes", "decodeSha256": "manifest.files['offline-checkpoint.bin']", "bundleSha256": "manifest.runtimeBundleSha256", "configSha256": "sha256(canonical analysis-config.json.acousticConfig)"},
+      "coldStageIndexSha256": "sha256 of canonical {format:'bandroom-acoustic-features-v1', identity, plan, chunks, nextChunk} where chunks carry RAW payload SHA/bytes; transfer-blob SHA is used only by resumed/manifest.files/executor lists",
+      "coldLogits": "per-pass offsets with frames/frameSha256/ctcSha256/boundarySha256"
+    },
+    "offlineCheckpoint": "binary decode/feature checkpoint accepted by bandroom_acoustic.checkpoint.read_checkpoint(input_sha256, artifact_sha256, analysis_version)",
+    "offlineOutput": {
+      "analysis": {"state": "completed", "schemaVersion": 1, "inputSha256": "offline.recordingSha256", "analysisVersion": "manifest.analysisVersion", "decoded": {"sampleRateHz": 16000, "sampleCount": "480000..2880000"}, "coverage.analyzedSamples": "union equals [[0, sampleCount]]"},
+      "binding": "offline-output.json and offline-cold-output.json must have equal manifest hashes and equal executor outputSha256"
+    },
+    "browserAcceptance": {
+      "binding": "same SUBJECT as offline; feedbackId/receiptId equal offline.feedbackReceipt; learnerBaselineBefore/After equal and contain PRESERVED keys; rollbackVerified=true",
+      "browsers": {"Chrome": {"version": "non-empty"}},
+      "cases": "all 10 BROWSER_CASES plus slow-loadedmetadata, repeat-marker, pause, reopen; each status='passed' with non-empty receipt"
+    },
+    "browserPlaybackEvents": {
+      "reviews": {"Chrome": {"binding": "SUBJECT + feedbackId + receiptId + Chrome version + error identity", "reviewerId": "non-empty", "heardWord": "human word", "heardActual": "human actual", "events": "loadedmetadata -> seeked -> playing -> pause|ended"}},
+      "events": "mediaTimeMs within [0,durationMs], elapsedMs integer nondecreasing, loadedmetadata.elapsedMs <= seeked.elapsedMs",
+      "windows": {"substitution_or_addition": "start=startMs-500, end=endMs+500", "deletion": "start=anchorMs-750, end=anchorMs+750", "stop": "min(durationMs, max(start+300, end))", "toleranceMs": 150},
+      "timelineChecks": "exactly 2: (Chrome,'mp4/aac') and (Chrome,'webm/opus'); distinct recordingSha256, duration 30000..180000 ms, markers first/middle/tail"
+    },
+    "platformProbe": {
+      "officialHistorySha256": "manifest.files['official-run-history.json']",
+      "probes": "exactly 4: {webm/opus, mp4/aac} x {short 30-45 s, near-limit 165-180 s}; each readRun/resumeRun present in official history"
+    },
+    "runtimeProfile": {
+      "coldTrials": ">=3 per encoding mp4/aac and webm/opus; distinct officialRunId; cacheEmpty=true; durationMs 165000..180000; stageSeconds keys exactly download,prepare,decode,asr,acoustic,candidates,validate,writeback; download+prepare<=300 s; total<=executionSeconds<=900 s; coldBytes<=300000000; processTreePeakBytes<=8000000000",
+      "note": "300 s download+prepare is unreachable at measured v26 throughput (M4); this remains an owner-approved §4.3 revision dependency, not something to fake"
+    },
+    "gates": {
+      "releaseEligible": true,
+      "gates": {"G0": {"status": "passed"}, "G1": {"status": "passed"}, "G2": {"status": "passed"}, "G3": {"status": "passed"}, "G4": {"status": "passed"}, "G5": {"status": "passed"}},
+      "note": "gates may only say passed after the corresponding evidence exists; the signature step is not independent proof"
+    },
+    "zeroCost": {
+      "invoicesAdded": 0,
+      "newSubscriptions": [],
+      "newPaidApiKeys": [],
+      "falseFlags": ["gpuRental", "paidAnnotation", "paidCorpusOrModel", "storageOrDatabaseUpgrade", "paidCiOrMonitoring"],
+      "existingPlans": {"workPlan": "existing", "sitesPlan": "existing", "githubPlan": "existing"},
+      "signedBy": "non-empty",
+      "signedAt": "UTC"
+    },
+    "runtimeBundle": "zip <= 300000000 B containing cloud-stage.json index (<=1048576 B) and graphs/encoder-int8.onnx, graphs/probe-head.onnx whose digests match analysis-config.acousticConfig and the frozen model SHAs",
+    "adjudicated": {"clips": "must contain the offline holdoutClipId with audioSha256=offline.recordingSha256, sampleRateHz=16000, sampleCount=decoded.sample_count"},
+    "referenceWords": {"clips": "matching clipId with words[wordIndex].word for each adjudicated error"}
+  },
+  "crossBindings": [
+    "manifest.files['site-build.tar.gz'] == manifest.buildSha256",
+    "manifest.files['runtime-bundle.zip'] == manifest.runtimeBundleSha256",
+    "manifest.files['model-weights.bin'] == manifest.modelWeightsSha256",
+    "manifest.files['analysis-config.json'] == manifest.configSha256",
+    "manifest.files['official-run-history.json'] == platform-probe.officialHistorySha256",
+    "manifest.files['offline-checkpoint.bin'] == acoustic-recovery.identity.decodeSha256",
+    "manifest.files['offline-output.json'] == manifest.files['offline-cold-output.json'] == C.executor.outputSha256 == cold.executor.outputSha256",
+    "manifest.files['acoustic-NN.bin'] == acoustic-recovery.resumed[NN]",
+    "acoustic-recovery.coldStageIndexSha256 == sha256(AcousticStore.manifest(raw chunk rows))",
+    "checkpoint_saved.nextChunk == checkpoint_restored.nextChunk == len(acoustic-recovery.prefix)",
+    "checkpoint_saved.checkpointSha256 == checkpoint_restored.checkpointSha256 == acoustic-recovery.prefix[-1]",
+    "offline.feedbackReceipt == siteEventExport.feedbackReceipt",
+    "offline.feedbackReceipt.fence == offline.runs[2].fence == C event fence",
+    "browserAcceptance.feedbackId/receiptId == offline.feedbackReceipt.feedbackId/id"
+  ],
+  "validationOrder": [
+    "1. verify_signatures(manifest bytes, external allowed-signers, namespace)",
+    "2. manifest identity + exact file inventory + acoustic chunk count",
+    "3. every manifest digest recomputed",
+    "4. candidate/release source tree binding",
+    "5. zero-cost attestation",
+    "6. holdout replay (G1/G2)",
+    "7. verify_work(offline, history, site, executor, recovery): A/B/C events, retry_wait, interrupted, lost receipt, fairness, emptyQueueWakes, and a distinct Run D cold record (coldRunId not in A/B/C)",
+    "8. verify_runtime(platform-probe, runtime-profile)",
+    "9. verify_acoustic(decode checkpoint, prefix/resume/cold chunks, logits)",
+    "10. verify_browser(browser-acceptance, browser-playback-events, adjudicated, reference-words)"
+  ],
+  "integrationRisks": [
+    {
+      "id": "R1-cold-official-run",
+      "severity": "resolved",
+      "status": "closed-by-RUN_D",
+      "detail": "verify_work does require recovery.coldRunId to be an official run distinct from A/B/C with its own history and cloud-executor record. Resolution: add a fourth read-only cold reference run D (RUN_D_COLD_PROMPT.txt) that performs no claim/retry/checkpoint/feedback, records its own officialRunId, and emits verifier-plan cold chunks. C's in-run cold remains the §4C hard gate. Never reuse C's runId as coldRunId."
+    },
+    {
+      "id": "R2-acoustic-chunk-plan",
+      "severity": "resolved",
+      "status": "closed-by-option-2",
+      "detail": "verify_acoustic derives plan = list(windows(sample_count)) with PASS_OFFSETS=(0,400), FRAMES_PER_WINDOW=800, CONTEXT_FRAMES=100 (10 chunks for the HJK 3434-frame timeline). B now persists verifier-plan chunks 0..5 under /mnt/data/bandroom-g5/acoustic-plan; C restores and verifies them, computes 6..9, and reports plan lists in executor/checkpoint events; the 6-part 120/80 ms v26 prefix remains for G3 resume. The release verifier is unchanged. export_g5_evidence.py recomputes/validates the plan and stage hashes (raw-payload SHA for AcousticStore.manifest, transfer-blob SHA for resumed/manifest.files). test_r2_acoustic_plan.py runs the real verify_acoustic: positive exported bundle accepted, corrupted chunk / wrong suffix / wrong stage index rejected.",
+      "evidence": "run-side/test_r2_acoustic_plan.py: 9/9 checks pass; plan equality with acoustic_stage.windows(1,099,196) = 10 chunks"
+    },
+    {
+      "id": "R3-word-output",
+      "severity": "dependency-not-G3-blocker",
+      "status": "closed-as-dependency",
+      "detail": "verify_offline_output requires analysis.errors with wordIndex/phoneIndex/kind and coverage over the full sample range, matching adjudicated human errors. A transport diagnostic manifest has no word-level errors. offline-output.json/offline-cold-output.json therefore come from G1/G2 artifacts, not from G3. G5 is blocked on G1/G2 for this file, but G3 itself is not invalid."
+    },
+    {
+      "id": "R4-site-event-log",
+      "severity": "resolved",
+      "status": "closed-by-Agent1-tools",
+      "detail": "Agent 1 added append-only qa_site_events with owner-only record_qa_run_event (idempotent per owner/officialRunId/type/fence; recording_verified requires bytes+sha256; offline_run requires automationId+isolated=true) and read_qa_site_events (kind/type/official run/fence/automationId/isolated/bytes/sha256/stage/detail/source/pending/subscription/emptyQueueAccepted). A/B/C prompts now call record_qa_run_event; export_g5_evidence.py filters the raw export to exactly 11 cloud events and derives emptyQueueWakes from kind=wake rows, excluding offline_run and drain_qa_queue."
+    },
+    {
+      "id": "R5-provenance",
+      "severity": "note",
+      "status": "documented",
+      "detail": "F2/F3-F5/F6 primary cloud JSON files were not byte-verified locally (m9). Only Work readbacks with local SHA verification are authoritative until bytes are recovered."
+    },
+    {
+      "id": "R6-budget",
+      "severity": "owner-decision",
+      "status": "documented-pending-D1",
+      "detail": "runtime-profile requires download+prepare <= 300 s with coldBytes <= 300 MB. Measured 4.044 MiB/min makes the 48.1 MiB int8 model alone exceed 300 s. Requires the owner-approved evidence-based §4.3 revision (D1); never write a passing value that was not measured."
+    }
+  ]
+}

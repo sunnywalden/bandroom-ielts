@@ -1,0 +1,1 @@
+{"name":"bandroom-work-review-qa","main":"index.js","compatibility_date":"2026-07-28","r2_buckets":[{"binding":"BUCKET","bucket_name":"site-creator-r2"}],"triggers":{"crons":["* * * * *"]}}

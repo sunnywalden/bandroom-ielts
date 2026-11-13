@@ -1,5 +1,5 @@
 // Synthetic QA clips encoded as mono 16 kHz MP3 from the same macOS Samantha voice.
-const pronunciationAudio = {
+export default {
   "pronunciation-a": {
     sha256: "b77d0890174c96c8c0d7b40095ab3006e12fecbd8874704d92ff63351faf2a78",
     base64: "SUQzBAAAAAAAIlRTU0UAAAAOAAADTGF2ZjYzLjEuMTAwAAAAAAAAAAAAAAD/81jAAAAAAAAAAAAASW5mbwAAAA8AAAAkAAAU9AAP"
@@ -151,5 +151,3 @@ const pronunciationAudio = {
       + "qqqqqqqqqqqqqqqqqqo=",
   },
 };
-
-export default pronunciationAudio;

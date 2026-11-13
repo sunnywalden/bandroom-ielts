@@ -1,3 +1,4 @@
+import {isProbeOwner, prepareProbeScratch, probeCheckpointKey, readProbeScratch, scratchJobPattern} from "./runtime-probe.js";
 import {fullSpeechMode} from "./pronunciation.js";
 import {hostedJobPattern, prepareEvents} from "./work-events.js";
 
@@ -6,12 +7,14 @@ const maxParts = 8192;
 const leaseMs = 10 * 60_000;
 const retryMs = 30_000;
 const jobPattern = new RegExp(hostedJobPattern);
+const checkpointJobPattern = `(?:${hostedJobPattern})|(?:${scratchJobPattern.source})`;
+const isScratch = args => scratchJobPattern.test(args.jobId);
 const digestPattern = /^[a-f0-9]{64}$/;
 const runPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const base64Pattern = /^[A-Za-z0-9+/]+={0,2}$/;
-const retryReasons = ["recording_read_failed", "checkpoint_read_failed", "checkpoint_write_failed", "compute_budget"];
+const retryReasons = ["recording_read_failed", "checkpoint_read_failed", "checkpoint_write_failed", "bundle_read_failed", "bundle_integrity_failed", "runtime_unavailable", "compute_budget"];
 const binding = {
-  jobId: {type: "string", pattern: hostedJobPattern},
+  jobId: {type: "string", pattern: checkpointJobPattern},
   recipeSha256: {type: "string", pattern: digestPattern.source},
   runId: {type: "string", pattern: runPattern.source},
 };
@@ -33,7 +36,7 @@ export const acousticTools = tools.map(([name, description, properties, readOnly
   annotations: {readOnlyHint, destructiveHint: false, idempotentHint: true, openWorldHint: false},
 }));
 
-async function prepare(env) {
+export async function prepareAcoustics(env) {
   await prepareEvents(env);
   await env.DB.batch([
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS qa_acoustic_leases (
@@ -47,6 +50,12 @@ async function prepare(env) {
       run_id TEXT NOT NULL, fence INTEGER NOT NULL,
       PRIMARY KEY (job_id, recipe_sha, part_index)
     )`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS qa_acoustic_completions (
+      job_id TEXT PRIMARY KEY, owner TEXT NOT NULL, recipe_sha TEXT NOT NULL,
+      recording_sha TEXT NOT NULL, run_id TEXT NOT NULL, fence INTEGER NOT NULL,
+      output_sha TEXT NOT NULL, output_index INTEGER NOT NULL, payload_sha TEXT NOT NULL,
+      receipt TEXT NOT NULL, created_at INTEGER NOT NULL
+    )`),
   ]);
 }
 
@@ -59,10 +68,16 @@ const candidateConditions = `s.verified = 1 AND p.mode = '${fullSpeechMode}' AND
     AND a.state <> 'complete' AND NOT EXISTS (SELECT 1 FROM qa_feedback f WHERE f.job_id = a.job_id)`;
 const candidates = `${candidateTables} WHERE ${candidateConditions}`;
 const eligible = `EXISTS (SELECT 1 ${candidates} AND a.job_id = qa_acoustic_leases.job_id
-  AND a.owner = qa_acoustic_leases.owner AND a.input_sha = qa_acoustic_leases.recording_sha)`;
+  AND a.owner = qa_acoustic_leases.owner AND a.input_sha = qa_acoustic_leases.recording_sha
+  AND NOT EXISTS (SELECT 1 FROM qa_drained_jobs d
+    WHERE d.job_id = a.job_id AND d.owner = a.owner))`;
 const scope = "job_id = ? AND recipe_sha = ? AND owner = ?";
-const available = scope + " AND " + eligible;
-const live = available + " AND run_id = ? AND fence = ? AND lease_until > ?";
+const scratchEligible = `EXISTS (SELECT 1 FROM qa_runtime_probe_scratch s
+  WHERE s.job_id = qa_acoustic_leases.job_id AND s.owner = qa_acoustic_leases.owner
+  AND s.recipe_sha = qa_acoustic_leases.recipe_sha AND s.closing = 0
+  AND s.expires_at > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))`;
+const availableScope = scratch => scope + " AND " + (scratch ? scratchEligible : eligible);
+const liveScope = scratch => availableScope(scratch) + " AND run_id = ? AND fence = ? AND lease_until > ?";
 const leaseFields = `recording_sha AS recordingSha256, run_id AS runId, fence, lease_until AS leaseUntil,
   retry_at AS retryAt, retry_reason AS retryReason, next_index AS nextIndex`;
 const partFields = "part_index AS 'index', sha256, byte_length AS byteLength, run_id AS writtenByRun, fence AS writtenByFence";
@@ -76,11 +91,15 @@ function liveIdentity(owner, args, now = Date.now()) {
 }
 
 function readLease(env, owner, args) {
-  return env.DB.prepare(`SELECT ${leaseFields} FROM qa_acoustic_leases WHERE ${available}`).bind(...identity(owner, args)).first();
+  return env.DB.prepare(`SELECT ${leaseFields} FROM qa_acoustic_leases WHERE ${availableScope(isScratch(args))}`).bind(...identity(owner, args)).first();
 }
 
-function activeLease(env, owner, args) {
-  return env.DB.prepare(`SELECT ${leaseFields} FROM qa_acoustic_leases WHERE ${live}`).bind(...liveIdentity(owner, args)).first();
+export function activeLease(env, owner, args) {
+  return scopedActiveLease(env, owner, args, false);
+}
+
+function scopedActiveLease(env, owner, args, scratch = isScratch(args)) {
+  return env.DB.prepare(`SELECT ${leaseFields} FROM qa_acoustic_leases WHERE ${liveScope(scratch)}`).bind(...liveIdentity(owner, args)).first();
 }
 
 function readPart(env, args) {
@@ -110,13 +129,15 @@ async function storePart(bucket, key, bytes, digest) {
 
 async function claim(env, owner, args) {
   const now = Date.now();
-  await env.DB.prepare(`INSERT OR IGNORE INTO qa_acoustic_leases (job_id, recipe_sha, owner, recording_sha)
-    SELECT a.job_id, ?, a.owner, a.input_sha ${candidates} AND a.job_id = ? AND a.owner = ?`)
-    .bind(args.recipeSha256, args.jobId, owner).run();
+  if (!isScratch(args)) {
+    await env.DB.prepare(`INSERT OR IGNORE INTO qa_acoustic_leases (job_id, recipe_sha, owner, recording_sha)
+      SELECT a.job_id, ?, a.owner, a.input_sha ${candidates} AND a.job_id = ? AND a.owner = ?`)
+      .bind(args.recipeSha256, args.jobId, owner).run();
+  }
   const acquired = await env.DB.prepare(`UPDATE qa_acoustic_leases
     SET run_id = ?, fence = CASE WHEN run_id = ? THEN fence ELSE fence + 1 END,
       lease_until = MAX(lease_until, ?), retry_at = 0, retry_reason = NULL
-    WHERE ${available} AND (
+    WHERE ${availableScope(isScratch(args))} AND (
       (run_id = ? AND lease_until > ?) OR
       (lease_until <= ? AND retry_at <= ? AND (run_id IS NULL OR run_id <> ?))
     )
@@ -131,15 +152,16 @@ async function claim(env, owner, args) {
 }
 
 export async function pendingAcoustics(env, owner) {
-  await prepare(env);
+  await prepareAcoustics(env);
   const now = Date.now();
   const {results} = await env.DB.prepare(`SELECT a.job_id AS jobId, a.input_sha AS recordingSha256,
       l.recipe_sha AS recipeSha256, COALESCE(l.next_index, 0) AS nextIndex, l.retry_reason AS retryReason,
       MAX(COALESCE(l.retry_at, 0), COALESCE(l.lease_until, 0)) AS availableAt
     ${candidateTables} LEFT JOIN qa_acoustic_leases l ON l.job_id = a.job_id
     WHERE ${candidateConditions} AND a.owner = ?
+      AND NOT EXISTS (SELECT 1 FROM qa_drained_jobs d WHERE d.job_id = a.job_id AND d.owner = ?)
     ORDER BY availableAt > ? ASC, availableAt ASC, a.created_at ASC, a.job_id ASC LIMIT 50`)
-    .bind(owner, now).all();
+    .bind(owner, owner, now).all();
   return results;
 }
 
@@ -148,7 +170,7 @@ async function save(env, owner, args) {
   if (!bytes.length || encode(bytes) !== args.base64 || await sha256(bytes) !== args.sha256) {
     return {status: "invalid_checkpoint"};
   }
-  const current = await activeLease(env, owner, args);
+  const current = await scopedActiveLease(env, owner, args);
   if (!current) return {status: "lease_lost"};
   const receipt = entry => {
     if (entry.sha256 !== args.sha256) return {status: "index_conflict", nextIndex: current.nextIndex};
@@ -163,34 +185,38 @@ async function save(env, owner, args) {
     if (!await storePart(env.BUCKET, prior.objectKey, bytes, prior.sha256)) {
       return {status: "checkpoint_unavailable"};
     }
-    if (!await activeLease(env, owner, args)) return {status: "lease_lost"};
+    if (!await scopedActiveLease(env, owner, args)) return {status: "lease_lost"};
     return receipt(prior);
   }
   if (args.index !== current.nextIndex) return {status: "out_of_order", nextIndex: current.nextIndex};
 
-  const objectKey = `qa-acoustic/${args.jobId}/${current.recordingSha256}/${args.recipeSha256}/${args.index}/${args.sha256}`;
+  const objectKey = isScratch(args) ? probeCheckpointKey(args.jobId, args.sha256)
+    : `qa-acoustic/${args.jobId}/${current.recordingSha256}/${args.recipeSha256}/${args.index}/${args.sha256}`;
   if (!await storePart(env.BUCKET, objectKey, bytes, args.sha256)) return {status: "checkpoint_unavailable"};
   const now = Date.now();
   const [committed] = await env.DB.batch([
     env.DB.prepare(`INSERT OR IGNORE INTO qa_acoustic_parts
       (job_id, recipe_sha, part_index, sha256, byte_length, object_key, run_id, fence)
       SELECT job_id, recipe_sha, ?, ?, ?, ?, run_id, fence FROM qa_acoustic_leases
-      WHERE ${live} AND next_index = ? RETURNING ${partFields}`)
+      WHERE ${liveScope(isScratch(args))} AND next_index = ? RETURNING ${partFields}`)
       .bind(args.index, args.sha256, bytes.length, objectKey, ...liveIdentity(owner, args, now), args.index),
     env.DB.prepare(`UPDATE qa_acoustic_leases SET next_index = next_index + 1
-      WHERE ${live} AND next_index = ? AND EXISTS (
+      WHERE ${liveScope(isScratch(args))} AND next_index = ? AND EXISTS (
         SELECT 1 FROM qa_acoustic_parts p WHERE p.job_id = qa_acoustic_leases.job_id
           AND p.recipe_sha = qa_acoustic_leases.recipe_sha AND p.part_index = qa_acoustic_leases.next_index
       )`).bind(...liveIdentity(owner, args, now), args.index),
   ]);
   if (committed.results.length) return receipt(committed.results[0]);
-  if (!await activeLease(env, owner, args)) return {status: "lease_lost"};
+  if (!await scopedActiveLease(env, owner, args)) {
+    if (isScratch(args) && !await readProbeScratch(env, owner, args)) await env.BUCKET.delete(objectKey);
+    return {status: "lease_lost"};
+  }
   const prior = await readPart(env, args);
   return prior ? receipt(prior) : {status: "checkpoint_unavailable"};
 }
 
 async function read(env, owner, args) {
-  const current = await activeLease(env, owner, args);
+  const current = await scopedActiveLease(env, owner, args);
   if (!current) return {status: "lease_lost"};
   if (args.index >= current.nextIndex) return {status: "checkpoint_not_found", nextIndex: current.nextIndex};
   const entry = await readPart(env, args);
@@ -206,14 +232,14 @@ async function read(env, owner, args) {
   if (bytes.length !== entry.byteLength || await sha256(bytes) !== entry.sha256) {
     return {status: "checkpoint_corrupt"};
   }
-  if (!await activeLease(env, owner, args)) return {status: "lease_lost"};
+  if (!await scopedActiveLease(env, owner, args)) return {status: "lease_lost"};
   return {status: "available", ...receipt, base64: encode(bytes)};
 }
 
 async function retry(env, owner, args) {
   const now = Date.now();
   const released = await env.DB.prepare(`UPDATE qa_acoustic_leases
-    SET lease_until = 0, retry_at = ?, retry_reason = ? WHERE ${live} RETURNING ${leaseFields}`)
+    SET lease_until = 0, retry_at = ?, retry_reason = ? WHERE ${liveScope(isScratch(args))} RETURNING ${leaseFields}`)
     .bind(now + retryMs, args.reason, ...liveIdentity(owner, args, now)).first();
   const current = released ?? await readLease(env, owner, args);
   if (current?.runId === args.runId && current.fence === args.fence && current.retryAt > 0 && current.retryReason === args.reason) {
@@ -231,7 +257,7 @@ function validArgs(name, args) {
   const schema = acousticTools.find(tool => tool.name === name)?.inputSchema;
   if (!schema || typeof args !== "object" || args === null || Array.isArray(args) ||
       Object.keys(args).some(key => !Object.hasOwn(schema.properties, key)) ||
-      typeof args.jobId !== "string" || !jobPattern.test(args.jobId) ||
+      typeof args.jobId !== "string" || !(jobPattern.test(args.jobId) || isScratch(args)) ||
       typeof args.recipeSha256 !== "string" || !digestPattern.test(args.recipeSha256) ||
       typeof args.runId !== "string" || !runPattern.test(args.runId)) return false;
   if (name === "claim_qa_acoustic") return true;
@@ -247,7 +273,16 @@ function validArgs(name, args) {
 export async function acousticTool(env, owner, name, args, reply, error) {
   if (!validArgs(name, args)) return error(-32602, "Invalid acoustic checkpoint parameters.");
   try {
-    await prepare(env);
+    if (isScratch(args) && !await isProbeOwner(owner)) return error(-32001, "Probe owner access required.");
+    await prepareAcoustics(env);
+    if (isScratch(args)) {
+      await prepareProbeScratch(env);
+      const scratch = await readProbeScratch(env, owner, args);
+      if (!scratch) return reply({structuredContent: {status: "unavailable"}, content: [{type: "text", text: "Scratch fixture unavailable."}]});
+      if (args.index > 0 || (name === "save_qa_acoustic_checkpoint" && args.sha256 !== scratch.checkpointSha256)) {
+        return error(-32602, "Only the pinned synthetic checkpoint is allowed.");
+      }
+    }
     const data = {jobId: args.jobId, recipeSha256: args.recipeSha256, ...await handlers[name](env, owner, args)};
     return reply({structuredContent: data, content: [{type: "text", text: JSON.stringify(data)}]});
   } catch {
