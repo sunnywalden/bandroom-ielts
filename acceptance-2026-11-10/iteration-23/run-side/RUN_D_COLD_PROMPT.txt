@@ -1,0 +1,63 @@
+Bandroom G3 · v26 · RUN D · 只读冷参考（G5 coldRunId；R1 闭环）
+
+2026-11-13（UTC）。官方 Work 周期任务的第 4 次独立 scheduled run，在 C 完成回写之后执行。本 run **只读**：不 claim、不续租、不写 checkpoint、不 retry、不写反馈、不新增/修改任何 job 或订阅。目的是为 G5 `acoustic-recovery.coldRunId` 提供独立官方冷执行记录，并按验签器的全局窗计划生成 cold 证据。全程 confirmations=0；无 Mac/本机/隧道/Chrome 执行；不接触生产/学习者数据。
+
+【固定值（逐字使用）】
+jobId=qa_hosted_ad79ac58-4d0a-4a29-af0f-c4f37cbc5710
+taskId=Automation_c2ca080ec67481919b9db50329e9e943
+recipeSha256=9022a23414fc0201753c3a06e81209d058c9ae0fbe5c6dff5893042e909e95c2
+recordingSha256=55ecb210cf3490448df0372344d2618086709bf2c6112e6f6354e18ac6b232d1，441322 字节
+modelSha256=913f30b95735bbf2e7d80dc93066e2730dc02bd0d19fb4a6b7cfefab657ed07c（encoder-int8）；head=813c832bebffb68087be08544a1be100c1e73dda6f431d7a4731084e22430370
+本地解码参考（仅比较）：1,099,196 样本、859 窗、duration 68.699728s。云端必须实测。
+禁止使用 487a9db6…、4779241b…、21440 等 v24/CUPE/合成夹具值。
+
+【0. 与 C 的关系（不得混淆）】
+- 本 run 的 officialRunId 必须是 A/B/C 之外的**第 4 个**官方 run，写入 official-run-history.runs 与 `coldRunId`；**绝不能复用 C 的 runId**，也不得把 server runId 当 officialRunId。
+- C 内的 cold 仍是 §4C 的 in-run 硬门；D 是 G5 导出的独立冷参考。D 的 v26 输出应与 C 的 cold/resumed 逐字节一致；不一致时如实报告，不写完成、不改 C。
+- 本 run 不 claim 声学租约（claim 会提高 fence 并可能干扰已完成状态），因此不产生 server fence；证据中 fence 写 `null` 并注明「read-only reference run, no acoustic lease」。平台记录仍须有 officialRunId/automationId/taskId/时间/source。
+
+【1. 只读状态与工具发现】
+- 用 ALL_TOOLS 列出真实工具：read_qa_status、read_qa_text_answer、read_qa_recording_bytes、read_qa_site_events、record_qa_run_event、read_qa_probe_blob（如需交付）。
+- read_qa_status()：记录 UTC、pendingAcoustics（HJK 应已 complete/不在列表）、pendingCount、subscriptionActive；确认 read_qa_text_answer({jobId}) 返回 completion（C 已完成）。若 C 未完成，停止并报告，本 run 不替代 C。
+- 只读；若平台/工具强制任何写操作或确认，记录确切错误并停止，不绕过。
+
+【2. reuse-or-deliver + 离线安装（M12）】
+- 核对 /mnt/data/bandroom-v26-probe-int8 的 8 文件名称/字节/SHA（encoder 50,410,797/913f30b9…；probe 455,850/813c83…；ORT 17,244,912/0d640eb9…；flatbuffers/packaging/protobuf/sympy/mpmath 见 FIXED_CONTRACT）。全部匹配→复用并记录新增 MCP 读取 0；否则只重传缺失/不匹配文件（read_qa_probe_blob structuredContent，≤4,194,304 B/次，PTY ≤3000 字符/行 + @end，严格 base64 校验）。离线 `pip --no-index --no-deps --target <deps>` 安装，断言 onnxruntime 1.24.4。记录复用/新增、耗时、吞吐。
+
+【3. 读原声并生成 bandroom-decode-v1 checkpoint】
+- 用 read_qa_recording_bytes({jobId,offset,length:24576}) 分 18 片读取，只读 structuredContent，严禁回显 base64；拼接后校验 441,322 B 与 recordingSha256。
+- FFmpeg 解码 16 kHz 单声道 s16le；记录 samples、PCM SHA、container/codec/sourceRateHz/sourceChannels/containerDurationMs/primingMs（未实测写 null）。
+- 生成 `offline-checkpoint.bin`，格式必须逐字为 bandroom-decode-v1：
+  4 字节大端 manifest 长度 + 规范 JSON manifest（排序键、紧凑分隔符）+ s16le PCM。
+  manifest 字段恰为：format="bandroom-decode-v1"、analysisVersion=<release analysisVersion，取自 analysis-config.json/identity>、inputSha256=recordingSha256、inputBytes=441322、container、codec、sourceRateHz、sourceChannels、containerDurationMs、primingMs、pcm={encoding:"s16le",rateHz:16000,channels:1,sampleCount,sha256=<s16le PCM SHA>}、mediaTime={originMs:0,samplesPerSecond:16000}。
+  记录 checkpoint 字节数、SHA-256、sampleCount。
+
+【4. 按验签器全局窗计划生成 acoustic-NN.bin（R2）】
+常量（与 bandroom_acoustic.acoustic_stage 完全一致）：frameSamples=320、receptiveSamples=400、windowFrames=800、contextFrames=100、offsets=(0,400)、features=768。plan 由解码 sampleCount 推导：
+  total=(sampleCount-400)//320+1；
+  对 offset∈{0,400}：first 从 (offset-800 if offset else 0) 开始、步长 800；start=max(0,first)、end=min(total,first+800)、left=max(0,start-100)、right=min(total,end+100)。
+对每个 window：
+  startSample=left*320；endSample=(right-1)*320+400；pcm=s16[startSample:endSample]/32768 转 float32；
+  encoder.run(["features"],{"samples":pcm[None]})；断言 shape=(1,right-left,768)、float32、有限；
+  raw=features[0,start-left:end-left].astype("<f4").tobytes()；长度必须=(end-start)*768*4。
+  identity={environment:<release environmentId>,taskId,attemptId,revision,inputSha256:recordingSha256,inputBytes:441322,decodeSha256:<checkpoint SHA>,bundleSha256:<runtimeBundleSha256>,configSha256:sha256(canonical analysis-config.json.acousticConfig)}。`analysis-config.json` 从 /mnt/data/bandroom-g5/analysis-config.json 读取并经 SHA 校验；取不到则停止，不得自造。
+  传输块 = 4 字节大端 header 长度 + 规范 JSON header{format:"bandroom-acoustic-chunk-v1",chunkIndex,previousSha256,decodeSha256,bundleSha256,configSha256,featuresSha256} + raw；previous 从 decodeSha256 起逐块链接。
+  写 `acoustic-00.bin…acoustic-NN.bin`；断言 chunk 数=len(plan)（HJK 预期 10）、≤24、digest 互异。
+- 严禁把 v26 的 6 片 prefix（每片 20,996 B）当作 acoustic-NN.bin；尺寸/格式/plan 都不同。
+- 记录 plan 原文、每块 SHA/字节、identity、decodeSha256、features SHA。
+
+【5. head 冷输出与 C 交叉核对】
+- 对每个 offset：按 plan 顺序拼接该 offset 的 raw，reshape(-1,768)，调用 head 得 frame/ctc/boundary；断言 shape 与有限；记录 frames 与 frameSha256/ctcSha256/boundarySha256（float32 小端字节）。
+- 另按 v26 859 窗（120/80 ms）完整冷跑，输出 `cold-output.f32le`（长度应为 1,718,000 B；若实测不同记录实际值），记录 SHA。若 C 的 cold/resumed 文件可用于比较（通过只读读回或 C 报告），断言逐字节一致；不可用则记录「comparison unavailable」并不伪造。
+- 若 B 的 `/mnt/data/bandroom-g5/acoustic-plan/acoustic-00..05.bin` 仍存在，逐块比较 D 的 cold 前 6 块 SHA；不一致即报告（说明 B/C/D 的 PCM 或 identity 不一致），不覆盖。
+- 生成 `plan.json`：{sampleCount, identity, plan, chunks:[{sha256,bytes}], cold:[transfer digests], coldStageIndexSha256, coldLogits, cut:6}。其中 `chunks` 必须是 **raw payload** 的 `sha256`/`bytes`（`AcousticStore.manifest` 用 raw 摘要）；`cold`/`acoustic-NN.bin` 用 **transfer blob** 摘要。`coldStageIndexSha256=sha256(canonical{format:"bandroom-acoustic-features-v1",identity,plan,chunks,nextChunk:len(chunks)})`，chunks 为 raw 摘要列表。cut 固定为 6（B 持久化 0..5，C 恢复并续算 6..9）；若实际块数不等于 10，记录实际值并停止，不猜。
+
+【6. 站点事件（只读审计）】
+- officialRunId 取本次平台引用（优先 userTurnId，否则 turnKey；≤128；与 official-run-history 一致）。
+- 调用 record_qa_run_event({type:"offline_run",officialRunId,fence:<平台/租约可用的正数；本 run 无租约则用 1，并在报告中注明 no-lease>,jobId,automationId:taskId,isolated:true,detail:{taskId,attemptId,attemptRevision,recordingId,recordingSha256,inputBytes,analysisVersion,stage:"cold",readOnly:true}})。source 不传。
+- 不发射 claimed/checkpoint/feedback 类事件（D 没有这些动作）；read_qa_site_events({officialRunId}) 导出为 /mnt/data/v26-run-d-site-events.json。
+
+【7. 证据与退出】
+- 写 /mnt/data/v26-run-d.json：officialRunId、server runId（无则 null）、automationId、startedAt/endedAt、source="scheduled-cloud"、clientExecution=false、approvalPrompts=0、quotaObservation、confirmations=0、readOnly=true、noAcousticLease=true、复用/交付统计、解码与 checkpoint、plan/chunks/SHA、coldLogits、cold-output SHA、与 C 的 byteEqual（或 unavailable）、真实阻塞。
+- executor 导出条目还须含 `coldOfficialRecordRef=<officialRecordRef>` 与 `logits=<coldLogits>`，供 G5 绑定。
+- 另存 /mnt/data/v26-run-d-cold/：offline-checkpoint.bin、plan.json、acoustic-NN.bin、cold-output.f32le、SHA256SUMS。最终回复只给简短数据与路径/字节/SHA，不输出 base64/token/grant。结束本次 run；不要称 G3 已通过。

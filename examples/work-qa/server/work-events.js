@@ -1,4 +1,5 @@
 import {createAudioProcessingTable, createAudioProcessingIndex} from "./audio-processing.js";
+import {completeAcousticFeedback, completionReceipt} from "./acoustic-completion.js";
 import qaAudio from "./qa-audio.js";
 import {
   createRecordingObjectTable, maxHostedRecordingBytes, openRecording, readRecordingBody,
@@ -92,6 +93,9 @@ export async function prepareEvents(env) {
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS qa_review_reads (
       job_id TEXT PRIMARY KEY, attempts INTEGER NOT NULL, failures INTEGER NOT NULL,
       last_error TEXT, last_at INTEGER NOT NULL
+    )`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS qa_drained_jobs (
+      job_id TEXT PRIMARY KEY, owner TEXT NOT NULL, reason TEXT NOT NULL, at INTEGER NOT NULL
     )`),
   ]);
 }
@@ -645,14 +649,11 @@ export async function pendingReviews(env, owner) {
       AND (q.status = 'sent' OR (q.status = 'leased' AND q.lease_until > ?)
         OR EXISTS (SELECT 1 FROM qa_review_recovery c WHERE c.job_id = q.id AND c.generation > 0))
       AND NOT EXISTS (SELECT 1 FROM qa_feedback f WHERE f.job_id = q.id)
+      AND NOT EXISTS (SELECT 1 FROM qa_drained_jobs d WHERE d.job_id = q.id AND d.owner = ?)
     ORDER BY evidenceReady DESC, q.created_at, q.id LIMIT 50`)
-    .bind(owner, Date.now(), hostedPrefix.length, hostedPrefix, Date.now()).all();
+    .bind(owner, Date.now(), hostedPrefix.length, hostedPrefix, Date.now(), owner).all();
   return {pendingCount: results[0]?.pendingCount ?? 0,
-    pendingReviews: results.map(result => {
-      const row = {...result, evidenceReady: Boolean(result.evidenceReady)};
-      delete row.pendingCount;
-      return row;
-    })};
+    pendingReviews: results.map(({pendingCount, evidenceReady, ...row}) => ({...row, evidenceReady: Boolean(evidenceReady)}))};
 }
 
 export async function reviewTool(env, owner, name, args, reply, error) {
@@ -663,11 +664,39 @@ export async function reviewTool(env, owner, name, args, reply, error) {
       OR EXISTS (SELECT 1 FROM qa_review_recovery r WHERE r.job_id = q.id AND r.generation > 0))`;
   const unavailable = () => error(-32602, "This QA review is unavailable for the signed-in owner.");
   const now = Date.now();
+  const result = value => reply({content: [{type: "text", text: JSON.stringify(value)}]});
+  // An already accepted acoustic job outlives a delivery subscription's TTL.
+  // Revocation still denies all writes, including idempotent receipt recovery.
+  const acousticJob = await env.DB.prepare(`SELECT p.evidence, a.state FROM qa_outbox q
+    JOIN qa_subscriptions s ON s.id = q.subscription JOIN qa_pronunciation p ON p.job_id = q.id
+    JOIN qa_audio_processing a ON a.job_id = q.id AND a.owner = s.owner
+    WHERE q.id = ? AND s.owner = ? AND s.verified = 1 AND q.kind = 'event' AND p.mode = ?`)
+    .bind(id, owner, fullSpeechMode).first();
+  if (name === "write_qa_text_feedback" && acousticJob) {
+    return completeAcousticFeedback(env, owner, args, acousticJob.evidence, reply, error);
+  }
+  if (name === "read_qa_text_answer" && acousticJob?.state === "complete") {
+    // Completed acoustic jobs use the durable owner receipt, independent of webhook delivery.
+    const completion = await completionReceipt(env, owner, id);
+    if (completion) {
+      const saved = await env.DB.prepare(`SELECT f.quote, f.feedback FROM qa_feedback f
+        JOIN qa_outbox q ON q.id = f.job_id JOIN qa_subscriptions s ON s.id = q.subscription AND s.owner = f.owner
+        WHERE f.job_id = ? AND f.owner = ? AND s.verified = 1`).bind(id, owner).first();
+      if (!saved) return unavailable();
+      const review = completion.mode === "diagnostic" ? {kind: "acoustic_diagnostic", quoteForWrite: saved.quote,
+        scope: "Completed QA transport/inference diagnostic. Not a qualified pronunciation judgement."}
+        : await pronunciationReview(id, JSON.parse(acousticJob.evidence), fullSpeechMode);
+      await recordReviewRead(env, id);
+      return result({jobId: id, ...review, ...saved, completion});
+    }
+  }
   const job = await env.DB.prepare(`SELECT p.evidence AS acousticEvidence, p.mode AS acousticMode FROM qa_outbox q JOIN qa_subscriptions s ON s.id = q.subscription
     LEFT JOIN qa_pronunciation p ON p.job_id = q.id
     WHERE ${available}`).bind(id, owner, now, now).first();
   if (!job) return unavailable();
-  const result = value => reply({content: [{type: "text", text: JSON.stringify(value)}]});
+  if (name === "write_qa_text_feedback" && job.acousticMode === fullSpeechMode) {
+    return error(-32009, "Full-speech feedback requires an accepted acoustic job and its active completion binding.");
+  }
   const missingEvidence = async (reason, message) => {
     // Count only authorized answer reads, including a blocked read. A failed
     // write or another owner's request must not alter the read audit.
@@ -685,7 +714,15 @@ export async function reviewTool(env, owner, name, args, reply, error) {
   }
   let review = {...fixture, kind: "text", synthetic: true};
   if (isPronunciation(id) || job.acousticMode) {
-    if (!job.acousticEvidence) return missingEvidence("acoustic_evidence_missing", "Acoustic evidence has not been recorded. Read the original with read_qa_recording_bytes; do not infer pronunciation from a transcript.");
+    if (!job.acousticEvidence) {
+      const receipt = await completionReceipt(env, owner, id);
+      if (name === "read_qa_text_answer" && receipt) {
+        await recordReviewRead(env, id);
+        return result({jobId: id, kind: "acoustic_diagnostic", quoteForWrite: "[原声录音]", completion: receipt,
+          scope: "Completed QA transport/inference diagnostic. Not a qualified pronunciation judgement."});
+      }
+      return missingEvidence("acoustic_evidence_missing", "Acoustic evidence has not been recorded. Read the original with read_qa_recording_bytes; do not infer pronunciation from a transcript.");
+    }
     review = await pronunciationReview(id, JSON.parse(job.acousticEvidence), job.acousticMode);
   } else if (isSpeaking(id)) {
     const evidence = await env.DB.prepare("SELECT segments FROM qa_speech_evidence WHERE job_id = ?").bind(id).first();
@@ -701,10 +738,7 @@ export async function reviewTool(env, owner, name, args, reply, error) {
   }
   const {quote} = args;
   let {feedback} = args;
-  if (job.acousticMode === fullSpeechMode) {
-    feedback = quote === review.quoteForWrite && fullSpeechFeedback(review, args);
-    if (!feedback) return error(-32602, "Use the exact answer quote and sound evidence from this recording.");
-  } else if (typeof quote !== "string" || (review.writePrefix ? quote !== review.answer : quote.length < 18 || !review.answer.includes(quote)) ||
+  if (typeof quote !== "string" || (review.writePrefix ? quote !== review.answer : quote.length < 18 || !review.answer.includes(quote)) ||
       typeof feedback !== "string" || feedback.trim().length < 25 || feedback.length > 1200) {
     return error(-32602, "Quote the isolated answer exactly and provide specific feedback.");
   }
@@ -750,13 +784,14 @@ export async function reviewStatus(env, owner, target = null) {
     LEFT JOIN qa_review_reads reads ON reads.job_id = q.id
     LEFT JOIN qa_audio_processing a ON a.job_id = q.id AND a.owner = s.owner
     WHERE s.owner = ? AND (? IS NULL OR q.id = ?) ORDER BY q.created_at DESC LIMIT 12`).bind(Date.now(), Date.now(), owner, target, target).all();
-  const jobs = results.map(({segments, acousticEvidence, recordingId, ...job}) => ({
+  const jobs = await Promise.all(results.map(async ({segments, acousticEvidence, recordingId, ...job}) => ({
     ...job,
     subscriptionActive: Boolean(job.subscriptionActive),
     ...(recordingId && {recordingUrl: "/qa/reviews/" + recordingId + "/recording"}),
     ...(segments && {segments: JSON.parse(segments)}),
     ...(acousticEvidence && {acousticEvidence: JSON.parse(acousticEvidence)}),
-  }));
+    completion: await completionReceipt(env, owner, job.jobId),
+  })));
   return target ? jobs.length ? json(jobs[0]) : json({error: "Not found"}, 404) : json({jobs});
 }
 
