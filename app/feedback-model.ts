@@ -23,6 +23,9 @@ export type ReviewTaskStatus = {
   id: string; attemptId: string; kind: 'text'|'speaking'; state: string; stage: string;
   nextAt: number; lastError: string|null; updatedAt: number;
 };
+export type AutomationStatus = {
+  connected: boolean; lastSuccessAt: number|null; nextExpectedAt: number|null; status: string|null;
+};
 type Candidate = Omit<ReviewAttempt,'id'>;
 export async function reviewAttempts(day:number, entry:Record<string,string>):Promise<ReviewAttempt[]> {
   const candidates:Candidate[]=[];

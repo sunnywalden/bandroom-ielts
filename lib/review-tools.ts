@@ -1,13 +1,12 @@
 import { z } from "zod/v4";
 import { acousticChunkIndex, acousticChunkLimit } from "./acoustic-chunk";
 import { env } from "cloudflare:workers";
-import { getDb } from "@/db";
 import { createAnalysisBundleGrant } from "./analysis-bundle";
 import { decodeCheckpointLimit, issueReviewTransfer, requireDecodedInput } from "./review-transfer";
 import { validateSpeakingAnalysis } from "./speaking-analysis";
 import {
   claimReviewTasks, completeReviewTask, failReviewTask, getReviewTask, readReviewCheckpoint, readReviewReceipt,
-  recordAnalysisEvent, renewReviewLease, reportSchedulerHeartbeat, saveReviewCheckpoint,
+  recordAnalysisEvent, renewReviewLease, reportSchedulerHeartbeat, reviewTaskDb, saveReviewCheckpoint,
   ReviewTaskError, type ReviewTask, type ReviewTaskDb,
 } from "./review-tasks";
 
@@ -137,9 +136,6 @@ export const reviewTools = [
   annotations: { readOnlyHint: readOnly, destructiveHint: false, idempotentHint: true },
 }));
 
-function reviewDb(): ReviewTaskDb {
-  return getDb().$client as unknown as ReviewTaskDb;
-}
 
 async function snapshotFor(db: ReviewTaskDb, userId: string, task: ReviewTask) {
   const row = await db.prepare("SELECT snapshot FROM review_jobs WHERE id=? AND user_id=?")
@@ -159,7 +155,7 @@ function toolError(error: unknown) {
 }
 
 export async function callReviewTool(userId: string, name: string, args: unknown) {
-  const db = reviewDb();
+  const db = reviewTaskDb();
   try {
     switch (name) {
       case "claim_review_tasks": {
@@ -227,6 +223,14 @@ export async function callReviewTool(userId: string, name: string, args: unknown
           throw new ReviewTaskError("analysis_required", "A speaking task needs structured acoustic evidence and the original recording SHA-256.");
         if (task.kind === "text" && input.analysis)
           throw new ReviewTaskError("analysis_not_allowed", "Text-only tasks cannot claim acoustic evidence.");
+        if (input.pronunciation) {
+          if (task.kind !== "speaking" || !task.recordingId)
+            throw new ReviewTaskError("pronunciation_not_allowed", "Pronunciation requires a speaking task with a submitted recording.");
+          if (!input.recordingSha256)
+            throw new ReviewTaskError("recording_required", "A pronunciation rating must bind the original recording digest.");
+          if (input.pronunciation.recordingId !== task.recordingId)
+            throw new ReviewTaskError("recording_mismatch", "The pronunciation rating refers to a different recording than this task.");
+        }
         const analysisVersion = input.analysisVersion ?? task.analysisVersion;
         if (task.kind === "speaking" && task.state !== "completed") {
           if (!analysisVersion) throw new ReviewTaskError("analysis_version_required", "A speaking completion needs an analysis version.");
@@ -259,7 +263,8 @@ export async function callReviewTool(userId: string, name: string, args: unknown
           feedback: {
             id: `rt:${input.taskId}`, day: task.day, stage: attempt.stage, attempt: task.attemptId,
             evidence: input.evidence, feedback: input.feedback,
-            pronunciation: input.pronunciation, analysis: input.analysis,
+            pronunciation: input.pronunciation ? { ...input.pronunciation, scope: "partial" as const } : undefined,
+            analysis: input.analysis,
           },
           receipt: {
             recordingSha256: input.recordingSha256 ?? null,
@@ -354,8 +359,8 @@ export async function callReviewTool(userId: string, name: string, args: unknown
       }
       case "report_scheduler_heartbeat": {
         const input = heartbeatSpec.parse(args);
-        await reportSchedulerHeartbeat(db, input);
-        return { content: [{ type: "text", text: JSON.stringify({ ok: true }) }] };
+        const result = await reportSchedulerHeartbeat(db, {...input, ownerUserId: userId});
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, updated: result.updated }) }] };
       }
       default:
         return { content: [{ type: "text", text: JSON.stringify({ error: "unknown_review_tool" }) }], isError: true };

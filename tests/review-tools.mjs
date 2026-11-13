@@ -40,6 +40,7 @@ globalThis.testEnv={BUCKET:globalThis.testBucket,ANALYSIS_SIGNING_KEY:'s'.repeat
 registerHooks({resolve(specifier,context,next){
   if(specifier==='@/db')return {url:'data:text/javascript,export function getDb(){return globalThis.testDb}',shortCircuit:true};
   if(specifier==='cloudflare:workers')return {url:'data:text/javascript,export const env=globalThis.testEnv',shortCircuit:true};
+  if(specifier==='@/app/chatgpt-auth')return {url:'data:text/javascript,export async function getChatGPTUser(){return globalThis.testUser}',shortCircuit:true};
   if(specifier.startsWith('@/'))return {url:new URL('../'+specifier.slice(2)+'.ts',import.meta.url).href,shortCircuit:true};
   if((specifier.startsWith('./')||specifier.startsWith('../'))&&!specifier.endsWith('.ts')&&context.parentURL?.endsWith('.ts'))
     return {url:new URL(specifier+'.ts',context.parentURL).href,shortCircuit:true};
@@ -47,13 +48,14 @@ registerHooks({resolve(specifier,context,next){
 }});
 
 const {callReviewTool,reviewTools}=await import('../lib/review-tools.ts');
+const {POST:takeoverPost}=await import('../app/api/review-tasks/takeover/route.ts');
 const {GET:bundleGet}=await import('../app/api/analysis-bundle/route.ts');
 const {GET:transferGet,PUT:transferPut}=await import('../app/api/review-transfer/route.ts');
 const owner='tool-owner',other='tool-other';
 let checks=0;
 function eq(actual,expected,label){assert.deepEqual(actual,expected,label);checks++}
 function text(result){return JSON.parse(result.content[0].text)}
-function reset(){sql.exec('DELETE FROM analysis_artifacts; DELETE FROM review_tasks; DELETE FROM review_jobs; DELETE FROM review_receipts; DELETE FROM teacher_feedback; DELETE FROM analysis_events; DELETE FROM scheduler_heartbeats; DELETE FROM learner_states;')}
+function reset(){sql.exec('DELETE FROM analysis_artifacts; DELETE FROM review_tasks; DELETE FROM review_jobs; DELETE FROM review_receipts; DELETE FROM teacher_feedback; DELETE FROM analysis_events; DELETE FROM scheduler_heartbeats; DELETE FROM automation_heartbeats; DELETE FROM learner_states;')}
 function insertJob({taskId=randomUUID(),kind='text',recordingId=null,recording,analysisVersion=null,stage='write'}={}){
   const jobId='v2:'+randomUUID();
   const snapshot={sourceId:'v1:fixture',attempt:{id:jobId,day:12,field:'writeOriginal',index:0,stage,title:'Fixture',kind:'subjective',response:'Fixture answer',conditions:'',evidence:''},context:{prompt:'Fixture prompt'}};
@@ -386,8 +388,12 @@ eq([replayFirst.status,await replayFirst.json()],
 const firstAddition={kind:'addition',wordIndex:0,phoneIndex:1,target:'∅',actual:'AH',startMs:100,endMs:170};
 const secondAddition={...firstAddition,gapOccurrence:1,startMs:230,endMs:290};
 const analysis={...baseAnalysis,inputSha256:source.sha256,inputBytes:source.bytes,errors:[firstAddition,secondAddition]};
+const pronunciation={band:7,reviewedWholeClip:true,observation:'Synthetic heard fixture',recordingId};
 const completion={taskId:transferJob.taskId,fence:3,feedback:'Synthetic test feedback',evidence:'Synthetic test',
-  analysisVersion:'analysis-v1',recordingSha256:source.sha256,analysis};
+  analysisVersion:'analysis-v1',recordingSha256:source.sha256,analysis,pronunciation};
+eq(text(await callReviewTool(owner,'complete_review_task',{...completion,
+  pronunciation:{...pronunciation,recordingId:randomUUID()}})).error,'recording_mismatch',
+  'pronunciation must bind the task recording');
 eq(text(await callReviewTool(owner,'complete_review_task',completion)).error,'checkpoint_not_read','new lease must read committed bytes');
 failOriginalRead=true;
 const restoredGrant=await transferGrant(3,'read_decode');
@@ -412,14 +418,26 @@ eq(completed.duplicate,false,'speaking result committed');
 const receipt=text(await callReviewTool(owner,'read_review_receipt',{taskId:transferJob.taskId}));
 eq([receipt.id,receipt.attemptId,receipt.fence,receipt.recordingSha256],[completed.receiptId,transferJob.jobId,3,source.sha256],
   'receipt is bound to the exact attempt, recording and current fence');
-const feedbackRow=sql.prepare('SELECT attempt,analysis_json FROM teacher_feedback WHERE review_task_id=?').get(transferJob.taskId);
+const feedbackRow=sql.prepare('SELECT attempt,analysis_json,pronunciation FROM teacher_feedback WHERE review_task_id=?').get(transferJob.taskId);
+const savedPronunciation=JSON.parse(feedbackRow.pronunciation);
 eq([feedbackRow.attempt,JSON.parse(feedbackRow.analysis_json).errors],[transferJob.jobId,[firstAddition,secondAddition]],
   'both additions and their timestamps are attached to the original attempt');
+eq([savedPronunciation.band,savedPronunciation.recordingId,savedPronunciation.scope],[7,recordingId,'partial'],
+  'pronunciation is bound to the listening recording');
 const learnerRow=sql.prepare('SELECT revision,state FROM learner_states WHERE user_id=?').get(owner);
 eq([learnerRow.revision,JSON.parse(learnerRow.state)],[24,learnerState],'feedback did not change learner state');
 objects.delete(sourceKey);
 const completionReplay=text(await callReviewTool(owner,'complete_review_task',completion));
 eq([completionReplay.duplicate,completionReplay.receiptId],[true,completed.receiptId],'completion replay does not need recording storage');
+eq(text(await callReviewTool(owner,'complete_review_task',{...completion,
+  pronunciation:{...pronunciation,band:6.5}})).error,'receipt_conflict',
+  'v2 receipt binds pronunciation, not only text evidence');
+const textPronJob=insertJob();
+const pronTasks=text(await callReviewTool(owner,'claim_review_tasks',{limit:3,clientRunId:'run-pron-text'})).tasks;
+const textPronTask=pronTasks.find(task=>task.id===textPronJob.taskId);
+eq(Boolean(textPronTask),true,'text task claimed for pronunciation refusal');
+eq(text(await callReviewTool(owner,'complete_review_task',{taskId:textPronJob.taskId,fence:textPronTask.fence,
+  feedback:'Text',evidence:'Text',pronunciation})).error,'pronunciation_not_allowed','text task cannot claim pronunciation');
 const transferRuns=sql.prepare(`SELECT client_run_id,event FROM analysis_events WHERE task_id=?
   AND stage IN ('read_input','decode')
   AND outcome IN ('ok','error') AND event IN ('read_review_recording','save_review_checkpoint','read_review_checkpoint')
@@ -445,7 +463,27 @@ eq([failed.state,failed.nextAt],['retry_wait',retryAt],'retry state');
 eq((await callReviewTool(owner,'report_scheduler_heartbeat',{
   automationId:'Automation_fixture',generation:1,clientRunId:'run-1',status:'finished',startedAt:1,finishedAt:2,nextExpectedAt:3,
 })).isError,undefined,'heartbeat');
+eq(sql.prepare('SELECT user_id FROM automation_heartbeats WHERE automation_id=?').get('Automation_fixture').user_id,owner,'heartbeat is owner scoped');
 eq((await callReviewTool(owner,'read_review_receipt',{taskId:retryJob.taskId})).content[0].text,'null','no receipt for retry');
 eq((await callReviewTool(owner,'unknown_tool',{})).isError,true,'unknown tool');
 
+// manual takeover route revokes an automatic claim before copying a request
+reset();
+const takeoverJob=insertJob();
+globalThis.testUser={userId:owner};
+const takeoverRequest=body=>new Request('https://fixture.example/api/review-tasks/takeover',{method:'POST',
+  headers:{origin:'https://fixture.example','content-type':'application/json'},body:JSON.stringify(body)});
+globalThis.testUser=null;
+eq((await takeoverPost(takeoverRequest({attemptId:takeoverJob.jobId}))).status,401,'takeover requires sign-in');
+const foreignTakeover=new Request('https://fixture.example/api/review-tasks/takeover',{method:'POST',
+  headers:{origin:'https://evil.test','content-type':'application/json'},body:JSON.stringify({attemptId:takeoverJob.jobId})});
+eq((await takeoverPost(foreignTakeover)).status,403,'takeover rejects foreign origin');
+globalThis.testUser={userId:owner};
+const takeover=await takeoverPost(takeoverRequest({attemptId:takeoverJob.jobId}));
+eq(takeover.status,200,'takeover succeeds');
+const takeoverBody=await takeover.json();
+eq([takeoverBody.claimed,takeoverBody.state],[true,'running'],'takeover claims the task');
+eq(sql.prepare('SELECT claim_kind FROM review_tasks WHERE id=?').get(takeoverJob.taskId).claim_kind,'manual','takeover records a manual claim');
+eq(await callReviewTool(owner,'claim_review_tasks',{limit:1,clientRunId:'auto-after-takeover'}).then(text).then(v=>v.tasks.length),0,'automatic claim cannot follow takeover');
+globalThis.testUser=null;
 console.log(JSON.stringify({suite:'review-tools',checks,passed:true}));

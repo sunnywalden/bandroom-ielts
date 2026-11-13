@@ -3,15 +3,15 @@ export const clipLimit = 12 * 1024 * 1024;
 export const archiveLimit = 512 * 1024 * 1024;
 export const uuid = /^[a-f\d]{8}-[a-f\d]{4}-4[a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/i;
 export type Clip = {id:string;size:number;type:string;hash:string};
-export type RemoteClip = Clip & {ticket:string};
-export type Review = {id:string;day:number;stage:string;attempt:string;evidence:string;feedback:string;createdAt:string;pronunciation?:unknown};
+export type RemoteClip = Clip & {ticket:string;meta?:Record<string,string>};
+export type Review = {id:string;day:number;stage:string;attempt:string;evidence:string;feedback:string;createdAt:string;pronunciation?:unknown;analysis?:unknown};
 export type Course = {day:number;lesson:unknown};
 export type SavedReviewJob = {
   id:string;day:number;submissionKey:string;requestHash:string;revision:number;createdAt:string;
   snapshot:import("./review-jobs").FrozenReview;
 };
 export type Data = {state:Record<string,unknown>|null;revision:number;feedback:Review[];lessons:Course[];reviewJobs?:SavedReviewJob[]};
-export type Manifest = Data & {format:1|2;owner:string;created:string;audio:RemoteClip[];local:string[]};
+export type Manifest = Data & {format:1|2|3;owner:string;created:string;audio:RemoteClip[];local:string[]};
 export type Signed = {manifest:Manifest;signature:string};
 export type Header = {signed:Signed;device:Clip[];deviceSeal?:string};
 const encoder=new TextEncoder();
@@ -40,7 +40,7 @@ export async function unpack(file:Blob) {
   if(!length||length>metadataLimit||start+length>file.size) throw Error('备份头部损坏。');
   const header=JSON.parse(await file.slice(start,start+length).text()) as Header;
   const m=header.signed?.manifest, media=m?.audio;
-  if(!m||![1,2].includes(m.format)||(m.format===2&&!Array.isArray(m.reviewJobs))||!Array.isArray(media)||!Array.isArray(m.local)||!Array.isArray(header.device)||
+  if(!m||![1,2,3].includes(m.format)||((m.format===2||m.format===3)&&!Array.isArray(m.reviewJobs))||!Array.isArray(media)||!Array.isArray(m.local)||!Array.isArray(header.device)||
     header.device.length!==m.local.length||header.device.some((c,i)=>c.id!==m.local[i]))throw Error('备份录音索引损坏。');
   let offset=start+length;
   const result:Blob[]=[];
