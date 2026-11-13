@@ -252,7 +252,7 @@ test('automatic task status replaces the manual copy prompt until feedback arriv
  assert.match(section().textContent,/批改已返回/);
 });
 
-test('completed acoustic feedback renders IPA, error kind and the exact clip window',async()=>{
+test('pronunciation hints stay hidden while the precision gate is not met',async()=>{
  state.entries[12].writeOriginal='Independent answer with a clear /s/ for think.';
  const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='writeOriginal');
  assert.ok(source);
@@ -260,15 +260,14 @@ test('completed acoustic feedback renders IPA, error kind and the exact clip win
  await mount();
  const section=document.querySelector('[aria-label="写作首稿反馈"]');
  assert.ok(section);
- assert.ok(section.querySelector('[aria-label="发音错误与回听"]'));
- assert.match(section.textContent,/think/);
- assert.match(section.textContent,/θ/);
- assert.match(section.textContent,/替换/);
- assert.match(section.textContent,/92%/);
- assert.match(section.textContent,/原录音引用不可用/);
+ assert.equal(section.querySelectorAll('.af-error-card').length,0);
+ assert.equal(section.querySelectorAll('[aria-label="实验性发音提示与回听"]').length,0);
+ assert.match(section.textContent,/注意 think 的词首音/);
+ assert.doesNotMatch(section.textContent,/θ/);
+ assert.doesNotMatch(section.textContent,/92%/);
 });
 
-test('speaking acoustic card seeks, stops and retries the original recording window',async()=>{
+test('hidden pronunciation hints do not mount a recording player',async()=>{
  const audioId='22222222-2222-4222-8222-222222222222';
  state.stage='speak';
  state.entries[12]={speakingPhase:'review',speakingComplete:'yes',
@@ -280,36 +279,14 @@ test('speaking acoustic card seeks, stops and retries the original recording win
  await mount();
  const section=document.querySelector('[aria-label="口语 Part 2 · 首次回答反馈"]');
  assert.ok(section);
- const audio=section.querySelector('audio');
- assert.ok(audio);
- assert.equal(new URL(audio.src).searchParams.get('id'),audioId);
- assert.equal(audio.preload,'none');
- let starts=0,stops=0,paused=true;
- Object.defineProperty(audio,'paused',{get:()=>paused});
- audio.play=async()=>{
-  starts++;
-  if(starts===1)throw new Error('fixture playback unavailable');
-  paused=false;
- };
- audio.pause=()=>{paused=true;stops++};
- await click(button('回听 think'));
- assert.match(section.textContent,/原录音暂时无法播放/);
- await click(button('重试回听 think'));
- assert.equal(audio.currentTime,.5);
- await click(button('停止回听'));
- assert.equal(starts,2);
- assert.equal(stops,1);
- await click(button('回听 think'));
- assert.equal(starts,3);
- audio.currentTime=2;await act(async()=>audio.dispatchEvent(new Event('timeupdate')));
- assert.equal(audio.currentTime,2);
- assert.equal(audio.paused,true);
- assert.equal(stops,2);
- assert.ok(button('回听 think'));
+ assert.equal(section.querySelectorAll('.af-error-card').length,0);
+ assert.equal(section.querySelectorAll('[aria-label="实验性发音提示与回听"]').length,0);
+ assert.equal(section.querySelectorAll('audio').length,0);
+ assert.match(section.textContent,/回听这一处词首音/);
  assert.equal(puts().length,0);
 });
 
-test('two additions in the same gap replay distinct windows on the same original recording',async()=>{
+test('additions are hidden by the precision-first display',async()=>{
  const audioId='33333333-3333-4333-8333-333333333333';
  state.stage='speak';
  state.entries[12]={speakingPhase:'review',speakingComplete:'yes',
@@ -323,14 +300,9 @@ test('two additions in the same gap replay distinct windows on the same original
   feedback:'回听两处添音。',createdAt:'2026-11-09T01:00:00Z',analysis:{errors:[first,second]}}];
  await mount();
  const section=document.querySelector('[aria-label="口语 Part 2 · 首次回答反馈"]');
- const cards=[...section.querySelectorAll('.af-error-card')];
- assert.equal(cards.length,2);
- const clipStarts=[.5,2];
- for(const [index,card] of cards.entries()){
-  const audio=card.querySelector('audio');
-  assert.equal(new URL(audio.src).searchParams.get('id'),audioId);
-  await click(card.querySelector('button'));
-  assert.equal(audio.currentTime,clipStarts[index]);
- }
+ assert.ok(section);
+ assert.equal(section.querySelectorAll('.af-error-card').length,0);
+ assert.equal(section.querySelectorAll('[aria-label="实验性发音提示与回听"]').length,0);
+ assert.match(section.textContent,/回听两处添音/);
  assert.equal(puts().length,0);
 });

@@ -12,8 +12,8 @@
     "start": "node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
-    "test:review": "node --experimental-strip-types --test tests/catalogue.test.mjs tests/speaking-draft.test.mjs tests/speaking-workflow.mjs tests/pronunciation.test.mjs tests/feedback-ui.mjs && node --import ./scripts/sites-env.mjs tests/recording-recovery.mjs && node tests/state-api.mjs && node tests/coach-audio.mjs && node tests/feedback-api.mjs && node --experimental-strip-types tests/review-tasks.mjs && node --experimental-strip-types tests/review-tools.mjs && node --import ./scripts/sites-env.mjs tests/backup.mjs --miniflare",
-    "test:pronunciation": "node --experimental-strip-types --test tests/pronunciation.test.mjs",
+    "test:review": "node --experimental-strip-types --test tests/catalogue.test.mjs tests/speaking-draft.test.mjs tests/speaking-workflow.mjs tests/pronunciation.test.mjs tests/pronunciation-display.test.mjs tests/feedback-ui.mjs && node --import ./scripts/sites-env.mjs tests/recording-recovery.mjs && node tests/state-api.mjs && node tests/coach-audio.mjs && node tests/feedback-api.mjs && node --experimental-strip-types tests/review-tasks.mjs && node --experimental-strip-types tests/review-tools.mjs && node --import ./scripts/sites-env.mjs tests/backup.mjs --miniflare",
+    "test:pronunciation": "node --experimental-strip-types --test tests/pronunciation.test.mjs tests/pronunciation-display.test.mjs",
     "test:browser-fixture": "node --import ./scripts/sites-env.mjs tests/browser-fixture.mjs"
   },
   "dependencies": {
