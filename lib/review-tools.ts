@@ -1,13 +1,12 @@
 import { z } from "zod/v4";
 import { acousticChunkIndex, acousticChunkLimit } from "./acoustic-chunk";
 import { env } from "cloudflare:workers";
-import { getDb } from "@/db";
 import { createAnalysisBundleGrant } from "./analysis-bundle";
 import { decodeCheckpointLimit, issueReviewTransfer, requireDecodedInput } from "./review-transfer";
 import { validateSpeakingAnalysis } from "./speaking-analysis";
 import {
   claimReviewTasks, completeReviewTask, failReviewTask, getReviewTask, readReviewCheckpoint, readReviewReceipt,
-  recordAnalysisEvent, renewReviewLease, reportSchedulerHeartbeat, saveReviewCheckpoint,
+  recordAnalysisEvent, renewReviewLease, reportSchedulerHeartbeat, reviewTaskDb, saveReviewCheckpoint,
   ReviewTaskError, type ReviewTask, type ReviewTaskDb,
 } from "./review-tasks";
 
@@ -137,9 +136,6 @@ export const reviewTools = [
   annotations: { readOnlyHint: readOnly, destructiveHint: false, idempotentHint: true },
 }));
 
-function reviewDb(): ReviewTaskDb {
-  return getDb().$client as unknown as ReviewTaskDb;
-}
 
 async function snapshotFor(db: ReviewTaskDb, userId: string, task: ReviewTask) {
   const row = await db.prepare("SELECT snapshot FROM review_jobs WHERE id=? AND user_id=?")
@@ -159,7 +155,7 @@ function toolError(error: unknown) {
 }
 
 export async function callReviewTool(userId: string, name: string, args: unknown) {
-  const db = reviewDb();
+  const db = reviewTaskDb();
   try {
     switch (name) {
       case "claim_review_tasks": {
@@ -363,8 +359,8 @@ export async function callReviewTool(userId: string, name: string, args: unknown
       }
       case "report_scheduler_heartbeat": {
         const input = heartbeatSpec.parse(args);
-        await reportSchedulerHeartbeat(db, {...input, ownerUserId: userId});
-        return { content: [{ type: "text", text: JSON.stringify({ ok: true }) }] };
+        const result = await reportSchedulerHeartbeat(db, {...input, ownerUserId: userId});
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, updated: result.updated }) }] };
       }
       default:
         return { content: [{ type: "text", text: JSON.stringify({ error: "unknown_review_tool" }) }], isError: true };

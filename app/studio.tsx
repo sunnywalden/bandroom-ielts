@@ -81,7 +81,7 @@ export default function Studio(){
    let recoveryMessage='';
    const owner=data.account, prefix=pendingPrefix(owner);
    if(activeAccount.current && activeAccount.current!==owner){
-    accessLocked.current=true;setLocked(true)
+    lockAccess('登录账号已改变。请重新读取进度，核对当前账号。')
    }
    let pendingKeys:string[]=[];
    try{pendingKeys=Object.keys(localStorage).filter(key=>key.startsWith(prefix))}catch{/* Storage may be unavailable. */}
@@ -131,21 +131,35 @@ export default function Studio(){
  // One read-only subscription for the page. It never refreshes drafts or advances the checkpoint.
  const pendingTaskCount=reviewTasks.filter(task=>['queued','running','retry_wait'].includes(task.state)).length;
  const runningTaskCount=reviewTasks.filter(task=>task.state==='running').length;
+ const unresolvedLinkCount=reviewLinks.filter(link=>!feedback.some(row=>row.attempt===link.id)).length;
+ const completedUnfetched=reviewTasks.filter(task=>task.state==='completed'&&!feedback.some(row=>row.attempt===task.attemptId)).length;
+ const pollSince=useRef<number|null>(null);
  useEffect(()=>{
   if(!account||locked)return
-  const poll=()=>{if(document.visibilityState==='visible')void refreshCoach()}
-  // Poll only while a task is actually pending. A running task refreshes
-  // quickly; a queued task backs off so a disconnected Work automation does
-  // not keep the page at a 3-second loop forever. Returning to the tab always
-  // performs one fresh read.
-  const timer=pendingTaskCount>0?setInterval(poll,runningTaskCount>0?3_000:15_000):undefined
-  window.addEventListener('focus',poll);document.addEventListener('visibilitychange',poll)
+  const active=pendingTaskCount>0||unresolvedLinkCount>0||completedUnfetched>0
+  if(!active)pollSince.current=null
+  const live=Boolean(automation?.connected)
+  const refreshNow=()=>{if(document.visibilityState==='visible')void refreshCoach()}
+  const interval=runningTaskCount>0?(live?3_000:10_000)
+   :pendingTaskCount>0?(live?3_000:15_000)
+   :3_000
+  let timer:ReturnType<typeof setInterval>|undefined
+  const poll=()=>{
+   if(document.visibilityState!=='visible')return
+   // A disconnected or unknown automation must not keep the page polling
+   // forever; after 30 minutes the user can refresh or use the manual path.
+   if(pollSince.current===null)pollSince.current=Date.now()
+   if(Date.now()-pollSince.current>30*60_000){if(timer)clearInterval(timer);return}
+   void refreshCoach()
+  }
+  if(active)timer=setInterval(poll,interval)
+  window.addEventListener('focus',refreshNow);document.addEventListener('visibilitychange',refreshNow)
   // This is a request-generation counter, intentionally read at cleanup (not a DOM ref).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  return ()=>{if(timer)clearInterval(timer);window.removeEventListener('focus',poll);document.removeEventListener('visibilitychange',poll);coachRead.current++}
+  return ()=>{if(timer)clearInterval(timer);window.removeEventListener('focus',refreshNow);document.removeEventListener('visibilitychange',refreshNow);coachRead.current++}
  // refreshCoach reads the current account through its ref.
  // eslint-disable-next-line react-hooks/exhaustive-deps
- },[account,locked,pendingTaskCount,runningTaskCount])
+ },[account,locked,pendingTaskCount,runningTaskCount,unresolvedLinkCount,completedUnfetched,automation?.connected,reviewLinks.length,feedback.length])
  async function persist(make:(prev:Snapshot)=>Snapshot,forReview=false){
   if(accessLocked.current||busy.current||revisionAtRead.current===null||!activeAccount.current||sync==='conflict'||sync==='auth'||sync==='load')return false
   busy.current=true;setPending(true);setError('');setSync('write')

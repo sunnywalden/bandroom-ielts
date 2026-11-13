@@ -4,7 +4,7 @@ export const archiveLimit = 512 * 1024 * 1024;
 export const uuid = /^[a-f\d]{8}-[a-f\d]{4}-4[a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/i;
 export type Clip = {id:string;size:number;type:string;hash:string};
 export type RemoteClip = Clip & {ticket:string;meta?:Record<string,string>};
-export type Review = {id:string;day:number;stage:string;attempt:string;evidence:string;feedback:string;createdAt:string;pronunciation?:unknown;analysis?:unknown;analysisOmitted?:true};
+export type Review = {id:string;day:number;stage:string;attempt:string;evidence:string;feedback:string;createdAt:string;pronunciation?:unknown;analysis?:unknown};
 export type Course = {day:number;lesson:unknown};
 export type SavedReviewJob = {
   id:string;day:number;submissionKey:string;requestHash:string;revision:number;createdAt:string;

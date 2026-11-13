@@ -293,10 +293,10 @@ export async function failReviewTask(db: D1Like, userId: string, input: {
   const state = input.retryable ? "retry_wait" : "blocked";
   const nextAt = input.retryable ? (input.nextAt ?? now + 5 * 60_000) : now;
   const row = await db.prepare(`UPDATE review_tasks
-    SET state=?, last_error=?, next_at=?, lease_until=NULL, updated_at=?
+    SET state=?, last_error=?, next_at=?, retry_epoch=retry_epoch+?, lease_until=NULL, updated_at=?
     WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?
     RETURNING ${taskColumns}`)
-    .bind(state, input.code, nextAt, now, input.taskId, userId, input.fence, now)
+    .bind(state, input.code, nextAt, input.retryable ? 1 : 0, now, input.taskId, userId, input.fence, now)
     .first<Record<string, unknown>>();
   const task = toTask(row);
   if (!task) throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
@@ -320,6 +320,7 @@ export async function sha256Json(value: unknown) {
 
 export async function completeReviewTask(db: D1Like, userId: string, input: {
   taskId: string; fence: number; output: Record<string, unknown>;
+  manualGrantSha256?: string;
   feedback: {
     id: string; day: number; stage: string; attempt: string; evidence: string; feedback: string;
     pronunciation?: unknown; analysis?: Record<string, unknown>;
@@ -329,19 +330,35 @@ export async function completeReviewTask(db: D1Like, userId: string, input: {
   };
   now?: number;
 }) {
-  const outputSha256 = await sha256Json(input.output);
   const outputSha256V2 = await sha256Json({
     ...input.output,
     pronunciation: input.feedback.pronunciation ?? null,
   });
-  const matchingReceipt = async () => {
-    const receipt = await readReviewReceipt(db, userId, input.taskId);
+  let outputSha256: string | null = null;
+  const v1Digest = async () => outputSha256 ?? (outputSha256 = await sha256Json(input.output));
+  let cachedReceipt: ReviewReceipt | null | undefined;
+  const matchingReceipt = async (fresh = false) => {
+    if (fresh) cachedReceipt = undefined;
+    const receipt = cachedReceipt !== undefined ? cachedReceipt : (cachedReceipt = await readReviewReceipt(db, userId, input.taskId));
     if (receipt) {
       // Legacy receipts used the v1 digest; new receipts bind pronunciation too.
-      const stored = receipt.outputSha256V2 ?? receipt.outputSha256;
-      const expected = receipt.outputSha256V2 ? outputSha256V2 : outputSha256;
-      if (stored !== expected)
-        throw new ReviewTaskError("receipt_conflict", "A different result was already committed for this task.");
+      if (receipt.outputSha256V2) {
+        if (receipt.outputSha256V2 !== outputSha256V2)
+          throw new ReviewTaskError("receipt_conflict", "A different result was already committed for this task.");
+      } else {
+        if (receipt.outputSha256 !== await v1Digest())
+          throw new ReviewTaskError("receipt_conflict", "A different result was already committed for this task.");
+        // v1 did not hash pronunciation. Compare against the stored row so a
+        // replay cannot silently replace a rating on a pre-upgrade receipt.
+        if (input.feedback.pronunciation !== undefined) {
+          const row = await db.prepare(`SELECT pronunciation FROM teacher_feedback
+            WHERE id=? AND user_id=?`).bind(receipt.feedbackId, userId)
+            .first<{ pronunciation: string | null }>();
+          const stored = row?.pronunciation ? JSON.parse(row.pronunciation) as unknown : null;
+          if (await sha256Json(stored) !== await sha256Json(input.feedback.pronunciation))
+            throw new ReviewTaskError("receipt_conflict", "The stored pronunciation differs from this result.");
+        }
+      }
     }
     return receipt;
   };
@@ -358,6 +375,9 @@ export async function completeReviewTask(db: D1Like, userId: string, input: {
   const now = input.now ?? Date.now();
   if (task.state !== "running" || task.fence !== input.fence || (task.leaseUntil ?? 0) <= now)
     throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
+  if (task.claimKind === "manual" && task.manualGrantSha256 &&
+      input.manualGrantSha256 !== task.manualGrantSha256)
+    throw new ReviewTaskError("manual_grant_invalid", "The manual review grant does not match the current claim.");
   if (input.feedback.attempt !== task.attemptId) throw new ReviewTaskError("attempt_mismatch", "Feedback must bind to the task's exact attempt.");
   if (input.feedback.day !== task.day) throw new ReviewTaskError("attempt_mismatch", "Feedback day differs from the task.");
 
@@ -381,7 +401,7 @@ export async function completeReviewTask(db: D1Like, userId: string, input: {
       ON CONFLICT(task_id) DO NOTHING`)
       .bind(receiptId, input.taskId, userId, task.attemptId, task.attemptRevision,
         input.receipt.recordingSha256 ?? null, input.receipt.analysisVersion ?? task.analysisVersion ?? null,
-        input.fence, input.feedback.id, outputSha256, outputSha256V2,
+        input.fence, input.feedback.id, await v1Digest(), outputSha256V2,
         JSON.stringify(input.receipt.payload ?? {}), now,
         input.taskId, userId, input.fence, now),
     db.prepare(`UPDATE review_tasks
@@ -391,7 +411,7 @@ export async function completeReviewTask(db: D1Like, userId: string, input: {
   ];
   const results = await db.batch(statements) as Array<{ meta?: { changes?: number } }>;
   const changed = results?.[2]?.meta?.changes;
-  const receipt = await matchingReceipt();
+  const receipt = await matchingReceipt(true);
   if (!receipt && changed !== 1) throw new ReviewTaskError("stale_lease", "The task lease expired before completion.");
   if (!receipt) throw new ReviewTaskError("receipt_missing", "The completion receipt was not persisted.");
   return { receipt, duplicate: receipt.id !== receiptId };
@@ -411,6 +431,12 @@ export async function claimManualReviewTask(db: D1Like, userId: string, taskId: 
   now?: number; nonce?: string;
 } = {}) {
   const now = options.now ?? Date.now();
+  const existing = await getReviewTask(db, userId, taskId);
+  if (!existing || existing.state === "completed") return null;
+  // Concurrent manual requests share one live manual claim. Only an expired
+  // manual lease, a pending task, or a live automatic claim is taken over.
+  if (existing.state === "running" && existing.claimKind === "manual" && (existing.leaseUntil ?? 0) > now)
+    return existing;
   const nonce = options.nonce ?? crypto.randomUUID();
   const grantSha256 = await sha256Json({ userId, taskId, now, nonce });
   const row = await db.prepare(`UPDATE review_tasks
@@ -418,11 +444,14 @@ export async function claimManualReviewTask(db: D1Like, userId: string, taskId: 
         notification_epoch=notification_epoch+1, claimed_client_run_id=?,
         lease_until=?, next_at=?, updated_at=?
     WHERE id=? AND user_id=?
-      AND state IN ('queued','retry_wait','blocked','needs_attention','running')
+      AND (state IN ('queued','retry_wait','blocked','needs_attention')
+        OR (state='running' AND (claim_kind<>'manual' OR lease_until<=?)))
     RETURNING ${taskColumns}`)
-    .bind(grantSha256, `manual:${nonce}`, now + LEASE_MS, now, now, taskId, userId)
+    .bind(grantSha256, `manual:${nonce}`, now + LEASE_MS, now, now, taskId, userId, now)
     .first<Record<string, unknown>>();
-  return toTask(row);
+  if (row) return toTask(row);
+  const current = await getReviewTask(db, userId, taskId);
+  return current?.state === "running" && current.claimKind === "manual" ? current : null;
 }
 
 export async function getReviewTask(db: D1Like, userId: string, taskId: string) {
@@ -465,23 +494,24 @@ export async function recordAnalysisEvent(db: D1Like, input: {
 
 export async function reportSchedulerHeartbeat(db: D1Like, input: {
   automationId: string; generation: number; clientRunId: string; status: string;
-  ownerUserId?: string | null;
+  ownerUserId: string;
   startedAt?: number; finishedAt?: number; nextExpectedAt?: number; detail?: string | null; now?: number;
 }) {
   const now = input.now ?? Date.now();
-  await db.prepare(`INSERT INTO scheduler_heartbeats
-    (automation_id, owner_user_id, generation, client_run_id, started_at, finished_at, last_success_at, next_expected_at, status, detail)
+  const result = await db.prepare(`INSERT INTO automation_heartbeats
+    (user_id, automation_id, generation, client_run_id, started_at, finished_at, last_success_at, next_expected_at, status, detail)
     VALUES (?,?,?,?,?,?,?,?,?,?)
-    ON CONFLICT(automation_id) DO UPDATE SET
-      owner_user_id=COALESCE(excluded.owner_user_id, scheduler_heartbeats.owner_user_id),
+    ON CONFLICT(user_id, automation_id) DO UPDATE SET
       generation=excluded.generation, client_run_id=excluded.client_run_id,
-      started_at=COALESCE(excluded.started_at, scheduler_heartbeats.started_at),
-      finished_at=COALESCE(excluded.finished_at, scheduler_heartbeats.finished_at),
-      last_success_at=CASE WHEN excluded.status='finished' THEN ? ELSE scheduler_heartbeats.last_success_at END,
-      next_expected_at=COALESCE(excluded.next_expected_at, scheduler_heartbeats.next_expected_at),
+      started_at=COALESCE(excluded.started_at, automation_heartbeats.started_at),
+      finished_at=COALESCE(excluded.finished_at, automation_heartbeats.finished_at),
+      last_success_at=CASE WHEN excluded.status='finished' THEN ? ELSE automation_heartbeats.last_success_at END,
+      next_expected_at=COALESCE(excluded.next_expected_at, automation_heartbeats.next_expected_at),
       status=excluded.status, detail=excluded.detail
-    WHERE excluded.generation >= scheduler_heartbeats.generation`)
-    .bind(input.automationId, input.ownerUserId ?? null, input.generation, input.clientRunId,
+    WHERE (excluded.started_at IS NOT NULL AND excluded.started_at >= COALESCE(automation_heartbeats.started_at,0))
+       OR (excluded.started_at IS NULL AND excluded.generation >= automation_heartbeats.generation)`)
+    .bind(input.ownerUserId, input.automationId, input.generation, input.clientRunId,
       input.startedAt ?? null, input.finishedAt ?? null, input.status === "finished" ? now : null,
       input.nextExpectedAt ?? null, input.status, input.detail ?? null, now).run();
+  return { updated: (result.meta?.changes ?? 0) > 0 };
 }

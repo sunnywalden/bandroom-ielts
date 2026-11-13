@@ -5,7 +5,7 @@ import {readFile,mkdtemp,rm,readdir} from 'node:fs/promises';
 import {DatabaseSync} from 'node:sqlite';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {randomBytes} from 'node:crypto';
+import {createHmac,randomBytes} from 'node:crypto';
 import http from 'node:http';
 const require=createRequire(import.meta.url),wrangler=createRequire(require.resolve('wrangler/package.json'));
 const esbuild=wrangler('esbuild'),tmp=await mkdtemp(join(tmpdir(),'bandroom-backup-'));
@@ -27,6 +27,10 @@ function isolatedBucket(){
 }
 let db,bucket,count=0;
 const ok=x=>{assert.ok(x);count++};
+function canonicalBackup(v){if(!v||typeof v!=='object')return JSON.stringify(v);
+ if(Array.isArray(v))return '['+v.map(canonicalBackup).join(',')+']';
+ return '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonicalBackup(v[k])).join(',')+'}';}
+const signManifest=(key,m)=>createHmac('sha256',Buffer.from(key,'hex')).update('manifest\n'+canonicalBackup(m)).digest('hex');
 const denied=async(fn,status)=>{await assert.rejects(fn,e=>e.status===status);count++;};
 try{
  if(process.argv.includes('--miniflare')){
@@ -95,12 +99,29 @@ try{
  await run(`INSERT INTO teacher_feedback(id,user_id,day,stage,attempt,evidence,feedback,created_at,pronunciation,analysis_json)
    VALUES(?,?,?,?,?,?,?,?,?,?)`,'fixture-analysis',uid,11,'speak','analysis attempt','audible fixture','analysis review','2026-11-09T01:05:00.000Z',null,
    JSON.stringify({errors:[{kind:'substitution',wordIndex:0,phoneIndex:0,target:'TH',actual:'S',startMs:100,endMs:200}]}));
+ // Format 3 must carry an empty reviewJobs array even before any v2 job exists.
+ const metaOnly=await exportBackup(db,bucket,uid,secret);
+ ok(metaOnly.manifest.format===3&&Array.isArray(metaOnly.manifest.reviewJobs)&&metaOnly.manifest.reviewJobs.length===0);
+ const metaDevice={id:dev,size:wave.length,type:'audio/wav',hash:await hash(wave)};
+ const metaArchive=pack({signed:metaOnly,device:[metaDevice]},
+   [...metaOnly.manifest.audio.map(c=>new Blob([c.id===clip1?wave:webm])),new Blob([wave])]);
+ ok((await unpack(metaArchive)).header.signed.manifest.format===3);
  const jobKey=crypto.randomUUID(),jobId='v2:'+jobKey;
  const frozen={sourceId:'v1:speakingFollowup:0:'+'a'.repeat(64),attempt:{id:jobId,day:11,recordingId:clip1},context:{prompt:'Fixture question'}};
  await run('INSERT INTO review_jobs VALUES(?,?,?,?,?,?,?,?)',jobId,uid,11,jobKey,'b'.repeat(64),4,JSON.stringify(frozen),'2026-11-09T01:00:00.000Z');
  const signed=await exportBackup(db,bucket,uid,secret),m=signed.manifest;
  ok(m.format===3&&m.reviewJobs[0].id===jobId);
- ok(m.audio.length===2&&m.audio[0].meta.digest===clip1Digest&&m.feedback.length===2&&m.feedback[1].analysis.errors[0].kind==='substitution'&&m.lessons[0].day===17&&m.local[0]===dev&&m.state.reports.W1);
+ const clip1Audio=m.audio.find(c=>c.id===clip1);
+ ok(m.audio.length===2&&clip1Audio.meta.digest===clip1Digest&&m.feedback.length===2&&m.feedback[1].analysis.errors[0].kind==='substitution'&&m.lessons[0].day===17&&m.local[0]===dev&&m.state.reports.W1);
+ // A format-2 manifest signed by the previous release must still plan against
+ // rows that now carry analysis_json.
+ const oldManifest=structuredClone(m);
+ oldManifest.format=2;
+ oldManifest.feedback=oldManifest.feedback.map(row=>{const copy={...row};delete copy.analysis;return copy;});
+ oldManifest.audio=oldManifest.audio.map(clip=>{const copy={...clip};delete copy.meta;return copy;});
+ const oldSigned={manifest:oldManifest,signature:signManifest(secret,oldManifest)};
+ const compatible=await restoreBackup(db,bucket,uid,secret,oldSigned,false);
+ ok(compatible.feedback===0&&compatible.reviewJobs===0);
  const device=[{id:dev,size:wave.length,type:'audio/wav',hash:await hash(wave)}];
  const header={signed,device,deviceSeal:await sealDevice(uid,secret,signed,device)};await verifyDevice(uid,secret,header);count++;
  await denied(()=>verifyDevice(uid,secret,{...header,device:[{...device[0],hash:'0'.repeat(64)}]}),422);
@@ -127,6 +148,13 @@ try{
  const duplicate=await restoreBackup(db,bucket,uid,secret,signed,true);ok(!duplicate.stateToAdd&&duplicate.reviewJobs===0&&duplicate.lessons===0&&duplicate.feedback===0&&duplicate.missing.length===0);
  await run('DELETE FROM teacher_feedback WHERE user_id=?',uid);await restoreBackup(db,bucket,uid,secret,signed,true);
  ok((await exportBackup(db,bucket,uid,secret)).manifest.feedback[0].feedback==='review');
+ // Same bytes, missing private metadata: plan must treat the clip as missing
+ // and restoreAudio must write the metadata instead of rejecting a no-op put.
+ await bucket.put(addr(clip1),wave,{httpMetadata:{contentType:'audio/wav'}});
+ const metadataPlan=await restoreBackup(db,bucket,uid,secret,signed,false);
+ ok(metadataPlan.missing.includes(clip1));
+ await restoreAudio(bucket,uid,secret,m.audio.find(c=>c.id===clip1),wave);
+ ok((await exportBackup(db,bucket,uid,secret)).manifest.audio.find(c=>c.id===clip1).meta.digest===clip1Digest);
  await bucket.put(addr(clip1),webm,{httpMetadata:{contentType:'audio/webm'}});
  await denied(()=>restoreAudio(bucket,uid,secret,m.audio.find(c=>c.id===clip1),wave),409);
  await denied(()=>restoreBackup(db,bucket,uid,secret,signed,true),409);

@@ -126,6 +126,21 @@ export const schedulerHeartbeats = sqliteTable("scheduler_heartbeats", {
   detail: text("detail"),
 });
 
+// Per-owner heartbeat state. Kept separate from the legacy singleton table so
+// v13 can still write scheduler_heartbeats during a rollback.
+export const automationHeartbeats = sqliteTable("automation_heartbeats", {
+  userId: text("user_id").notNull(),
+  automationId: text("automation_id").notNull(),
+  generation: integer("generation").notNull().default(0),
+  clientRunId: text("client_run_id"),
+  startedAt: integer("started_at"),
+  finishedAt: integer("finished_at"),
+  lastSuccessAt: integer("last_success_at"),
+  nextExpectedAt: integer("next_expected_at"),
+  status: text("status").notNull(),
+  detail: text("detail"),
+}, table => [primaryKey({ columns: [table.userId, table.automationId] })]);
+
 // Append-only audit trail. Never store audio, answer text or tokens here.
 export const analysisEvents = sqliteTable("analysis_events", {
   id: integer("id").primaryKey({ autoIncrement: true }),

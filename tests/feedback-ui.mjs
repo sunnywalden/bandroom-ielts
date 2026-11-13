@@ -58,6 +58,7 @@ beforeEach(()=>{
  state={version:1,day:12,stage:'write',finished:false,completed:Array.from({length:11},(_,i)=>i+1),checked:{11:'2026-11-09'},started:{11:'2026-11-02',12:'2026-11-09'},exam:'未选择',practice:{},entries:{11:{speakingReview:'Preserved older feedback'},12:{writeOriginal:'Independent original answer.',writeCondition:'独立 · 未计时'}}};
  globalThis.fetch=async(url,init={})=>{
   calls.push([url,init]);
+  if(url==='/api/review-tasks/takeover')return response(200,{claimed:true,taskId:'task-queued',fence:2,state:'running'});
   if(url==='/api/coach')return coachFault?coachFault(init):response(200,{account:'fixture-feedback-ui',extras:{},feedback:structuredClone(feedback),reviewLinks:structuredClone(reviewLinks),reviewTasks:structuredClone(reviewTasks),automation});
   if(url==='/api/state'&&!init.method)return response(200,{account:'fixture-feedback-ui',revision,state:structuredClone(state)});
   if(url==='/api/state'){
@@ -126,8 +127,8 @@ test('first-draft failure retains text; delayed duplicate clicks create only one
  state=payload.state;revision++;
  await act(async()=>resolve(await receipt(payload)));await flush();
  assert.equal(state.entries[12].writeOriginal,draft);assert.equal(state.stage,'write');assert.equal(state.finished,false);
- assert.match(text(),/待在 Work 中发起/);
- assert.equal(reviewLinks.length,1);assert.match(reviewLinks[0].id,/^v2:/);
+ assert.match(text(),/已提交|正在核对批改队列/);
+ assert.equal(reviewLinks.length,1);assert.match(reviewLinks[0].id,/^v2:/);assert.ok(poll,'a fresh submission starts polling for its task');
  stateFault=null;feedback=[await row('writeOriginal','Exact new attempt review from Work.')];await tick();
  assert.match(document.querySelector('[aria-label="写作首稿反馈"]').textContent,/Exact new attempt review/);
  assert.deepEqual(state.completed,Array.from({length:11},(_,i)=>i+1));
@@ -217,7 +218,7 @@ test('speaking self-review freezes while saving and stays for feedback until the
  state=payload.state;revision++;
  await act(async()=>resolve(await receipt(payload)));await flush();stateFault=null;
  assert.equal(state.stage,'speak');assert.equal(state.entries[12].speakingComplete,'yes');
- assert.match(document.querySelector('[aria-label="口语自评反馈"]').textContent,/待在 Work 中发起/);
+ assert.match(document.querySelector('[aria-label="口语自评反馈"]').textContent,/已提交|正在核对批改队列/);
  feedback=[await row('speakingReview','Practise one cause and consequence.')];await tick();
  assert.match(document.querySelector('[aria-label="口语自评反馈"]').textContent,/Practise one cause/);
  assert.equal(puts().length,1);assert.equal(state.stage,'speak');
@@ -250,6 +251,9 @@ test('queued task shows honest Work status and keeps the manual fallback',async(
  assert.match(section().textContent,/等待 Work 领取/);
  assert.ok(!section().textContent.includes('可以关闭页面'));
  assert.ok(section().textContent.includes('复制本题批改请求'));
+ await click(button('复制本题批改请求'));
+ assert.ok(calls.some(([url])=>url==='/api/review-tasks/takeover'),'manual copy revokes the automatic claim');
+ assert.match(section().textContent,/已接管/);
  reviewTasks=[{...reviewTasks[0],state:'completed'}];
  feedback=[{id:'task-feedback',day:12,stage:'write',attempt:link.id,evidence:'Automatic task evidence',feedback:'Automatic task correction',createdAt:'2026-11-09T01:00:00Z'}];
  await tick();
@@ -271,6 +275,36 @@ test('stale automation is labeled as disconnected in the queue',async()=>{
  assert.ok(section);
  assert.match(section.textContent,/自动批改当前未连接/);
  assert.ok(section.textContent.includes('复制本题批改请求'));
+});
+test('a dead running task is not shown as actively analyzing',async()=>{
+ state.entries[12].writeOriginal='Independent answer left running by a dead worker.';
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='writeOriginal');
+ assert.ok(source);
+ const link={id:'v2:dead-running',sourceId:source.id,day:12};
+ reviewLinks=[link];
+ reviewTasks=[{id:'task-dead',attemptId:link.id,kind:'text',state:'running',stage:'read_input',nextAt:0,lastError:null,updatedAt:Date.now()}];
+ automation={connected:false,lastSuccessAt:null,nextExpectedAt:null,status:null};
+ await mount();
+ const section=document.querySelector('[aria-label="写作首稿反馈"]');
+ assert.ok(section);
+ assert.match(section.textContent,/连接已断开/);
+ assert.ok(!section.textContent.includes('Work 正在分析'));
+});
+test('a completed task without feedback keeps reading and offers refresh',async()=>{
+ state.entries[12].writeOriginal='Independent answer completed before feedback arrived.';
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='writeOriginal');
+ assert.ok(source);
+ const link={id:'v2:completed-no-feedback',sourceId:source.id,day:12};
+ reviewLinks=[link];
+ reviewTasks=[{id:'task-completed',attemptId:link.id,kind:'text',state:'completed',stage:'finalize',nextAt:0,lastError:null,updatedAt:Date.now()}];
+ await mount();
+ const section=document.querySelector('[aria-label="写作首稿反馈"]');
+ assert.ok(section);
+ assert.match(section.textContent,/正在读取反馈/);
+ assert.ok(button('重新读取反馈'));
+ assert.ok(poll,'completed-without-feedback keeps polling');
+ feedback=[await row('writeOriginal','Completed task correction')];await tick();
+ assert.match(section.textContent,/Completed task correction/);
 });
 
 test('completed acoustic feedback renders IPA, error kind and the exact clip window',async()=>{

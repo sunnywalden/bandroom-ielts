@@ -43,6 +43,13 @@
       "when": 1794537165967,
       "tag": "0005_shallow_jazinda",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1794540297699,
+      "tag": "0006_overrated_sprite",
+      "breakpoints": true
     }
   ]
 }
