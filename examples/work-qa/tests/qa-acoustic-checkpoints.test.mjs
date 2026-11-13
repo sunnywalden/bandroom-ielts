@@ -5,7 +5,7 @@ import {mkdir, mkdtemp, readdir, readFile, rm, writeFile} from "node:fs/promises
 import {tmpdir} from "node:os";
 import {join, resolve} from "node:path";
 import {fileURLToPath} from "node:url";
-import fullInterviewAudio from "../server/qa-full-interview-audio.js";
+import fullInterviewAudio from "../dist/server/qa-full-interview-audio.js";
 
 const [wranglerProject, recordingPath, artifactDirectory, exportDirectory] = process.argv.slice(2);
 if (!wranglerProject || Boolean(recordingPath) !== Boolean(artifactDirectory) ||
@@ -14,7 +14,7 @@ if (!wranglerProject || Boolean(recordingPath) !== Boolean(artifactDirectory) ||
 }
 const require = createRequire(resolve(wranglerProject, "package.json"));
 const {Miniflare, Response} = createRequire(require.resolve("wrangler/package.json"))("miniflare");
-const root = fileURLToPath(new URL("../server/", import.meta.url));
+const root = fileURLToPath(new URL("../dist/server/", import.meta.url));
 const temp = await mkdtemp(join(tmpdir(), "bandroom-qa-checkpoints-"));
 const owner = "d2-checkpoint-owner";
 const ownerHeaders = {"oai-authenticated-user-id": owner};
@@ -213,6 +213,15 @@ try {
   assert.equal(next.nextIndex, parts.length + 1);
   assert.equal((await write(second, next.nextIndex, firstPart)).status, "lease_lost");
 
+  // B1: the checkpoint part limit is exactly 24576 bytes.
+  const active = {...replacement, fence: next.fence};
+  assert.equal((await write(active, next.nextIndex, Buffer.alloc(maxPart, 77))).status, "stored");
+  const tooLarge = Buffer.alloc(maxPart + 1, 78);
+  assert.equal((await raw("save_qa_acoustic_checkpoint", {...active, index: next.nextIndex + 1,
+    sha256: digest(tooLarge), base64: tooLarge.toString("base64")})).error.code, -32602);
+  assert.equal((await raw("save_qa_acoustic_checkpoint", {...active, index: next.nextIndex + 1,
+    sha256: digest("x"), base64: "!!!!"})).error.code, -32602);
+
   const unsubscribe = await rpc("events/unsubscribe", {id: subscription.result.id});
   assert.ifError(unsubscribe.error);
   assert.deepEqual(await pending(), []);
@@ -229,7 +238,7 @@ try {
     checks: ["MCP catalog", "owner isolation", "integrity", "lease renewal", "lease expiry takeover", "ordered writes", "concurrent append",
       "corruption repair", "missing object repair", "retry idempotence", "retry backoff",
       "runtime restart", "stale lease", "concurrent claim", "same byte sequence", "cross-run append",
-      "D2 job scope", "fixed recipe", "pending discovery", "subscription expiration and revocation", "no feedback writes"],
+      "D2 job scope", "fixed recipe", "pending discovery", "subscription expiration and revocation", "no feedback writes", "24576-byte part boundary"],
   }));
 } finally {
   await worker.dispose();

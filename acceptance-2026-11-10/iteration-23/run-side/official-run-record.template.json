@@ -1,0 +1,196 @@
+{
+  "schema": "bandroom.qa.official-run-record.v1",
+  "note": "Fill one block per official Work run from the platform run history/UI. Server runId/fence and platform turn/message IDs are separate bindings (M8). Unknown platform fields stay null with a reason; never invent them.",
+  "automationId": "Automation_c2ca080ec67481919b9db50329e9e943",
+  "jobId": "qa_hosted_ad79ac58-4d0a-4a29-af0f-c4f37cbc5710",
+  "taskId": "Automation_c2ca080ec67481919b9db50329e9e943",
+  "recipeSha256": "9022a23414fc0201753c3a06e81209d058c9ae0fbe5c6dff5893042e909e95c2",
+  "isolated": true,
+  "runs": [
+    {
+      "step": "A",
+      "automationId": "Automation_c2ca080ec67481919b9db50329e9e943",
+      "server": {
+        "runId": "<LOWERCASE_HEX_UUID>",
+        "fence": 1,
+        "fenceExpected": "1 after B4 QA-only lease reset",
+        "nextIndex": 0,
+        "leaseUntil": "<UTC_EPOCH_MS>",
+        "recordingSha256": "55ecb210cf3490448df0372344d2618086709bf2c6112e6f6354e18ac6b232d1"
+      },
+      "official": {
+        "automationId": "Automation_c2ca080ec67481919b9db50329e9e943",
+        "userTurnId": null,
+        "assistantMessageId": null,
+        "turnKey": null,
+        "officialRecordRef": "<WORK_RUN_HISTORY_URL_OR_ID>",
+        "startedAt": "<UTC>",
+        "endedAt": "<UTC>",
+        "source": "scheduled-cloud",
+        "clientExecution": false,
+        "approvalPrompts": 0,
+        "quotaObservation": "<what the platform reported>"
+      },
+      "observed": {
+        "retryReason": "recording_read_failed",
+        "retryStatus": "retry_scheduled",
+        "retryAvailableAt": "<UTC_EPOCH_MS>",
+        "nextIndexAfter": 0,
+        "injectedBy": "orchestration-layer",
+        "serverHook": false,
+        "confirmations": 0
+      }
+    },
+    {
+      "step": "B",
+      "automationId": "Automation_c2ca080ec67481919b9db50329e9e943",
+      "server": {
+        "runId": "<LOWERCASE_HEX_UUID>",
+        "fence": 2,
+        "fenceExpected": "fence_A + 1",
+        "nextIndex": 7,
+        "leaseUntil": "<UTC_EPOCH_MS>",
+        "recordingSha256": "55ecb210cf3490448df0372344d2618086709bf2c6112e6f6354e18ac6b232d1"
+      },
+      "official": {
+        "automationId": "Automation_c2ca080ec67481919b9db50329e9e943",
+        "userTurnId": null,
+        "assistantMessageId": null,
+        "turnKey": null,
+        "officialRecordRef": "<WORK_RUN_HISTORY_URL_OR_ID>",
+        "startedAt": "<UTC>",
+        "endedAt": "<UTC>",
+        "source": "scheduled-cloud",
+        "clientExecution": false,
+        "approvalPrompts": 0,
+        "quotaObservation": "<what the platform reported>"
+      },
+      "observed": {
+        "prefixBytes": 125976,
+        "prefixSha256": "<MEASURED_PREFIX_SHA256>",
+        "recordingVerified": {
+          "bytes": 441322,
+          "sha256": "55ecb210cf3490448df0372344d2618086709bf2c6112e6f6354e18ac6b232d1"
+        },
+        "partCount": 6,
+        "partSha256": ["<SHA_1>", "<SHA_2>", "<SHA_3>", "<SHA_4>", "<SHA_5>", "<SHA_6>"],
+        "planCut": 6,
+        "planChunkSha256": ["<RAW_SHA_0>", "…", "<RAW_SHA_5>"],
+        "planTransferSha256": ["<TRANSFER_SHA_0>", "…", "<TRANSFER_SHA_5>"],
+        "decodeSha256": "<BANDROOM_DECODE_V1_CHECKPOINT_SHA256>",
+        "pcmSha256": "<MEASURED_CLOUD_PCM_SHA256>",
+        "samples": 1099196,
+        "windows": 859,
+        "deliveryReused": false,
+        "mcpProbeReads": 25,
+        "retryReason": "compute_budget",
+        "remainingWindows": 851,
+        "confirmations": 0
+      }
+    },
+    {
+      "step": "C",
+      "automationId": "Automation_c2ca080ec67481919b9db50329e9e943",
+      "server": {
+        "runId": "<LOWERCASE_HEX_UUID>",
+        "fence": 3,
+        "fenceExpected": "fence_A + 2",
+        "nextIndex": 8,
+        "leaseUntil": "<UTC_EPOCH_MS>",
+        "recordingSha256": "55ecb210cf3490448df0372344d2618086709bf2c6112e6f6354e18ac6b232d1"
+      },
+      "official": {
+        "automationId": "Automation_c2ca080ec67481919b9db50329e9e943",
+        "userTurnId": null,
+        "assistantMessageId": null,
+        "turnKey": null,
+        "officialRecordRef": "<WORK_RUN_HISTORY_URL_OR_ID>",
+        "startedAt": "<UTC>",
+        "endedAt": "<UTC>",
+        "source": "scheduled-cloud",
+        "clientExecution": false,
+        "approvalPrompts": 0,
+        "quotaObservation": "<what the platform reported>"
+      },
+      "observed": {
+        "coldOutputSha256": "<MEASURED_HJK_OUTPUT_SHA256>",
+        "resumedOutputSha256": "<MEASURED_HJK_OUTPUT_SHA256>",
+        "coldEqualsResumedBytes": true,
+        "outputIndex": 7,
+        "outputSha256": "<SHA_OF_CHECKPOINT_7_BYTES>",
+        "planCut": 6,
+        "planSuffixSha256": ["<TRANSFER_SHA_6>", "…", "<TRANSFER_SHA_9>"],
+        "restoreMode": "persisted",
+        "firstWriteDuplicate": false,
+        "replayDuplicate": true,
+        "replaySavedAtMatches": true,
+        "staleFenceErrorCode": -32009,
+        "staleFenceError": "Completion binding conflict; a previous fence or different output cannot write.",
+        "feedbackCount": 1,
+        "confirmations": 0
+      }
+    },
+    {
+      "step": "D",
+      "server": {
+        "runId": null,
+        "fence": null,
+        "fenceExpected": "none: read-only reference run, no acoustic lease",
+        "nextIndex": null,
+        "leaseUntil": null,
+        "recordingSha256": "55ecb210cf3490448df0372344d2618086709bf2c6112e6f6354e18ac6b232d1"
+      },
+      "official": {
+        "automationId": "Automation_c2ca080ec67481919b9db50329e9e943",
+        "userTurnId": null,
+        "assistantMessageId": null,
+        "turnKey": null,
+        "officialRecordRef": "<WORK_RUN_HISTORY_URL_OR_ID>",
+        "startedAt": "<UTC>",
+        "endedAt": "<UTC>",
+        "source": "scheduled-cloud",
+        "clientExecution": false,
+        "approvalPrompts": 0,
+        "quotaObservation": "<what the platform reported>"
+      },
+      "observed": {
+        "readOnly": true,
+        "noAcousticLease": true,
+        "checkpointSha256": "<BANDROOM_DECODE_V1_CHECKPOINT_SHA256>",
+        "sampleCount": 1099196,
+        "planChunks": 10,
+        "acousticChunkSha256": ["<SHA_0>", "<SHA_N>"],
+        "coldStageIndexSha256": "<SHA256_OF_ACOUSTIC_MANIFEST>",
+        "coldLogits": ["<offset 0 frame/ctc/boundary SHA>", "<offset 400 ...>"],
+        "coldOutputSha256": "<MEASURED_HJK_OUTPUT_SHA256>",
+        "coldEqualsC_bytes": true,
+        "confirmations": 0
+      }
+    }
+  ],
+  "emptyQueueWakes": [
+    {
+      "officialRunId": "<OFFICIAL_RUN_ID>",
+      "officialRecordRef": "<WORK_RUN_HISTORY_URL_OR_ID>",
+      "automationId": "Automation_c2ca080ec67481919b9db50329e9e943",
+      "source": "scheduled-cloud",
+      "clientExecution": false,
+      "approvalPrompts": 0,
+      "discoveredCount": 0,
+      "createdCount": 0,
+      "pendingCount": 0,
+      "pendingAcoustics": 0,
+      "subscriptionActive": true,
+      "startedAt": "<UTC>"
+    }
+  ],
+  "coldRun": {
+    "note": "Run D is the read-only cold reference. Its officialRunId becomes acoustic-recovery.coldRunId and must differ from A/B/C; never reuse C. The verifier requires a fourth official record and a distinct cloud-executor row.",
+    "officialRunId": "<RUN_D_OFFICIAL_RUN_ID>",
+    "officialRecordRef": "<WORK_RUN_HISTORY_URL_OR_ID>",
+    "executionId": "<COLD_EXECUTION_ID>",
+    "readOnly": true,
+    "cacheEmpty": true,
+    "restoredChunks": []
+  }
+}

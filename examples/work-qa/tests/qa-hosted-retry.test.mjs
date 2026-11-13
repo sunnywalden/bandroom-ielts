@@ -9,7 +9,7 @@ const [wranglerProject] = process.argv.slice(2);
 if (!wranglerProject) throw new Error("Pass the installed Wrangler project path.");
 const require = createRequire(resolve(wranglerProject, "package.json"));
 const { Miniflare, Response } = createRequire(require.resolve("wrangler/package.json"))("miniflare");
-const root = fileURLToPath(new URL("../server/", import.meta.url));
+const root = fileURLToPath(new URL("../dist/server/", import.meta.url));
 const origin = "http://localhost";
 const owner = "qa-owner";
 const url = "https://chatgpt.com/bandroom-qa-callback";
