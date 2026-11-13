@@ -19,7 +19,7 @@ export async function findSubmission(userId: string, submissionKey: string) {
 }
 
 export async function frozenReviews(userId: string, day?: number) {
-  return getDb().select({ id: reviewJobs.id, day: reviewJobs.day, snapshot: reviewJobs.snapshot })
+  return getDb().select({ id: reviewJobs.id, day: reviewJobs.day, revision: reviewJobs.revision, snapshot: reviewJobs.snapshot })
     .from(reviewJobs).where(day === undefined ? eq(reviewJobs.userId, userId)
       : and(eq(reviewJobs.userId, userId), eq(reviewJobs.day, day))).all();
 }
