@@ -60,6 +60,11 @@ export const reviewTasks = sqliteTable("review_tasks", {
   state: text("state").notNull().default("queued"),
   fence: integer("fence").notNull().default(0),
   attempts: integer("attempts").notNull().default(0),
+  claimKind: text("claim_kind").notNull().default("auto"),
+  manualGrantSha256: text("manual_grant_sha256"),
+  notificationEpoch: integer("notification_epoch").notNull().default(0),
+  retryEpoch: integer("retry_epoch").notNull().default(0),
+  claimedClientRunId: text("claimed_client_run_id"),
   leaseUntil: integer("lease_until"),
   nextAt: integer("next_at").notNull(),
   analysisVersion: text("analysis_version"),
@@ -100,6 +105,7 @@ export const reviewReceipts = sqliteTable("review_receipts", {
   fence: integer("fence").notNull(),
   feedbackId: text("feedback_id").notNull(),
   outputSha256: text("output_sha256").notNull(),
+  outputSha256V2: text("output_sha256_v2"),
   payloadJson: text("payload_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
   createdAt: integer("created_at").notNull(),
 }, table => [
@@ -109,6 +115,7 @@ export const reviewReceipts = sqliteTable("review_receipts", {
 
 export const schedulerHeartbeats = sqliteTable("scheduler_heartbeats", {
   automationId: text("automation_id").primaryKey(),
+  ownerUserId: text("owner_user_id"),
   generation: integer("generation").notNull().default(0),
   clientRunId: text("client_run_id"),
   startedAt: integer("started_at"),
@@ -118,6 +125,21 @@ export const schedulerHeartbeats = sqliteTable("scheduler_heartbeats", {
   status: text("status").notNull(),
   detail: text("detail"),
 });
+
+// Per-owner heartbeat state. Kept separate from the legacy singleton table so
+// v13 can still write scheduler_heartbeats during a rollback.
+export const automationHeartbeats = sqliteTable("automation_heartbeats", {
+  userId: text("user_id").notNull(),
+  automationId: text("automation_id").notNull(),
+  generation: integer("generation").notNull().default(0),
+  clientRunId: text("client_run_id"),
+  startedAt: integer("started_at"),
+  finishedAt: integer("finished_at"),
+  lastSuccessAt: integer("last_success_at"),
+  nextExpectedAt: integer("next_expected_at"),
+  status: text("status").notNull(),
+  detail: text("detail"),
+}, table => [primaryKey({ columns: [table.userId, table.automationId] })]);
 
 // Append-only audit trail. Never store audio, answer text or tokens here.
 export const analysisEvents = sqliteTable("analysis_events", {

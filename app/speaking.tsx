@@ -111,6 +111,7 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive}:{
   const mounted = useRef(true);
   const started = useRef(0);
   const startPending=useRef(false);
+  const locked=useRef(false);
   const stopTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined);
   const onFinalized=useRef(onClip);
   useEffect(()=>{onFinalized.current=onClip},[onClip]);
@@ -123,6 +124,20 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive}:{
       if (recorder.current?.state === "recording") recorder.current.stop();
       activeStream.current?.getTracks().forEach(t => t.stop());
     };
+  }, [stopRequestRef]);
+  useEffect(() => {
+    // Studio hides this surface when the account lock is triggered; keep the
+    // microphone from capturing behind the login gate.
+    const stop = () => {
+      locked.current = true;
+      if (stopRequestRef.current) { stopRequestRef.current(); return; }
+      if (recorder.current?.state === "recording") {
+        try { recorder.current.stop(); } catch { /* already stopped */ }
+      }
+      activeStream.current?.getTracks().forEach(t => t.stop());
+    };
+    window.addEventListener("bandroom:access-locked", stop);
+    return () => window.removeEventListener("bandroom:access-locked", stop);
   }, [stopRequestRef]);
   useEffect(() => {
     // Object URLs must be allocated and revoked in an effect, outside render.
@@ -145,6 +160,7 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive}:{
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
       setNotice("此浏览器无法录音。你可以在页面外开口练习并记录要点。"); return;
     }
+    locked.current=false;
     startPending.current=true;setNotice(""); setMode("waiting"); onActive("waiting");
     let stream:MediaStream | undefined;
     let waiting=true,permissionTimer:ReturnType<typeof setTimeout>|undefined;
@@ -154,7 +170,9 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive}:{
         return value;
       }),new Promise<never>((_,reject)=>{permissionTimer=setTimeout(()=>reject(Error('microphone_timeout')),30_000)})]);
       waiting=false;clearTimeout(permissionTimer);
-      if (!mounted.current) { stream.getTracks().forEach(t => t.stop()); return; }
+      if (!mounted.current || locked.current) {
+        stream.getTracks().forEach(t => t.stop());setMode("idle");onActive("idle");return;
+      }
       activeStream.current = stream;
       const preferred = ["audio/webm;codecs=opus","audio/mp4","audio/ogg;codecs=opus"].find(type => MediaRecorder.isTypeSupported(type));
       const rec = new MediaRecorder(stream, preferred ? {mimeType:preferred,audioBitsPerSecond:64000} : {audioBitsPerSecond:64000});
@@ -246,6 +264,20 @@ function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Pro
     // Each question is keyed by day/phase/account; submissions are reloaded by Studio on remote conflicts.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[scope]);
+  async function removeVoice(){
+    if(!voice||busy||recording)return;
+    const id=voice.id;
+    setMessage("正在移除录音…");
+    try{
+      await changeDraft(scope,discardIfMatch(id));
+      const remaining=await changeDraft(scope);
+      if(remaining?.id===id)throw Error("draft_still_present");
+      setVoice(null);
+      setMessage("已移除录音。可重新录制，或在页面外作答后勾选自报记录。");
+    }catch{
+      setMessage("本机录音草稿未能删除，录音仍保留。请重试。");
+    }
+  }
   async function keep(draft:RecordingDraft){
     if(mounted.current){setVoice(draft);setPreparing(true);setMessage("正在保留录音草稿…");}
     try{
@@ -297,6 +329,7 @@ function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Pro
       void keep(draft).then(()=>{if(commit&&mounted.current)void submit(false,draft)});
     }} onActive={mode=>{if(mode==="waiting"||mode==="idle")saveOnStop.current=false;setMic(mode)}}/>
     {voice?.audio&&!voice.blob&&<Playback answer={{audio:voice.audio,at:voice.at,text:'',spoken:true}}/>}
+    {voice&&<button className="sp-link" type="button" disabled={busy||preparing||recording} onClick={()=>void removeVoice()}>移除这段录音，改为文字或自报作答</button>}
     {!voice&&<details className="sp-history"><summary>使用已保存的录音文件</summary>
       <label className="sp-label">选择本题录音（WebM、M4A、OGG 或 WAV，最多 12 MiB）
         <input type="file" accept="audio/webm,audio/mp4,audio/ogg,audio/wav,.webm,.m4a,.mp4,.ogg,.oga,.wav" disabled={busy||preparing||recording}
