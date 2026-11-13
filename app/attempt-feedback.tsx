@@ -1,13 +1,13 @@
 'use client';
 import {createContext,useContext,useEffect,useState,type ReactNode} from 'react';
-import {feedbackFor,reviewAttempts,reviewRequest,type CoachFeedback,type ReviewAttempt,type ReviewLink,type ReviewTaskStatus} from './feedback-model';
+import {feedbackFor,reviewAttempts,reviewRequest,type AutomationStatus,type CoachFeedback,type ReviewAttempt,type ReviewLink,type ReviewTaskStatus} from './feedback-model';
 import {displayPronunciationErrors} from './pronunciation-display';
 import RecordingClipPlayer from './recording-clip-player';
 import './feedback.css';
 
-type Context = {attempts:ReviewAttempt[];feedback:CoachFeedback[];tasks:ReviewTaskStatus[];error:boolean;refresh:()=>void;ready:boolean;identificationFailed:boolean;retry:()=>void};
-const FeedbackContext=createContext<Context>({attempts:[],feedback:[],tasks:[],error:false,refresh:()=>{},ready:false,identificationFailed:false,retry:()=>{}});
-export function FeedbackProvider({day,entry,feedback,links,tasks,error,refresh,children}:{day:number;entry:Record<string,string>;feedback:CoachFeedback[];links?:ReviewLink[];tasks?:ReviewTaskStatus[];error:boolean;refresh:()=>void;children:ReactNode}) {
+type Context = {attempts:ReviewAttempt[];feedback:CoachFeedback[];tasks:ReviewTaskStatus[];automation?:AutomationStatus;error:boolean;refresh:()=>void;ready:boolean;identificationFailed:boolean;retry:()=>void};
+const FeedbackContext=createContext<Context>({attempts:[],feedback:[],tasks:[],automation:undefined,error:false,refresh:()=>{},ready:false,identificationFailed:false,retry:()=>{}});
+export function FeedbackProvider({day,entry,feedback,links,tasks,automation,error,refresh,children}:{day:number;entry:Record<string,string>;feedback:CoachFeedback[];links?:ReviewLink[];tasks?:ReviewTaskStatus[];automation?:AutomationStatus;error:boolean;refresh:()=>void;children:ReactNode}) {
   const source=JSON.stringify(entry),[identified,setIdentified]=useState<{day:number;source:string;attempts:ReviewAttempt[];failed?:boolean}|null>(null);
   const [retryCount,setRetryCount]=useState(0);
   useEffect(()=>{
@@ -20,7 +20,7 @@ export function FeedbackProvider({day,entry,feedback,links,tasks,error,refresh,c
     const link=links?.find(row=>row.day===day&&row.sourceId===attempt.id);
     return link?{...attempt,id:link.id}:attempt;
   });
-  return <FeedbackContext.Provider value={{attempts,feedback,tasks:tasks??[],error,refresh,ready:Boolean(current&&!current.failed),identificationFailed:Boolean(current?.failed),retry:()=>setRetryCount(n=>n+1)}}>{children}</FeedbackContext.Provider>;
+  return <FeedbackContext.Provider value={{attempts,feedback,tasks:tasks??[],automation,error,refresh,ready:Boolean(current&&!current.failed),identificationFailed:Boolean(current?.failed),retry:()=>setRetryCount(n=>n+1)}}>{children}</FeedbackContext.Provider>;
 }
 export function FeedbackIdentificationStatus(){
   const {identificationFailed,retry}=useContext(FeedbackContext);
@@ -44,23 +44,23 @@ const stageLabel:Record<string,string>={
   read_input:'读取原录音', decode:'解码原声', vad:'检测语音', chunk:'分段',
   acoustic:'分析声学', align:'对齐音素', detect:'识别错音', validate:'校验结果', explain:'生成解释',
 };
-function TaskState({task}:{task:ReviewTaskStatus}) {
-  if(task.state==='completed')return <p className="af-hint" role="status">批改已完成，正在读取反馈…</p>;
-  if(task.state==='running')return <p className="af-hint" role="status">正在分析{task.kind==='speaking'?'原声':'作答'}（{stageLabel[task.stage]??task.stage}）；已完成的部分会保留。</p>;
-  if(task.state==='queued')return <p className="af-hint" role="status">已保存，正在等待后台批改。可以关闭页面。</p>;
-  if(task.state==='retry_wait')return <p className="af-hint" role="status">暂时无法读取原录音，后台会继续重试{task.nextAt?`（下一次约 ${new Date(task.nextAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}）`:''}；录音仍可回听。</p>;
+function TaskState({task,automation,refresh}:{task:ReviewTaskStatus;automation?:AutomationStatus;refresh:()=>void}) {
+  if(task.state==='completed')return <p className="af-hint" role="status">批改已完成，正在读取反馈… <button type="button" className="sp-link" onClick={refresh}>重新读取反馈</button></p>;
+  if(task.state==='running')return <p className="af-hint" role="status">{automation&&!automation.connected?'Work 之前领取了任务，但自动批改连接已断开；状态可能不会更新。':`Work 正在分析${task.kind==='speaking'?'原声':'作答'}（${stageLabel[task.stage]??task.stage}）；已完成的部分会保留。`}</p>;
+  if(task.state==='queued')return <p className="af-hint" role="status">{automation&&!automation.connected?'自动批改当前未连接，任务保持排队。':'已保存，等待 Work 领取。'}</p>;
+  if(task.state==='retry_wait')return <p className="af-hint" role="status">{automation&&!automation.connected?'自动批改当前未连接，之前的重试不会自动继续；录音仍可回听。':`暂时无法读取原录音，后台会继续重试${task.nextAt?`（下一次约 ${new Date(task.nextAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}）`:''}；录音仍可回听。`}</p>;
   if(task.state==='blocked')return <p className="af-hint" role="status">暂时无法可靠判断{task.kind==='speaking'?'这段发音':'这次作答'}，尚未生成纠音结论{task.lastError?`（${taskReason[task.lastError]??task.lastError}）`:''}。</p>;
   if(task.state==='needs_attention')return <p className="af-error" role="status">本次批改未能完成{task.lastError?`（${taskReason[task.lastError]??task.lastError}）`:''}。已保存的录音和作答仍保留。</p>;
-  return <p className="af-hint" role="status">已保存，后台状态：{task.state||'等待中'}。</p>;
+  return <p className="af-hint" role="status">已保存，Work 状态：{task.state||'等待中'}。</p>;
 }
-function taskBadge(task:ReviewTaskStatus|undefined) {
-  if(!task)return '待在 Work 中发起';
+function taskBadge(task:ReviewTaskStatus|undefined,linked=false) {
+  if(!task)return linked?'已提交':'待在 Work 中发起';
   if(task.state==='completed')return '批改已返回';
   if(task.state==='running')return '正在分析';
   if(task.state==='retry_wait')return '等待重试';
   if(task.state==='blocked')return '暂无法判断';
   if(task.state==='needs_attention')return '需要处理';
-  return '后台排队';
+  return '已排队';
 }
 
 // Precision gate not met: the pre-registered SpeechOcean762 random sample
@@ -86,28 +86,46 @@ function PronunciationErrors({analysis,recordingId}:{analysis:NonNullable<CoachF
   </div>;
 }
 export default function AttemptFeedback({field,index=0}:{field:string;index?:number}) {
-  const {attempts,feedback,tasks,error,refresh}=useContext(FeedbackContext);
+  const {attempts,feedback,tasks,automation,error,refresh}=useContext(FeedbackContext);
   const attempt=attempts.find(a=>a.field===field&&a.index===index);
-  const [copyStatus,setCopyStatus]=useState(''),[fallback,setFallback]=useState(false);
+  const [copyStatus,setCopyStatus]=useState(''),[fallback,setFallback]=useState(false),[takingOver,setTakingOver]=useState(false);
   if(!attempt)return null;
   const rows=feedbackFor(attempt,feedback);
   const task=tasks.find(t=>t.attemptId===attempt.id);
+  const linked=attempt.id.startsWith('v2:');
+  const attemptId=attempt.id;
+  const manualTakeover=Boolean(task&&task.state!=='completed');
+  async function copyManualRequest(){
+    if(takingOver)return;
+    setTakingOver(true);
+    try{
+      if(manualTakeover){
+        const res=await fetch('/api/review-tasks/takeover',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({attemptId})});
+        const data=await res.json().catch(()=>({})) as {error?:string};
+        if(!res.ok){
+          setCopyStatus(data?.error==='review_completed'?'批改已经完成，请刷新查看结果。':'暂时无法接管自动批改，请稍后重试。');
+          return;
+        }
+      }
+      try{await navigator.clipboard.writeText(request);setCopyStatus(manualTakeover?'已接管并复制，请粘贴到 Work 会话并发送。':'已复制，请粘贴到 Work 会话并发送。');setFallback(false)}
+      catch{setFallback(true);setCopyStatus(manualTakeover?'已接管。请选中下方请求并复制到 Work 会话。':'请选中下方请求并复制到 Work 会话。')}
+    }catch{setCopyStatus('暂时无法接管自动批改，请稍后重试。')}
+    finally{setTakingOver(false)}
+  }
   if(attempt.kind==='objective'&&!rows.length)return null;
   const request=reviewRequest(attempt);
   return <section className="attempt-feedback" aria-label={attempt.title+'反馈'}>
-    <div className="af-heading"><strong>{attempt.title} · {rows.length?'教练批改':'已保存'}</strong><span className={'af-badge '+((rows.length||task?.state==='completed')?'af-ready':'')}>{rows.length?'批改已返回':taskBadge(task)}</span></div>
+    <div className="af-heading"><strong>{attempt.title} · {rows.length?'教练批改':'已保存'}</strong><span className={'af-badge '+((rows.length||task?.state==='completed')?'af-ready':'')}>{rows.length?'批改已返回':taskBadge(task,linked)}</span></div>
     {!rows.length&&<QuickCheck attempt={attempt}/>}
-    {!rows.length&&task&&<TaskState task={task}/>}
+    {!rows.length&&!task&&linked&&<p className="af-hint" role="status">已保存，正在核对批改队列…</p>}
+    {!rows.length&&task&&<TaskState task={task} automation={automation} refresh={refresh}/>}
     <div aria-live="polite" aria-relevant="additions text">{rows.map(row=><article className="af-review" key={row.id}>
       <p>{row.feedback}</p>
       {row.analysis&&<PronunciationErrors analysis={row.analysis} recordingId={attempt.recordingId}/>}
       <details><summary>批改依据与时间</summary><p>{row.evidence}</p><time dateTime={row.createdAt}>{new Date(row.createdAt).toLocaleString('zh-CN')}</time></details>
     </article>)}</div>
-    {!rows.length&&!task&&<><p className="af-hint">复制本题请求，粘贴到 Work 会话并发送。Work 写回后，留在这里或稍后重新打开本题都能看到结果。</p>
-      <button type="button" className="secondary" onClick={async()=>{
-        try{await navigator.clipboard.writeText(request);setCopyStatus('已复制，请粘贴到 Work 会话并发送。');setFallback(false)}
-        catch{setFallback(true);setCopyStatus('请选中下方请求并复制到 Work 会话。')}
-      }}>复制本题批改请求</button>
+    {!rows.length&&(!task||task.state!=='completed')&&<><p className="af-hint">{task?'自动批改未返回？复制本题请求，粘贴到 Work 会话并发送；手动批改会成为本次作答的唯一结果。':'复制本题请求，粘贴到 Work 会话并发送。Work 写回后，留在这里或稍后重新打开本题都能看到结果。'}</p>
+      <button type="button" className="secondary" disabled={takingOver} onClick={()=>void copyManualRequest()}>{takingOver?'正在接管…':'复制本题批改请求'}</button>
       {fallback&&<label className="af-copy">本题批改请求<textarea readOnly value={request} onFocus={e=>e.target.select()}/></label>}
       {copyStatus&&<p role="status" className="af-hint">{copyStatus}</p>}</>}
     {error&&<p role="status" className="af-error">反馈同步暂时失败，已显示的评语仍保留。<button type="button" onClick={refresh}>重试同步</button></p>}

@@ -5,6 +5,7 @@ import { getExercises } from "./curriculum";
 import { periods } from "./period";
 import "./reports.css";
 import {targets as goals} from "./goals";
+import {newClientId} from "./client-id";
 
 const skills = ["Listening","Reading","Writing","Speaking"] as const;
 type Skill = typeof skills[number];
@@ -109,7 +110,7 @@ function TestForm({s,persist,pending,account}:{account:string;s:State;persist:Pr
           const result=await resp.json() as {id?:string};if(!result.id)throw Error();audio=result.id;cachedAudio.current={file,id:result.id};
         }
       }
-      const t:Test={id:crypto.randomUUID(),skill,date,source:source.trim(),exam,rater:rater.trim(),...(exact?{raw:+raw}:{}),...(band!==""?{band:+band}:{}),...(audio?{audio}:{})};
+      const t:Test={id:newClientId(),skill,date,source:source.trim(),exam,rater:rater.trim(),...(exact?{raw:+raw}:{}),...(band!==""?{band:+band}:{}),...(audio?{audio}:{})};
       if(await persist(prev=>({...prev,fullTests:[...(prev.fullTests||[]),t]}))){setInfo("已保存。对应窗口到期后可生成或更新回顾。");setProof(false);setSource("");setRater("");setRaw("");setBand("");setFile(null);cachedAudio.current=null;}
       else setInfo("测评记录未保存，请在连接恢复后重试。");
     }catch{setInfo("保存未成功，请保留输入并重试。");}finally{setBusy(false);}
