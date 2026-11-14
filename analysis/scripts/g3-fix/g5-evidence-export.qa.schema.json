@@ -1,0 +1,349 @@
+{
+  "schema": "bandroom.g5.evidence-contract.qa-diagnostic.v1",
+  "generatedUtc": "2026-11-14",
+  "status": "derived-schema-variant; owner-approved D-6; this is a schema, not evidence",
+  "purpose": "QA-scoped G3 evidence-subset schema for protocol bandroom-d2-cloud-recovery-v1-qa-diagnostic. Enumerates every relaxation against the frozen G5 schema so QA evidence can never be passed off as formal G5 evidence. The frozen G5 schema and the formal verifier are preserved byte-for-byte.",
+  "derivedFrom": {
+    "frozenSchema": "run-side/g5-evidence-export.schema.json",
+    "frozenSchemaSha256": "f41a2db2e95123c0bc0d077475c3e0192c04b45e1d33b057d8ad1be7a9e78d27",
+    "frozenSchemaImmutable": true,
+    "frozenExporter": "run-side/export_g5_evidence.py",
+    "frozenExporterSha256": "dc2b308fe9827f6da0378a37d7c814f1bc46c8a094ebfe8a1a236f2557c8ead1",
+    "frozenVerifier": "analysis/scripts/verify_cloud_release.py",
+    "frozenVerifierSha256": "64e2b8a6eabca20fbaf4fb9d5d5fb4d5e00d8994fea4e69c145a29291902d6b8",
+    "qaVerifier": "g3-fix/verify_official_run_v26_qa.py",
+    "qaExporter": "g3-fix/export_g5_evidence_qa.py",
+    "qaGuard": "g3-fix/verify_cloud_release_qa_guard.py"
+  },
+  "protocol": "bandroom-d2-cloud-recovery-v1-qa-diagnostic",
+  "route": "A",
+  "qaScoped": true,
+  "identityScope": "qa-diagnostic",
+  "authority": {
+    "formalNamespace": "bandroom-d2-cloud-recovery-v1",
+    "qaNamespace": "bandroom-d2-cloud-recovery-v1-qa-diagnostic",
+    "separation": "A QA-scoped manifest is rejected by the formal verify_bundle guard before signature verification. A formal manifest is rejected by check_qa(). The QA exporter refuses to run without --qa-scoped.",
+    "formalCandidateIdentityFields": "must stay null in a QA bundle: sourceSha, sourceTreeSha, buildSha256, runtimeBundleSha256, modelWeightsSha256, configSha256"
+  },
+  "roles": [
+    {
+      "name": "work-auditor",
+      "requiredForG3": true,
+      "requiredForG5": false,
+      "keyType": "Ed25519",
+      "namespace": "bandroom-d2-cloud-recovery-v1-qa-diagnostic",
+      "keyHolderIndependence": "must be a different holder from site-auditor (MJ13) or the limitation is disclosed"
+    },
+    {
+      "name": "site-auditor",
+      "requiredForG3": true,
+      "requiredForG5": false,
+      "keyType": "Ed25519",
+      "namespace": "bandroom-d2-cloud-recovery-v1-qa-diagnostic",
+      "keyHolderIndependence": "must be a different holder from work-auditor (MJ13) or the limitation is disclosed"
+    }
+  ],
+  "qaManifest": {
+    "file": "manifest.json",
+    "requiredKeys": [
+      "schemaVersion",
+      "protocol",
+      "route",
+      "qaScoped",
+      "identityScope",
+      "analysisVersion",
+      "environmentId",
+      "files",
+      "sourceSha",
+      "sourceTreeSha",
+      "buildSha256",
+      "runtimeBundleSha256",
+      "modelWeightsSha256",
+      "configSha256"
+    ],
+    "schemaVersion": 1,
+    "protocol": "bandroom-d2-cloud-recovery-v1-qa-diagnostic",
+    "route": "A",
+    "qaScoped": true,
+    "identityScope": "qa-diagnostic",
+    "analysisVersion": "non-empty QA diagnostic label; never a formal release identity",
+    "environmentId": "non-empty QA diagnostic label; never a formal release identity",
+    "sourceSha": null,
+    "sourceTreeSha": null,
+    "buildSha256": null,
+    "runtimeBundleSha256": null,
+    "modelWeightsSha256": null,
+    "configSha256": null,
+    "files": "map filename -> 64 lowercase hex over the QA-named artifacts and G3-owned exports",
+    "signatureStatus": "unsigned-keys-absent when the owner accepts the unsigned bundle",
+    "signatureRoles": "work-auditor and site-auditor are both absent for an unsigned bundle",
+    "runDArtifacts": "the confirmed V5 disposition binds both source reports and lists all 12 original files as missing",
+    "qaArtifactBindings": {
+      "qaRuntimeBundleSha256": "manifest.files['qa-runtime-bundle.zip']; QA-named artifact binds its own digest, never the formal runtimeBundleSha256",
+      "qaModelWeightsSha256": "manifest.files['qa-model-weights.bin']; QA-named artifact binds its own digest",
+      "qaConfigSha256": "manifest.files['qa-analysis-config.json']; QA-named artifact binds its own digest"
+    }
+  },
+  "qaBundle": {
+    "regularFiles": [
+      "qa-runtime-bundle.zip",
+      "qa-model-weights.bin",
+      "qa-analysis-config.json",
+      "offline.json",
+      "official-run-history.json",
+      "site-event-export.json",
+      "qa-feedback-receipt.json"
+    ],
+    "optionalFiles": [
+      "qa-browser-acceptance.json"
+    ],
+    "supplementaryEvidence": "SHA-bound copies of the original QA checkpoints and cloud readbacks. The V26 cold.bin and resumed.bin retain their original names and scope.",
+    "signatureFiles": "work-auditor.sig and site-auditor.sig, detached over the exact manifest.json bytes; absent signatures are allowed only when both role keys are absent and the bundle is explicitly labelled unsigned-keys-absent",
+    "notRequired": [
+      "gates.json",
+      "zero-cost.json",
+      "holdout artifacts (preflight/score/annotators/adjudicated/reference-words)",
+      "formal runtime-profile.json/platform-probe.json four-probe matrix",
+      "offline-output.json/offline-cold-output.json (G1/G2 dependency R3)",
+      "acoustic-NN.bin formal plan chunks when D bytes were not recovered (V5 hard gate: label missing, never substitute)"
+    ]
+  },
+  "relaxations": [
+    {
+      "id": "QA-R01",
+      "area": "namespace and protocol",
+      "frozen": "manifest.protocol == bandroom-d2-cloud-recovery-v1",
+      "qa": "manifest.protocol == bandroom-d2-cloud-recovery-v1-qa-diagnostic and manifest.qaScoped == true",
+      "reason": "Hard QA/formal separation (BL4); formal verifier rejects qaScoped manifests.",
+      "decisionRef": "D-6 / BL4 / B-M14"
+    },
+    {
+      "id": "QA-R02",
+      "area": "identity scope",
+      "frozen": "formal candidate identity required and digest-bound",
+      "qa": "identityScope == 'qa-diagnostic'; formal candidate fields are null; QA identity fields are per-field disclosed (attemptIdSynthetic, attemptRevisionSynthetic, analysisVersionScope, recordingIdScope)",
+      "reason": "Synthetic QA identity must never enter a formal package (MJ10).",
+      "decisionRef": "D-2b / MJ10"
+    },
+    {
+      "id": "QA-R03",
+      "area": "signature roles",
+      "frozen": "four roles: release-owner, holdout-custodian, work-auditor, site-auditor",
+      "qa": "two G3 roles only: work-auditor and site-auditor; unsigned-if-keys-absent is an explicit label, not a pass",
+      "reason": "G3 requires two roles; formal G5 four roles are out of scope (D-5).",
+      "decisionRef": "D-5 / MJ13"
+    },
+    {
+      "id": "QA-R04",
+      "area": "browser acceptance case count",
+      "frozen": "all 10 BROWSER_CASES plus slow-loadedmetadata, repeat-marker, pause, reopen (14 cases)",
+      "qa": "6 contract §5.2 core cases only: playback, pause, refresh, reopen, slow-loadedmetadata, repeat-marker; §5.3 eight cases are status='deferred/N-A' with releaseRetest53",
+      "reason": "G3 §5.2 six-case scope per contract :130; §5.3 is a release retest (:140).",
+      "decisionRef": "D-1c / BL4"
+    },
+    {
+      "id": "QA-R05",
+      "area": "learner baseline / archive",
+      "frozen": "learnerBaselineBefore/After equal and contain PRESERVED keys; rollbackVerified=true; archive case passed",
+      "qa": "learnerBaselineScope='not-applicable-qa' with an explicit disclosure; learnerBaselineBefore/After MAY be null; rollbackVerified MAY be null; archive case is N/A",
+      "reason": "QA has no learner data and production must not be touched (D-2c).",
+      "decisionRef": "D-2c / BL4"
+    },
+    {
+      "id": "QA-R06",
+      "area": "emptyQueueWakes / 24h observation",
+      "frozen": ">= 3 distinct empty-queue wakes spanning >= 86400 s",
+      "qa": "either the frozen evidence, or emptyQueueWakesWaived=true bound to history.observationWaiver plus formalG5ObservationWaived=false plus an explicit waiver label; waived checks are never recorded as passed",
+      "reason": "Owner 24h observation waiver must be explicit and must not leak into formal G5 (BL3).",
+      "decisionRef": "BL3 / B-m11"
+    },
+    {
+      "id": "QA-R07",
+      "area": "site event receipt fields",
+      "frozen": "feedback_committed.receiptId and receipt_readback.receiptId/feedbackId/outputSha256 required",
+      "qa": "event-level receiptId/feedbackId are required on feedback_committed and receipt_readback and are deterministically derived when absent: receiptId='rcpt-'+payloadSha256[:32], feedbackId='fb-'+payloadSha256[:32]; derivation is labelled receiptIdentitySource",
+      "reason": "Deterministic backfill, no rerun (BL1).",
+      "decisionRef": "BL1 / D-2b"
+    },
+    {
+      "id": "QA-R08",
+      "area": "feedbackReceipt",
+      "frozen": "12 fields: jobId, taskId, attemptId, attemptRevision, recordingId, recordingSha256, inputBytes, analysisVersion, fence, id, feedbackId, outputSha256",
+      "qa": "required id, feedbackId, inputBytes (=441322), officialRecordRef; remaining frozen fields are carried when available or explicitly null-disclosed; recordingId may be null with recordingIdSource; id/feedbackId are deterministically derived from payloadSha256",
+      "reason": "QA backfill is read-time enrichment, not a new run; 441322 B is the fixed HJK original (BL1/BL4).",
+      "decisionRef": "D-2b / BL4 / schema:104"
+    },
+    {
+      "id": "QA-R09",
+      "area": "history official references",
+      "frozen": "A/B/C platform turn references (userTurnId/assistantMessageId/turnKey) required",
+      "qa": "officialRefs must be an object with A/B/C entries, each carrying a lowercase-UUID officialRunId; turn fields are optional enrichment when the platform exposes them",
+      "reason": "officialRunId is the accepted equivalent immutable run reference (D-1b/MJ2).",
+      "decisionRef": "D-1b / MJ2"
+    },
+    {
+      "id": "QA-R10",
+      "area": "officialRecordRef",
+      "frozen": "every history run carries a non-empty officialRecordRef",
+      "qa": "officialRecordRef is projected from the run's officialRunId and labelled officialRecordRefSource='projected-from-officialRunId'; it may never be invented",
+      "reason": "The server does not expose a separate record reference (MJ12).",
+      "decisionRef": "MJ12 / MJ2"
+    },
+    {
+      "id": "QA-R11",
+      "area": "derived timestamps",
+      "frozen": "startedAt/endedAt are platform-observed, non-null, and 0 < duration <= 900 s",
+      "qa": "when a platform timestamp is unavailable it is derived from a named observed field and carries endedAtSource/startedAtSource (for example executionEndObservedAt); an underivable field stays null and is disclosed, never fabricated",
+      "reason": "Platform fields are unavailable for B/D (MJ12).",
+      "decisionRef": "MJ12"
+    },
+    {
+      "id": "QA-R12",
+      "area": "stage semantics",
+      "frozen": "numeric stage fields are present and positive",
+      "qa": "absent/null means not observed, 0 means measured zero, and every stage ledger labels which semantic applies; no zero or positive value may be substituted for an unmeasured stage",
+      "reason": "Never fabricate M4 stage values (BL5).",
+      "decisionRef": "BL5 / D-3b"
+    },
+    {
+      "id": "QA-R13",
+      "area": "M4 runtime scope",
+      "frozen": "8 stages and an exact four-probe matrix with 300/900 budgets",
+      "qa": "G3 QA uses the single V4 cold measurement with 1520/1800 second execution limits and empty measured matrix arrays. Formal G5 requires the full pipeline, the complete matrix and 300/900 second budgets.",
+      "reason": "The owner accepted the V4 budget evidence and waived the M4 matrix after officialRunId and the Work code bridge were unavailable.",
+      "decisionRef": "D-3b / BL5 / G3_FIX_DECISIONS.md#八 / G3_FIX_DECISIONS.md#九"
+    },
+    {
+      "id": "QA-R14",
+      "area": "fairness",
+      "frozen": "real multi-task fairness readback with blockedTaskId/laterTaskId/blockedTaskRetried/laterTaskCompleted",
+      "qa": "either a real multi-task fairness readback, or fairnessScope='not-applicable-qa' with an explicit disclosure; the block is never synthesized",
+      "reason": "No evidence source exists for a QA fairness scenario (MJ4).",
+      "decisionRef": "MJ4"
+    },
+    {
+      "id": "QA-R15",
+      "area": "artifact names and candidate bindings",
+      "frozen": "runtime-bundle.zip/model-weights.bin/analysis-config.json bind formal candidate digests",
+      "qa": "qa-runtime-bundle.zip/qa-model-weights.bin/qa-analysis-config.json bind their own digests; the formal candidate fields stay null and QA digests never masquerade as G5 file-object digests",
+      "reason": "QA digests differ from G5 file objects (B-M16).",
+      "decisionRef": "BL4 / B-M16"
+    },
+    {
+      "id": "QA-R16",
+      "area": "release gates and zero-cost",
+      "frozen": "gates.releaseEligible=true, G0..G5 passed, zero-cost attestation signed",
+      "qa": "gates.json and zero-cost.json are not part of the QA evidence subset; a QA bundle must not claim releaseEligible",
+      "reason": "G3 QA is not a release (G3 != D2; §0 non-goals).",
+      "decisionRef": "G3_FIX_DECISIONS §四 D-4"
+    },
+    {
+      "id": "QA-R17",
+      "area": "D output bytes",
+      "frozen": "acoustic-00..09.bin plus offline-checkpoint.bin/plan.json required",
+      "qa": "D bytes must be recovered through the V5 hard gate; if unavailable the files are marked missing/G1-G2-dependent and are never relabelled from the v26 prefix or copied from the QA diagnostic output",
+      "reason": "V5 hard gate; no inventory inflation (BL6).",
+      "decisionRef": "BL6 / RECONCILIATION:60 / R3"
+    }
+  ],
+  "shape": {
+    "offline": {
+      "runs": "exactly 3, step order ['A','B','C']; each carries officialRunId, fence, automationId and the QA identity disclosure; candidate fields are null",
+      "coldRunId": "run D officialRunId when available; distinct from A/B/C; never reuse C",
+      "isolated": true,
+      "feedbackReceipt": {
+        "required": ["id", "feedbackId", "inputBytes", "officialRecordRef"],
+        "inputBytes": 441322,
+        "id": "'rcpt-' + payloadSha256[:32]",
+        "feedbackId": "'fb-' + payloadSha256[:32]",
+        "officialRecordRef": "C officialRunId (or the projected record reference)",
+        "derivation": "receiptIdentitySource='derived-from-payloadSha256'; never claim a fresh server receipt",
+        "nullDisclosure": "recordingId may be null with recordingIdSource; unobserved fields are null, not fabricated"
+      },
+      "qaIdentityScope": {
+        "identityScope": "qa-diagnostic",
+        "attemptIdSynthetic": "QA attempt ids are labelled synthetic when derived",
+        "recordingIdScope": "recordingId is not the recording SHA; prefer null + recordingIdSource",
+        "analysisVersionScope": "QA diagnostic label, never a formal release analysis version"
+      },
+      "fairness": "real readback or fairnessScope='not-applicable-qa'"
+    },
+    "officialRunHistory": {
+      "automationId": "non-empty",
+      "runs": "A/B/C plus D when available; officialRunId required; officialRecordRef projected and labelled; startedAt/endedAt may be derived with *Source fields",
+      "officialRefs": {
+        "required": true,
+        "shape": "{A:{officialRunId}, B:{officialRunId}, C:{officialRunId}}",
+        "officialRunId": "lowercase UUID",
+        "turnFields": "userTurnId/assistantMessageId/turnKey optional enrichment"
+      },
+      "emptyQueueWakes": {
+        "frozenForm": ">=3 distinct officialRunIds with span >= 86400 s",
+        "waiverForm": {
+          "observationWaiver": "non-empty owner record (string or {waived:true, reason|approvedBy|scope})",
+          "formalG5ObservationWaived": false,
+          "emptyQueueWakesWaived": true,
+          "emptyQueueWakesWaiverLabel": "explicit label naming the owner waiver and date",
+          "note": "the waived checks are reported WAIVED, never passed; the 24h claim is 243/244 + waiver, not 244/244"
+        }
+      }
+    },
+    "siteEventExport": {
+      "events": "11 cloud events with the 9 G5 types when the full A/B/C sequence exists; no offline_run/wake/drain rows",
+      "eventLevelReceipt": {
+        "feedback_committed": ["receiptId"],
+        "receipt_readback": ["receiptId", "feedbackId", "outputSha256"],
+        "derivation": "receiptId/feedbackId derived from payloadSha256 and labelled"
+      }
+    },
+    "feedbackReceiptFile": {
+      "file": "qa-feedback-receipt.json",
+      "required": ["id", "feedbackId", "inputBytes", "officialRecordRef", "payloadSha256", "fence", "outputSha256"],
+      "binding": "equals offline.feedbackReceipt and the event-level receipt fields"
+    },
+    "browserAcceptance": {
+      "caseCounts": {"scope": "contract-5.2", "passed": 6, "total": 6},
+      "cases": ["playback", "pause", "refresh", "reopen", "slow-loadedmetadata", "repeat-marker"],
+      "releaseRetest53": {"status": "deferred/N-A"},
+      "learnerBaselineScope": "not-applicable-qa",
+      "learnerBaselineBefore": "null allowed with disclosure",
+      "learnerBaselineAfter": "null allowed with disclosure",
+      "rollbackVerified": "null allowed with disclosure",
+      "slowLoadedMetadataExecution": "Recorded method for a passed trial in native Chrome DevTools and the playback UI. Owner-authorized Computer Use identifies the operator and its read-only media trace method. Null when unavailable.",
+      "repeatMarkerDeviation": "contract asks for consecutive clicks on different markers; using the same marker is a disclosed deviation (B-m2)"
+    },
+    "signatures": {
+      "signed": "work-auditor.sig and site-auditor.sig are non-empty detached Ed25519 signatures over manifest.json",
+      "unsignedKeysAbsent": "both signatures absent and both role keys unavailable; label 'unsigned (owner keys absent)' is emitted and is not a passed signature check"
+    }
+  },
+  "crossBindings": [
+    "manifest.files['qa-runtime-bundle.zip'] == manifest.qaRuntimeBundleSha256",
+    "manifest.files['qa-model-weights.bin'] == manifest.qaModelWeightsSha256",
+    "manifest.files['qa-analysis-config.json'] == manifest.qaConfigSha256",
+    "offline.feedbackReceipt == qa-feedback-receipt.json == siteEventExport.feedbackReceipt",
+    "offline.feedbackReceipt.id == 'rcpt-' + payloadSha256[:32]",
+    "offline.feedbackReceipt.feedbackId == 'fb-' + payloadSha256[:32]",
+    "site feedback_committed.receiptId == receipt_readback.receiptId == feedbackReceipt.id",
+    "site receipt_readback.feedbackId == feedbackReceipt.feedbackId",
+    "officialRefs[stage].officialRunId == offline.runs[stage].officialRunId"
+  ],
+  "checkQaOrder": [
+    "1. reject a non-QA manifest: protocol must be the QA namespace, qaScoped must be true, identityScope must be qa-diagnostic",
+    "2. reject formal candidate identity: sourceSha/sourceTreeSha/buildSha256/runtimeBundleSha256/modelWeightsSha256/configSha256 must be null",
+    "3. verify the QA file inventory and every listed digest",
+    "4. verify offline A/B/C runs and distinct official run ids",
+    "5. verify official-run-history runs, officialRefs A/B/C officialRunId UUIDs, and the emptyQueueWakes waiver binding",
+    "6. verify site-event-export cloud sequences and event-level receiptId/feedbackId derivation",
+    "7. verify qa-feedback-receipt required fields, 441322 inputBytes, and deterministic id/feedbackId",
+    "8. verify two-role signatures or emit the explicit unsigned-keys-absent label",
+    "9. this is a QA-scoped G3 result, never a formal G5 pass"
+  ],
+  "prohibitions": [
+    "Never write qaScoped:true into the formal namespace or omit qaScoped from the QA namespace.",
+    "Never fill a formal candidate field with a QA digest or a null-disguised value.",
+    "Never claim 244/244, formal G5 pass, or 24h evidence without the waiver disclosure.",
+    "Never fabricate wakes, fairness, human reviews, stage timings, official references, or D bytes.",
+    "Never relabel v26 prefix files as acoustic-NN.bin or copy the QA diagnostic output as offline-output."
+  ]
+}
