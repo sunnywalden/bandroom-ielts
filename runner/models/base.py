@@ -48,6 +48,10 @@ class CoachModel(Protocol):
 
     def complete_audio(self, snapshot: Mapping[str, Any], audio: PreparedAudio) -> Feedback: ...
 
+    def complete_grounded(
+        self, system: str, user: str, *, timeout: float | None = None
+    ) -> str: ...
+
 
 def parse_feedback_json(raw: str, *, expect_pronunciation: bool) -> Feedback:
     """Parse the provider's JSON object.

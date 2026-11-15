@@ -153,6 +153,38 @@ def test_valid_audio_feedback_builds_tool_args():
     }
 
 
+def test_pronunciation_scope_is_always_partial():
+    common = {
+        "stage": "speak",
+        "response": "I think this is fine.",
+        "feedback": "注意 think 的 /θ/。",
+        "evidence": "录音中的 “think” 可以听清。",
+        "recording_id": "9b2f6f2e-2a6c-4f1b-8a2d-0f8e5a5a5a5a",
+        "audio_used": True,
+    }
+    value = _validate(
+        **common,
+        pronunciation={
+            "band": 0.0,
+            "reviewedWholeClip": True,
+            "observation": "未评估音素。",
+            "scope": "partial",
+        },
+    )
+    assert value.pronunciation.scope == "partial"
+    with pytest.raises(ContentRuleError) as caught:
+        _validate(
+            **common,
+            pronunciation={
+                "band": 0.0,
+                "reviewedWholeClip": True,
+                "observation": "未评估音素。",
+                "scope": "full",
+            },
+        )
+    assert caught.value.code == "invalid_pronunciation_scope"
+
+
 def test_attempt_must_be_exact():
     with pytest.raises(ContentRuleError) as caught:
         _validate(attempt="v1:writeOriginal:0:invented")
