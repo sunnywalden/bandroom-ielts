@@ -54,6 +54,10 @@ class Pronunciation:
     band: float
     observation: str
     reviewed_whole_clip: bool = True
+    # The server stores every structured speaking rating as partial-scope.  The
+    # field is carried here for auditability but is never sent through the MCP
+    # strict object (lib/coach.ts adds recordingId and scope server-side).
+    scope: str = "partial"
 
 
 @dataclass(frozen=True)
@@ -67,7 +71,7 @@ class ValidatedFeedback:
 @lru_cache(maxsize=8)
 def load_prompt(name: str) -> str:
     """Load a versioned prompt file from ``runner/prompts``."""
-    if name not in {"text_rubric", "speaking_rubric"}:
+    if name not in {"text_rubric", "speaking_rubric", "grounded_audio"}:
         raise KeyError(f"unknown prompt: {name}")
     return (PROMPTS_DIR / f"{name}.txt").read_text(encoding="utf-8").strip()
 
@@ -224,12 +228,19 @@ def _coerce_pronunciation(value: Pronunciation | Mapping[str, Any] | None) -> Pr
         return None
     if isinstance(value, Pronunciation):
         band, observation, whole = value.band, value.observation, value.reviewed_whole_clip
+        scope = value.scope
     elif isinstance(value, Mapping):
         band = value.get("band")
         observation = value.get("observation")
         whole = value.get("reviewedWholeClip", value.get("reviewed_whole_clip"))
+        scope = value.get("scope", "partial")
     else:
         raise ContentRuleError("invalid_pronunciation", "pronunciation must be an object")
+    if scope not in (None, "partial"):
+        raise ContentRuleError(
+            "invalid_pronunciation_scope",
+            "a single-answer speaking review is always partial scope",
+        )
     if isinstance(band, bool) or not isinstance(band, (int, float)):
         raise ContentRuleError("invalid_band", "pronunciation band must be a number")
     band = float(band)
@@ -243,7 +254,9 @@ def _coerce_pronunciation(value: Pronunciation | Mapping[str, Any] | None) -> Pr
             "whole_clip_not_reviewed",
             "reviewedWholeClip must be true and only set after hearing the whole clip",
         )
-    return Pronunciation(band=band, observation=obs, reviewed_whole_clip=True)
+    return Pronunciation(
+        band=band, observation=obs, reviewed_whole_clip=True, scope="partial"
+    )
 
 
 def _require_citation(evidence: str, response: str, recording_id: str | None) -> None:
@@ -283,6 +296,12 @@ def feedback_to_tool_args(
         "evidence": value.evidence,
         "attempt": value.attempt,
     }
+    # recordingId is independent of the pronunciation rating: a review can be
+    # based on a real recording (and link it for click-to-relisten) without
+    # asserting a phoneme assessment.  The MCP feedbackSpec allows recordingId
+    # alone; it only rejects pronunciation *without* recordingId.
+    if recording_id and audio_used and stage == "speak":
+        arguments["recordingId"] = recording_id
     if value.pronunciation is not None:
         if stage != "speak" or not recording_id or not audio_used:
             raise ContentRuleError(

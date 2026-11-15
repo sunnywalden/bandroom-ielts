@@ -69,19 +69,36 @@ class QwenAdapter:
         self.text_timeout = text_timeout
         self.audio_timeout = audio_timeout
         self._transport: ModelTransport = transport or urllib_model_transport
+        # Populated by ``_post``; the grounded audio path logs it in the same
+        # cost/usage style as the rest of the runner.  Never contains secrets.
+        self.last_usage: dict[str, Any] | None = None
 
     # -- request ----------------------------------------------------------
-    def _request_body(self, model: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
-        return {
+    def _request_body(
+        self, model: str, messages: list[dict[str, Any]], *, json_object: bool = True
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": 0.2,
             "reasoning_effort": "none",
-            "response_format": {"type": "json_object"},
         }
+        if json_object:
+            body["response_format"] = {"type": "json_object"}
+        return body
 
-    def _post(self, model: str, messages: list[dict[str, Any]], timeout: float) -> str:
-        body = json.dumps(self._request_body(model, messages), ensure_ascii=False).encode("utf-8")
+    def _post(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        timeout: float,
+        *,
+        json_object: bool = True,
+    ) -> str:
+        body = json.dumps(
+            self._request_body(model, messages, json_object=json_object),
+            ensure_ascii=False,
+        ).encode("utf-8")
         headers = {
             "content-type": "application/json",
             "accept": "application/json",
@@ -104,6 +121,8 @@ class QwenAdapter:
             payload = json.loads(response_body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ModelError("model_bad_response", "model response is not JSON", retryable=True) from exc
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        self.last_usage = usage if isinstance(usage, dict) else None
         try:
             content = payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -127,6 +146,31 @@ class QwenAdapter:
         ]
         raw = self._post(self.text_model, messages, self.text_timeout)
         return parse_feedback_json(raw, expect_pronunciation=False)
+
+    def complete_grounded(
+        self, system: str, user: str, *, timeout: float | None = None
+    ) -> str:
+        """Plain-text Chinese feedback grounded in calibrated prosody evidence.
+
+        This path deliberately does not request ``response_format=json_object``:
+        the grounded prompt is a six-section Work-format answer, and the runner
+        validates the returned prose directly.  It is still a text-only call to
+        the same ``qwen3.8-max`` text model used by the text coach.
+        """
+        if not isinstance(system, str) or not system.strip():
+            raise ModelError("invalid_grounded_prompt", "system prompt is empty", retryable=False)
+        if not isinstance(user, str) or not user.strip():
+            raise ModelError("invalid_grounded_prompt", "user prompt is empty", retryable=False)
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        return self._post(
+            self.text_model,
+            messages,
+            timeout if timeout is not None else self.text_timeout,
+            json_object=False,
+        )
 
     def complete_audio(self, snapshot: Mapping[str, Any], audio: PreparedAudio) -> Feedback:
         if not audio.data_uri or not audio.format:
