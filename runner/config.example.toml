@@ -23,6 +23,12 @@ text_timeout_seconds = 120
 audio_timeout_seconds = 240
 
 [runner]
+# Audio dispatch: "off" (skip speaking) | "legacy" (omni _review_audio) |
+# "grounded" (calibrated prosody Stage A; detector Stage B optional).
+# Explicit mode wins. If this key is omitted, coach_audio decides:
+# true -> legacy, false -> off (backward compatibility).
+coach_audio_mode = "off"
+coach_audio = false
 automation_id = "bandroom-coach-runner"
 generation = 1
 # cron runs every 5 minutes; this value is only used for nextExpectedAt.
@@ -38,6 +44,8 @@ daily_cap_cny = 20.0
 # console during P0 and adjust.
 text_cost_cny = 0.05
 audio_cost_cny = 0.20
+# The grounded path is a text-model call; this bucket reserves its cost.
+grounded_cost_cny = 0.10
 
 [audio]
 # read_speaking_recording bytes mode: at most 24576 bytes per range.
@@ -48,3 +56,19 @@ max_recording_bytes = 12582912
 max_duration_seconds = 10800
 # Whole-clip transcode tries these bitrates high to low; never truncates.
 transcode_bitrates_kbps = [64, 48, 32, 24, 16]
+
+[grounded]
+# Stage A needs the production interpreter with NumPy/SciPy (no torch).
+# Stage B is OFF by default. TCC: launchd cannot read ~/Documents, so the
+# frozen detector and model assets must be staged under the home folder.
+acoustic_python = "~/.bandroom-acoustic/env/bin/python"
+staging_dir = "~/.bandroom-acoustic"
+# Derived from staging_dir when omitted:
+#   detector_script = "<staging_dir>/frozen-inference.py"
+#   detector_models = "<staging_dir>/crottc"
+#   detector_ffmpeg = "<staging_dir>/rescued/ffmpeg-pin/ffmpeg"
+detector_whisper = "~/.cache/whisper/large-v3-turbo.pt"
+detector_timeout_seconds = 900
+detector_cache_dir = "~/.bandroom-runner/acoustic-cache"
+self_listen_enabled = false
+self_listen_max_n = 3

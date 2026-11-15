@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from . import audio as audio_module
+from . import grounded_audio
 from .audio import AudioError, PreparedAudio
 from .content_rules import (
     PROMPT_VERSION,
@@ -44,6 +45,7 @@ from .content_rules import (
     feedback_to_tool_args,
     validate_feedback,
 )
+from .grounded_audio import GroundedConfig
 from .mcp_client import (
     AuthError,
     McpError,
@@ -95,6 +97,23 @@ RETRYABLE_TOOL_CODES = frozenset(
     }
 )
 
+# Audio dispatch modes.  Precedence (documented in GROUNDED_AUDIO_INTEGRATION.md):
+# 1. an explicit ``[runner] coach_audio_mode`` wins;
+# 2. when the key is absent, the legacy ``coach_audio`` boolean decides:
+#    true -> "legacy", false -> "off";
+# 3. shipped config files set coach_audio_mode = "off" explicitly.
+COACH_AUDIO_MODES = frozenset({"off", "legacy", "grounded"})
+
+
+def resolve_coach_audio_mode(config: "RunnerConfig") -> str:
+    mode = config.coach_audio_mode
+    if mode is not None:
+        value = str(mode).strip().lower()
+        if value not in COACH_AUDIO_MODES:
+            raise ConfigError(f"unknown coach_audio_mode: {mode!r}")
+        return value
+    return "legacy" if config.coach_audio else "off"
+
 
 class ConfigError(Exception):
     pass
@@ -135,6 +154,12 @@ class RunnerConfig:
     # Gate-1 ruling (2026-11-15, owner): text coach passed, audio coach held
     # (safe but below Work baseline). When False, speaking attempts are skipped.
     coach_audio: bool = True
+    # "off" | "legacy" | "grounded".  None means "not configured": fall back to
+    # the legacy coach_audio boolean (true -> legacy, false -> off) so existing
+    # config files keep their exact behaviour.
+    coach_audio_mode: str | None = None
+    grounded: GroundedConfig = field(default_factory=GroundedConfig)
+    grounded_cost_cny: float = 0.10
 
     def resolved_state_dir(self) -> Path:
         return Path(os.path.expanduser(str(self.state_dir)))
@@ -152,6 +177,7 @@ def load_config(path: str | Path) -> RunnerConfig:
     runner = raw.get("runner", {})
     budget = raw.get("budget", {})
     audio_config = raw.get("audio", {})
+    grounded_config = raw.get("grounded", {})
 
     client_id = _env(site.get("client_id_env"), "BANDROOM_RUNNER_CLIENT_ID")
     client_secret = _env(site.get("client_secret_env"), "BANDROOM_RUNNER_CLIENT_SECRET")
@@ -161,6 +187,20 @@ def load_config(path: str | Path) -> RunnerConfig:
     api_key = _env(model.get("api_key_env"), "DASHSCOPE_API_KEY")
     if provider == "qwen" and not api_key:
         raise ConfigError("DASHSCOPE_API_KEY is not configured")
+
+    mode = runner.get("coach_audio_mode")
+    if mode is not None:
+        mode = str(mode).strip().lower()
+        if mode not in COACH_AUDIO_MODES:
+            raise ConfigError(
+                f"coach_audio_mode must be one of {sorted(COACH_AUDIO_MODES)}"
+            )
+    try:
+        grounded = GroundedConfig.from_mapping(grounded_config)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"invalid [grounded] config: {exc}") from exc
+    if grounded.self_listen_max_n < 0:
+        raise ConfigError("[grounded] self_listen_max_n must be >= 0")
 
     return RunnerConfig(
         base_url=site.get("base_url", "https://bandroom.example.com"),
@@ -184,6 +224,9 @@ def load_config(path: str | Path) -> RunnerConfig:
         audio_cost_cny=float(budget.get("audio_cost_cny", 0.20)),
         max_attempts=int(runner.get("max_attempts", 3)),
         coach_audio=bool(runner.get("coach_audio", True)),
+        coach_audio_mode=mode,
+        grounded=grounded,
+        grounded_cost_cny=float(budget.get("grounded_cost_cny", 0.10)),
         state_dir=Path(
             os.path.expanduser(runner.get("state_dir", "~/.bandroom-runner"))
         ),
@@ -467,7 +510,12 @@ class CoachRunner:
             self._log("heartbeat_failed", runId=run_id, code=_error_code(exc))
 
     def _reserve(self, kind: str) -> bool:
-        cost = self.config.text_cost_cny if kind == "text" else self.config.audio_cost_cny
+        costs = {
+            "text": self.config.text_cost_cny,
+            "audio": self.config.audio_cost_cny,
+            "grounded": self.config.grounded_cost_cny,
+        }
+        cost = costs.get(kind, self.config.text_cost_cny)
         reserved = self.state.reserve_cost(cost, self.config.daily_cap_cny)
         cost_state = self.state.data["cost"]
         self._log(
@@ -675,6 +723,70 @@ class CoachRunner:
         self._save_feedback(arguments, run_id)
         return "processed"
 
+    def _review_audio_grounded(
+        self, attempt: Mapping[str, Any], day: int, run_id: str
+    ) -> str:
+        """Stage A/B: calibrated prosody coach, no phoneme assertions.
+
+        The recording is still read through the same byte-range contract.  The
+        dominant cost is the text-model call, so the grounded budget bucket is
+        reserved before inference.  Stage B (detector candidates) is optional
+        and fail-closed inside ``grounded_audio``.
+        """
+        recording_id = str(attempt["recordingId"])
+        raw = self._read_recording(attempt, day, run_id)
+        self._log(
+            "recording_reassembled",
+            attempt=str(attempt["id"]),
+            bytes=len(raw),
+            sha256=audio_module.sha256_bytes(raw),
+        )
+        if not self._reserve("grounded"):
+            return "paused"
+        started = time.time()
+        with tempfile.TemporaryDirectory(prefix="bandroom-grounded-") as directory:
+            produced = grounded_audio.review_speaking_grounded(
+                raw,
+                attempt,
+                day,
+                config=self.config,
+                model=self.model,
+                workdir=Path(directory),
+                logger=self._logger,
+            )
+        self._log(
+            "grounded_model_usage",
+            attempt=str(attempt["id"]),
+            model=self.config.text_model,
+            usage=getattr(self.model, "last_usage", None),
+            costCny=self.config.grounded_cost_cny,
+            latencySeconds=round(time.time() - started, 3),
+        )
+        validated = validate_feedback(
+            produced.feedback,
+            produced.evidence,
+            produced.attempt,
+            expected_attempt=str(attempt["id"]),
+            stage="speak",
+            recording_id=recording_id,
+            pronunciation=produced.pronunciation,
+            audio_used=True,
+            response=str(attempt.get("response") or ""),
+        )
+        # The grounded path intentionally emits no pronunciation rating: the MCP
+        # schema marks it optional and prescribes absence for technical decoding,
+        # and lib/coach.ts would render any numeric band to the learner as
+        # "发音专项暂定 X/9".  Only the legacy listening path requires it.
+        arguments = feedback_to_tool_args(
+            validated,
+            day=day,
+            stage="speak",
+            recording_id=recording_id,
+            audio_used=True,
+        )
+        self._save_feedback(arguments, run_id)
+        return "processed"
+
     def _process_attempt(
         self, attempt: Mapping[str, Any], session_day: int, run_id: str, report: RunReport
     ) -> str:
@@ -686,7 +798,15 @@ class CoachRunner:
         day = int(attempt.get("day") or session_day or 1)
         try:
             if self._has_usable_audio(attempt):
-                outcome = self._review_audio(attempt, day, run_id)
+                mode = resolve_coach_audio_mode(self.config)
+                if mode == "grounded":
+                    outcome = self._review_audio_grounded(attempt, day, run_id)
+                elif mode == "legacy":
+                    outcome = self._review_audio(attempt, day, run_id)
+                else:
+                    # "off" is filtered before dispatch; keep a text-safe fallback
+                    # if a direct caller bypasses that filter.
+                    outcome = self._review_text(attempt, day, run_id)
             else:
                 outcome = self._review_text(attempt, day, run_id)
             if outcome == "paused":
@@ -746,15 +866,21 @@ class CoachRunner:
                 and attempt.get("kind") == "subjective"
                 and attempt.get("id")
             ]
-            # Gate-1 ruling: audio coach held -> skip speaking attempts.
-            attempts = [
-                a for a in all_pending
-                if self.config.coach_audio or a.get("stage") != "speak"
-            ]
+            # Audio dispatch (see resolve_coach_audio_mode).  "off" preserves the held
+            # Gate-1 behaviour exactly: speaking attempts are skipped; text still
+            # runs.  "legacy" preserves the old omni _review_audio path.
+            # "grounded" sends speaking attempts through the calibrated path.
+            mode = resolve_coach_audio_mode(self.config)
+            if mode == "off":
+                attempts = [
+                    a for a in all_pending if a.get("stage") != "speak"
+                ]
+            else:
+                attempts = all_pending
             skipped_audio = len(all_pending) - len(attempts)
             if skipped_audio:
                 self._log("audio_held_skipped", runId=run_id, count=skipped_audio)
-            self._log("run_started", runId=run_id, pending=len(attempts))
+            self._log("run_started", runId=run_id, pending=len(attempts), audioMode=mode)
             for attempt in attempts:
                 if self.state.paused():
                     report.paused = True

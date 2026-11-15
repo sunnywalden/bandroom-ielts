@@ -122,6 +122,19 @@ def test_invalid_model_json_is_retryable():
     assert caught.value.retryable is True
 
 
+def test_grounded_completion_is_plain_text_without_json_object():
+    recorder = TransportRecorder(_chat_response("一、评估：只依据已校准韵律。"))
+    adapter = QwenAdapter("sk-test", transport=recorder)
+    text = adapter.complete_grounded("系统规则", "已校准证据")
+    assert text.startswith("一、评估")
+    call = recorder.calls[0]
+    assert call["body"]["model"] == "qwen3.8-max"
+    assert "response_format" not in call["body"]
+    assert call["body"]["reasoning_effort"] == "none"
+    assert call["timeout"] == 120.0
+    assert [m["role"] for m in call["body"]["messages"]] == ["system", "user"]
+
+
 def test_audio_requires_pronunciation_structure():
     payload = json.dumps(
         {
