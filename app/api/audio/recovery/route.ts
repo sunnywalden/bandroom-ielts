@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
-import { getChatGPTUser } from "@/app/chatgpt-auth";
+import { requireOwnerScope } from "@/lib/route-guard";
 import { initial, type Ledger } from "@/app/ledger";
 import { getDb } from "@/db";
 import { learnerStates } from "@/db/schema";
@@ -9,8 +9,9 @@ import { crossOrigin, json } from "../../shared";
 
 export const dynamic="force-dynamic";
 export async function GET(request:Request){
-  const user=await getChatGPTUser();
-  if(!user)return json({error:"sign_in_required"},401);
+  const auth=await requireOwnerScope();
+  if(auth instanceof Response)return auth;
+  const user=auth.user;
   if(crossOrigin(request))return json({error:"invalid_origin"},403);
   if(request.headers.get("X-Bandroom-Account")!==user.userId)return json({error:"refresh_account"},428);
   const params=new URL(request.url).searchParams,day=Number(params.get("day")),phase=params.get("phase");

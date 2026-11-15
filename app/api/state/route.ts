@@ -1,5 +1,5 @@
 import { and, eq } from "drizzle-orm";
-import { getChatGPTUser } from "@/app/chatgpt-auth";
+import { requireOwnerScope } from "@/lib/route-guard";
 import { getDb } from "@/db";
 import { learnerStates, teacherLessons } from "@/db/schema";
 import { hash, uuid } from "@/lib/backup-format";
@@ -16,16 +16,18 @@ import { validTransition, same } from "./transition";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const user = await getChatGPTUser();
-  if (!user) return json({ error: "sign_in_required" }, 401);
+  const auth = await requireOwnerScope();
+  if (auth instanceof Response) return auth;
+  const user = auth.user;
   const result = await getDb().select({ revision: learnerStates.revision, state: learnerStates.state })
     .from(learnerStates).where(eq(learnerStates.userId, user.userId)).get();
   return json({ account:user.userId, ...(result ?? { revision: 0, state: null }) });
 }
 
 export async function PUT(request: Request) {
-  const user = await getChatGPTUser();
-  if (!user) return json({ error: "sign_in_required" }, 401);
+  const auth = await requireOwnerScope({ write: true });
+  if (auth instanceof Response) return auth;
+  const user = auth.user;
   if (crossOrigin(request)) return json({ error: "invalid_origin" }, 403);
   if (request.headers.get("X-Bandroom-Account")!==user.userId) return json({error:"refresh_account"},428);
   if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json")
