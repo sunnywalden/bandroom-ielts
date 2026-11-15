@@ -1,0 +1,16 @@
+# Bandroom own coach runner — systemd timer template (Linux).
+# 5-minute cadence with up to 30 s randomized delay (design §4.4 D-7).
+[Unit]
+Description=Schedule the Bandroom own coach runner every 5 minutes
+Requires=bandroom-coach-runner.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30
+AccuracySec=5s
+Persistent=true
+Unit=bandroom-coach-runner.service
+
+[Install]
+WantedBy=timers.target

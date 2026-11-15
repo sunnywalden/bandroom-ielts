@@ -1,6 +1,7 @@
 // Vendored from @openai/sites-vite-plugin 0.2.0 (openai/sites#9).
 // See sites-vite-plugin.LICENSE for the upstream MIT license.
-import { access, cp, mkdir, rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { access, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import type { Plugin } from "vite";
@@ -27,6 +28,43 @@ async function exists(path: string): Promise<boolean> {
     }
     throw error;
   }
+}
+
+export type HostingConfig = {
+  d1?: string;
+  r2?: string;
+  project_id?: string;
+  capabilities?: string[];
+  [key: string]: unknown;
+};
+
+/**
+ * Hosting config path. `BANDROOM_HOSTING_CONFIG` supports self-hosted builds
+ * without changing the default Sites build behaviour. Relative values resolve
+ * from the project root (the Vite config root).
+ */
+export function hostingConfigPath(root = process.cwd()): string {
+  const configured = process.env.BANDROOM_HOSTING_CONFIG?.trim();
+  return configured
+    ? resolve(root, configured)
+    : resolve(root, ".openai", "hosting.json");
+}
+
+export function readHostingConfig(root = process.cwd()): HostingConfig {
+  const file = hostingConfigPath(root);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `Unable to read hosting config ${file}: ${(error as Error).message}`,
+      { cause: error },
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Hosting config ${file} must be a JSON object.`);
+  }
+  return parsed as HostingConfig;
 }
 
 export function sites({ mockAuth = true } = {}): Plugin {
@@ -174,13 +212,17 @@ export function sites({ mockAuth = true } = {}): Plugin {
       if (command !== "build") return;
 
       const outputDirectory = resolve(root, "dist", ".openai");
-      const hostingConfig = resolve(root, ".openai", "hosting.json");
+      const hostingConfig = hostingConfigPath(root);
       const drizzleSource = resolve(root, "drizzle");
+
+      // Read before removing the output directory in case an override points
+      // inside dist/.openai. The emitted copy keeps the Sites file name.
+      const hostingBytes = await readFile(hostingConfig);
 
       await rm(outputDirectory, { recursive: true, force: true });
       await mkdir(outputDirectory, { recursive: true });
 
-      await cp(hostingConfig, resolve(outputDirectory, "hosting.json"));
+      await writeFile(resolve(outputDirectory, "hosting.json"), hostingBytes);
       if (await exists(drizzleSource)) {
         await cp(drizzleSource, resolve(outputDirectory, "drizzle"), {
           recursive: true,

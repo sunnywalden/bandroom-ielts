@@ -1,0 +1,14 @@
+# Bandroom own coach runner — cron template (5 min + jitter, single instance).
+# Install with: crontab -e  (replace /opt/bandroom/repo and paths)
+#
+# The orchestrator also holds its own flock, so an overlapping cron tick exits
+# with {"error":"already_running"} instead of double-claiming.
+SHELL=/bin/sh
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# Credentials are NOT stored in this file. Put them in a root-owned 0600 file:
+#   /etc/bandroom/coach-runner.env
+#   BANDROOM_RUNNER_CLIENT_ID=...
+#   BANDROOM_RUNNER_CLIENT_SECRET=...
+#   DASHSCOPE_API_KEY=...
+*/5 * * * * sleep $((RANDOM % 30)); set -a; . /etc/bandroom/coach-runner.env; set +a; cd /opt/bandroom/repo && flock -n /tmp/bandroom-coach-runner.lock /usr/bin/python3 -m runner.orchestrator --config /opt/bandroom/repo/runner/config.toml >> /var/log/bandroom/coach-runner.log 2>&1

@@ -3,6 +3,7 @@ import {
   authenticateReviewTransfer, downloadReviewTransfer, isReviewUpload, liveSpeakingLease,
   uploadAcousticCheckpoint, uploadDecodeCheckpoint,
 } from "@/lib/review-transfer";
+import { isCanonicalOrigin, readOnlyMode } from "@/lib/route-guard";
 import { json, limitedBody } from "../shared";
 
 export const dynamic = "force-dynamic";
@@ -27,8 +28,10 @@ const statuses: Record<string, number> = {
 };
 
 async function transfer(request: Request) {
+  if (!isCanonicalOrigin(request)) return json({ error: "untrusted_origin" }, 403);
   const grant = await authenticateReviewTransfer(request);
   if (!grant) return json({ error: "transfer_access_denied" }, 403);
+  if (isReviewUpload(grant) && readOnlyMode()) return json({ error: "read_only" }, 403);
   const db = reviewTaskDb();
   const audit = {
     taskId: grant.taskId,

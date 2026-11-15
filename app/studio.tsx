@@ -233,8 +233,8 @@ export default function Studio(){
   <div className="eyebrow"><Emblem small/> Bandroom · IELTS Study Studio</div>
   <h1 style={{margin:'12px 0'}}>{sync==='auth'?'登录学习空间':sync==='load'?'正在读取学习进度':'重新连接学习空间'}</h1>
   {error&&<p role="status">{error}</p>}
-  <p>{sync==='auth'?'在新标签页使用本站所属的 ChatGPT 账号登录，再返回此页继续。':sync==='load'?'正在核对你的课程和最近一次提交。':'暂时无法核对云端记录。恢复连接后即可继续。'}</p>
-  <div className="actions" style={{marginTop:16}}>{sync==='auth'&&<a className="primary" href="/signin-with-chatgpt?return_to=%2F" target="_blank" rel="noopener noreferrer">登录 ChatGPT</a>}
+  <p>{sync==='auth'?'在新标签页登录学习空间，再返回此页继续。':sync==='load'?'正在核对你的课程和最近一次提交。':'暂时无法核对云端记录。恢复连接后即可继续。'}</p>
+  <div className="actions" style={{marginTop:16}}>{sync==='auth'&&<a className="primary" href="/signin-with-chatgpt?return_to=%2F" target="_blank" rel="noopener noreferrer">登录学习空间</a>}
   {sync!=='load'&&<button className="secondary" onClick={()=>void refresh()}>重新读取进度</button>}</div></section>
  if(!account)return <main>{loginGate}</main>
  const feedbackDay=tab==='history'?historyDay:s.day
@@ -247,7 +247,7 @@ export default function Studio(){
  <nav className="mobile-nav">{[...tabs,['settings','设置',SlidersHorizontal] as const].map(([id,title,I])=><button key={id} aria-current={tab===id||(id==='home'&&tab==='lesson')?'page':undefined} className={(tab===id||(id==='home'&&tab==='lesson'))?'selected':''} onClick={()=>navigate(id)}><I size={15}/>{title}</button>)}</nav>
  <main id="main">
  <FeedbackIdentificationStatus/>
- {(sync==='auth'||sync==='fail'||sync==='conflict'||error)&&<div role="status" className="alert"><CloudOff size={17}/><span>{error||(sync==='auth'?'请使用此站点所属的 ChatGPT 账号登录，以保存作答。':'暂时无法读取你的云端进度。请在继续练习前重试。')}</span>{sync==='auth'?<a href="/signin-with-chatgpt?return_to=%2F" target="_blank" rel="noopener noreferrer">登录</a>:<button onClick={()=>void refresh()}>重新读取</button>}</div>}
+ {(sync==='auth'||sync==='fail'||sync==='conflict'||error)&&<div role="status" className="alert"><CloudOff size={17}/><span>{error||(sync==='auth'?'请登录此学习空间，以保存作答。':'暂时无法读取你的云端进度。请在继续练习前重试。')}</span>{sync==='auth'?<a href="/signin-with-chatgpt?return_to=%2F" target="_blank" rel="noopener noreferrer">登录</a>:<button onClick={()=>void refresh()}>重新读取</button>}</div>}
  {coachError&&sync==='ok'&&<div className="alert"><span>反馈同步暂时失败；答案和已有评语仍保留，恢复连接后会自动重试。</span><button onClick={()=>void refreshCoach()}>重试</button></div>}
  {tab!=='lesson'&&<div className="page-intro"><div><div className="eyebrow"><span className="kicker-line"/>{titles[tab][0]}</div><h1>{titles[tab][1]}</h1><p>{titles[tab][2]}</p></div>{tab==='home'&&<div className="edition"><Disc3 size={15}/> PERSONAL EDITION</div>}</div>}
  {tab==='home'&&<div className="dashboard"><div className="desk-main"><section className="hero"><div className="hero-top"><span className="hero-tag"><i/>{s.finished?'本课已打卡':'进行中'}</span><span>LESSON {String(s.day).padStart(2,'0')} / 62</span></div><div className="hero-copy"><div className="hero-over">{s.finished?'LESSON COMPLETE':s.day===11?'SPEAKING LAB  /  PART 3':english[stage].toUpperCase()+' LAB'}</div><h2>{s.day===11?'仪表盘上的警示灯':topic.theme}</h2><p>{s.finished?'本课记录已归档。下一课由你开启。':s.day===11?'接续你的轮胎预警经历，练习解释原因与后果。':'从当前小题继续，保留每一次独立作答。'}</p>
