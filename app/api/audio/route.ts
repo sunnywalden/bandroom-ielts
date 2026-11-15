@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { getChatGPTUser } from "@/app/chatgpt-auth";
+import { requireOwnerScope } from "@/lib/route-guard";
 import { crossOrigin, json, limitedBody } from "../shared";
 import { uuid } from "@/lib/recording-recovery";
 
@@ -24,8 +24,9 @@ function audioKey(userId: string, id: string) {
 }
 
 export async function POST(request: Request) {
-  const user = await getChatGPTUser();
-  if (!user) return json({ error: "sign_in_required" }, 401);
+  const auth = await requireOwnerScope({ write: true });
+  if (auth instanceof Response) return auth;
+  const user = auth.user;
   if (crossOrigin(request)) return json({ error: "invalid_origin" }, 403);
   if(request.headers.get("X-Bandroom-Account")!==user.userId)return json({error:"refresh_account"},428);
   if (!env.BUCKET) return json({ error: "recordings_unavailable" }, 503);
@@ -63,8 +64,9 @@ function byteRange(header: string, size: number) {
 }
 
 export async function GET(request: Request) {
-  const user = await getChatGPTUser();
-  if (!user) return json({ error: "sign_in_required" }, 401);
+  const auth = await requireOwnerScope();
+  if (auth instanceof Response) return auth;
+  const user = auth.user;
   const id = new URL(request.url).searchParams.get("id") ?? "";
   if (!uuid.test(id)) return json({ error: "invalid_recording_id" }, 400);
   const bucket = env.BUCKET;

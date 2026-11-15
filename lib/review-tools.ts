@@ -1,5 +1,6 @@
 import { z } from "zod/v4";
 import { acousticChunkIndex, acousticChunkLimit } from "./acoustic-chunk";
+import { coachingContentViolation } from "./content-rules";
 import { env } from "cloudflare:workers";
 import { createAnalysisBundleGrant } from "./analysis-bundle";
 import { decodeCheckpointLimit, issueReviewTransfer, requireDecodedInput } from "./review-transfer";
@@ -128,7 +129,7 @@ export const reviewTools = [
     name: "read_review_receipt", description: "Read the immutable completion receipt for one owner task, if it exists.", schema: receiptSpec, readOnly: true,
   },
   {
-    name: "report_scheduler_heartbeat", description: "Record an official Work schedule run heartbeat so the page can show actual cadence and disconnection instead of a fabricated healthy state.", schema: heartbeatSpec, readOnly: false,
+    name: "report_scheduler_heartbeat", description: "Record an official runner schedule run heartbeat so the page can show actual cadence and disconnection instead of a fabricated healthy state.", schema: heartbeatSpec, readOnly: false,
   },
 ].map(({ schema, readOnly, ...tool }) => ({
   ...tool,
@@ -219,6 +220,19 @@ export async function callReviewTool(userId: string, name: string, args: unknown
         const input = completeSpec.parse(args);
         const task = await getReviewTask(db, userId, input.taskId);
         if (!task) throw new ReviewTaskError("task_not_found", "The task is not available to this account.");
+        const snapshot = await snapshotFor(db, userId, task);
+        const attempt = snapshot.attempt as Record<string, unknown> | undefined;
+        if (!attempt || typeof attempt.stage !== "string")
+          throw new ReviewTaskError("snapshot_invalid", "The immutable submission snapshot has no attempt stage.");
+        // The same content rules as add_coach_feedback (MJ-3) so a runner
+        // cannot award an overall Speaking band through this path.
+        if (attempt.stage === "speak") {
+          const violation = coachingContentViolation({
+            feedback: input.feedback, evidence: input.evidence,
+            hasStructuredPronunciation: Boolean(input.pronunciation),
+          });
+          if (violation) throw new ReviewTaskError("content_rule_violation", violation.message);
+        }
         if (task.kind === "speaking" && (!input.analysis || !input.recordingSha256))
           throw new ReviewTaskError("analysis_required", "A speaking task needs structured acoustic evidence and the original recording SHA-256.");
         if (task.kind === "text" && input.analysis)
@@ -253,10 +267,6 @@ export async function callReviewTool(userId: string, name: string, args: unknown
           if ((input.analysis?.decoded as { sampleCount?: number }).sampleCount !== sampleCount)
             throw new ReviewTaskError("invalid_analysis", "The decoded sample count differs from the committed timeline.");
         }
-        const snapshot = await snapshotFor(db, userId, task);
-        const attempt = snapshot.attempt as Record<string, unknown> | undefined;
-        if (!attempt || typeof attempt.stage !== "string")
-          throw new ReviewTaskError("snapshot_invalid", "The immutable submission snapshot has no attempt stage.");
         const completed = await completeReviewTask(db, userId, {
           taskId: input.taskId, fence: input.fence,
           output: { feedback: input.feedback, evidence: input.evidence, analysis: input.analysis ?? null },

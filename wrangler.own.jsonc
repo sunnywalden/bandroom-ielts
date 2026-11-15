@@ -1,0 +1,36 @@
+// Self-hosted Worker overrides merged over the vinext build output
+// (dist/server/wrangler.json). Values in ${...} are filled by
+// scripts/own-deploy.mjs from CLI flags or environment variables.
+//
+// This file never defines `main` or `assets`: those stay relative to the
+// generated config inside dist/server/ so the built Worker keeps its layout.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "${WORKER_NAME}",
+  // Never expose the default workers.dev hostname or preview URLs. Access to a
+  // deployed worker is only through the pinned custom domain.
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "${BANDROOM_DOMAIN}",
+      "custom_domain": true
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "${D1_DATABASE_NAME}",
+      "database_id": "${D1_DATABASE_ID}"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "${R2_BUCKET_NAME}"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
