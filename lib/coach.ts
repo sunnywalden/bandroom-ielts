@@ -6,6 +6,7 @@ import { getDb } from "@/db";
 import { automationHeartbeats, learnerStates, reviewTasks, teacherFeedback, teacherLessons } from "@/db/schema";
 import { getExercises, type Lesson } from "@/app/curriculum";
 import { targets, overallTarget } from "@/app/goals";
+import { coachingContentViolation } from "./content-rules";
 import { frozenReviews } from "./review-jobs";
 import { reviewContext } from "./review-context";
 import { listRecoverable } from "./recording-recovery";
@@ -244,12 +245,10 @@ export async function callCoach(userId:string, name:string, args:unknown) {
         if(pronunciation&&!recordingId)throw new CoachError("A pronunciation rating requires a submitted recording you actually heard. For text or self-report, leave pronunciation unassessed.");
         if(values.stage==="speak") {
           // A fragment may receive a provisional criterion rating, never a whole-skill band.
-          const claim=[values.feedback,values.evidence,values.attempt].join(" ");
-          const number="(?:[0-8](?:[.]5|[.]0)?|9(?:[.]0)?)(?![.0-9])";
-          const explicit=(term:string)=>new RegExp(term+"(?:\\s*(?:[:：=]|is|was|would be|estimated at|band|score|为|得分|约为|约|暂定|预估|评分|是|为|大约))*\\s*"+number,"i").test(claim);
-          if(explicit("(?:overall speaking|speaking band|口语总分|口语综合分|口语单科分)"))
-            throw new CoachError("A partial classroom answer cannot receive an overall Speaking band. Use a full independent assessment record for that.");
-          if(!pronunciation&&explicit("(?:pronunciation|发音)"))throw new CoachError("Record a pronunciation estimate in the structured pronunciation field only after listening to its submitted clip.");
+          // The same rules guard complete_review_task via lib/content-rules.ts.
+          const violation=coachingContentViolation({feedback:values.feedback,evidence:values.evidence,attempt:values.attempt,
+            hasStructuredPronunciation:Boolean(pronunciation)});
+          if(violation)throw new CoachError(violation.message);
         }
         const {ledger}=await checkpoint(userId);
         requireStarted(values.day,ledger);

@@ -1,51 +1,30 @@
-import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { getAuthContext } from "@/lib/auth-adapter";
+import type { AuthUser } from "@/lib/auth-adapter";
 
-export type ChatGPTUser = {
-  userId: string;
-  displayName: string;
-  email: string;
-  fullName: string | null;
-};
+export { getAuthContext };
+export type ChatGPTUser = AuthUser;
 
-const USER_ID_HEADER = "oai-authenticated-user-id";
-const USER_EMAIL_HEADER = "oai-authenticated-user-email";
-const USER_FULL_NAME_HEADER = "oai-authenticated-user-full-name";
-const USER_FULL_NAME_ENCODING_HEADER =
-  "oai-authenticated-user-full-name-encoding";
-const PERCENT_ENCODED_UTF8 = "percent-encoded-utf-8";
 const SIGN_IN_PATH = "/signin-with-chatgpt";
 const SIGN_OUT_PATH = "/signout-with-chatgpt";
 const CALLBACK_PATH = "/callback";
 
+// Compatibility shim: existing callers keep the historical user shape while
+// identity resolution now lives in lib/auth-adapter.ts.
 export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
-  const requestHeaders = await headers();
-  const userId = requestHeaders.get(USER_ID_HEADER);
-  const email = requestHeaders.get(USER_EMAIL_HEADER);
-  if (!userId || !email) return null;
-
-  const encodedFullName = requestHeaders.get(USER_FULL_NAME_HEADER);
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get(USER_FULL_NAME_ENCODING_HEADER) === PERCENT_ENCODED_UTF8
-      ? safeDecodeURIComponent(encodedFullName)
-      : null;
-
-  return {
-    userId,
-    displayName: fullName ?? email,
-    email,
-    fullName,
-  };
+  const context = await getAuthContext();
+  return context.user;
 }
 
-export async function requireChatGPTUser(
-  returnTo: string,
-): Promise<ChatGPTUser> {
+// Self-hosted deployments authenticate at the edge (Cloudflare Access). There
+// is no application-side login URL, so redirecting to / lets Access intercept
+// the request instead of creating a sign-in redirect loop.
+export async function requireChatGPTUser(returnTo: string): Promise<ChatGPTUser> {
   const user = await getChatGPTUser();
   if (user) return user;
-
-  redirect(chatGPTSignInPath(returnTo));
+  // Kept for call-site compatibility; edge Access, not an app URL, owns login.
+  void returnTo;
+  redirect("/");
 }
 
 export function chatGPTSignInPath(returnTo: string): string {
@@ -79,12 +58,4 @@ function isReservedAuthPath(pathname: string): boolean {
     pathname === SIGN_OUT_PATH ||
     pathname === CALLBACK_PATH
   );
-}
-
-function safeDecodeURIComponent(value: string): string | null {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return null;
-  }
 }

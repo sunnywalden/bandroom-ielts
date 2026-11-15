@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Bandroom own coach runner — launchd template (macOS).
+  Install to ~/Library/LaunchAgents/com.bandroom.coach-runner.plist and load:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bandroom.coach-runner.plist
+  The shell wrapper adds up to 30 s of jitter; the orchestrator flock makes the
+  job single-instance even if a previous run is still active.
+  Replace /opt/bandroom/repo and the credentials.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.bandroom.coach-runner</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>set -a; . /etc/bandroom/coach-runner.env; set +a; sleep $((RANDOM % 30)); exec /usr/bin/python3 -m runner.orchestrator --config /opt/bandroom/repo/runner/config.toml</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/opt/bandroom/repo</string>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/tmp/bandroom-coach-runner.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/bandroom-coach-runner.err</string>
+</dict>
+</plist>

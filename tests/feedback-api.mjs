@@ -28,7 +28,7 @@ globalThis.user={userId:'feedback-fixture'};
 registerHooks({resolve(spec,ctx,next){
  const mock=src=>({url:'data:text/javascript,'+encodeURIComponent(src),shortCircuit:true});
  if(spec==='cloudflare:workers')return mock('export const env=globalThis.testCloud');
- if(spec==='@/app/chatgpt-auth')return mock('export const getChatGPTUser=async()=>globalThis.user');
+ if(spec==='@/app/chatgpt-auth')return mock('export const getChatGPTUser=async()=>globalThis.user; export const getAuthContext=async()=>({user:globalThis.user,scope:"owner",identityType:"mock"})');
  if(ctx.parentURL?.startsWith(root.href)&&!ctx.parentURL.includes('node_modules')){
   if(spec==='@/db')return {url:new URL('db/index.ts',root).href,shortCircuit:true};
   if(spec.startsWith('@/'))return {url:new URL(spec.slice(2)+'.ts',root).href,shortCircuit:true};

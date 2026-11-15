@@ -1,10 +1,11 @@
 import { env } from 'cloudflare:workers';
-import { getChatGPTUser } from '@/app/chatgpt-auth';
+import { requireOwnerScope } from '@/lib/route-guard';
 import { BackupError } from '@/lib/backup';
 import { crossOrigin,json } from '../shared';
 export async function withBackup(request:Request, operation:(db:D1Database,bucket:R2Bucket,uid:string,key:string)=>Promise<unknown>,accountBinding:'header'|'signed-download'='header'){
-  const user=await getChatGPTUser();
-  if(!user)return json({error:'请重新登录，再执行备份操作。'},401);
+  const auth=await requireOwnerScope({write:request.method!=='GET'});
+  if(auth instanceof Response)return auth;
+  const user=auth.user;
   if(accountBinding==='header'&&request.headers.get('X-Bandroom-Account')!==user.userId)return json({error:'登录账号已变更，请刷新页面后重试。'},428);
   if(crossOrigin(request))return json({error:'请求来源无效。'},403);
   const key=(env as typeof env & {BANDROOM_BACKUP_KEY?:string}).BANDROOM_BACKUP_KEY;

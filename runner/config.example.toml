@@ -1,0 +1,50 @@
+# Bandroom own coach runner (production coach track) — example config.
+# Copy to runner/config.toml on the runner host. Never put secrets in this file:
+# all credentials are read from environment variables.
+
+[site]
+base_url = "https://bandroom.example.com"
+mcp_path = "/mcp"
+timeout_seconds = 30
+retries = 3
+# Cloudflare Access service token. The secret is intentionally not a TOML key.
+client_id_env = "BANDROOM_RUNNER_CLIENT_ID"
+client_secret_env = "BANDROOM_RUNNER_CLIENT_SECRET"
+
+[model]
+# S1 = DashScope OpenAI-compatible, pay-as-you-go sk- key.
+provider = "qwen"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key_env = "DASHSCOPE_API_KEY"
+# qwen3.8-max is text-only (official). Audio uses omni.
+text_model = "qwen3.8-max"
+audio_model = "qwen3.8-omni-flash"
+text_timeout_seconds = 120
+audio_timeout_seconds = 240
+
+[runner]
+automation_id = "bandroom-coach-runner"
+generation = 1
+# cron runs every 5 minutes; this value is only used for nextExpectedAt.
+interval_seconds = 300
+max_attempts = 3
+state_dir = "~/.bandroom-runner"
+
+[budget]
+# Upper bound for text + audio combined. When exceeded the run finishes with
+# detail="cost_cap_paused" and stays paused for the rest of the UTC day.
+daily_cap_cny = 20.0
+# Conservative fixed per-call estimates in CNY; reconcile with the provider
+# console during P0 and adjust.
+text_cost_cny = 0.05
+audio_cost_cny = 0.20
+
+[audio]
+# read_speaking_recording bytes mode: at most 24576 bytes per range.
+chunk_bytes = 24576
+# Site upload cap (12 MiB); used as a defensive bound before reassembly.
+max_recording_bytes = 12582912
+# DashScope omni: clips up to 3 hours. Longer clips fail with audio_too_long.
+max_duration_seconds = 10800
+# Whole-clip transcode tries these bitrates high to low; never truncates.
+transcode_bitrates_kbps = [64, 48, 32, 24, 16]

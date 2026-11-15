@@ -1,10 +1,11 @@
 import { env } from "cloudflare:workers";
 import { verifyBundleToken } from "@/lib/analysis-bundle";
+import { isCanonicalOrigin } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 
-function denied(status: number) {
-  return new Response(JSON.stringify({ error: "bundle_access_denied" }), {
+function denied(status: number, error = "bundle_access_denied") {
+  return new Response(JSON.stringify({ error }), {
     status, headers: { "Cache-Control": "private, no-store", "Content-Type": "application/json", "Referrer-Policy": "no-referrer" },
   });
 }
@@ -19,6 +20,7 @@ function byteRange(header: string, size: number) {
 }
 
 export async function GET(request: Request) {
+  if (!isCanonicalOrigin(request)) return denied(403, "untrusted_origin");
   // Capability URLs are for code-capable cloud runs, not browser fetch.
   if (request.headers.get("Origin")) return denied(403);
   const token = new URL(request.url).searchParams.get("token") ?? "";
