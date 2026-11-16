@@ -364,7 +364,11 @@ export async function callCoach(userId:string, name:string, args:unknown) {
                 taskId:target.id,fence:target.fence,
                 output:{feedback:values.feedback,evidence:values.evidence,analysis:storedAnalysis},
                 feedback:{id:`rt:${target.id}`,day:values.day,stage:values.stage,attempt:values.attempt,
-                  evidence:values.evidence,feedback:values.feedback,pronunciation:rating??undefined},
+                  evidence:values.evidence,feedback:values.feedback,pronunciation:rating??undefined,
+                  // The UI reads candidateIds from teacher_feedback.analysis_json.
+                  // Passing analysis only in `output` merely hashes it, so the
+                  // owner would never see a candidate and could never answer.
+                  ...(storedAnalysis?{analysis:storedAnalysis}:{})},
                 manualGrantSha256:target.claimKind==="manual"?target.manualGrantSha256??undefined:undefined,
                 receipt:{recordingSha256:frozen?.snapshot.recording?.sha256??null,
                   analysisVersion:target.analysisVersion??null,payload:{source:"manual_coach",
@@ -382,7 +386,11 @@ export async function callCoach(userId:string, name:string, args:unknown) {
         }
         const hash=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(rating?[userId,values,rating]:[userId,values])));
         const id=frozen?.snapshot.attempt.id??Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,"0")).join("");
-        await getDb().insert(teacherFeedback).values({...values,id,userId,pronunciation:rating,createdAt:new Date().toISOString()}).onConflictDoNothing();
+        // Legacy v1 attempts have no review task, so they take this path. It must
+        // persist the enriched analysis too, or the UI gets no candidateIds and
+        // the calibration loop is inert for every pre-v2 submission (Day 12).
+        await getDb().insert(teacherFeedback).values({...values,id,userId,pronunciation:rating,
+          ...(storedAnalysis?{analysisJson:storedAnalysis}:{}),createdAt:new Date().toISOString()}).onConflictDoNothing();
         return content({saved:true,id,day:values.day,attempt:values.attempt});
       }
       case "publish_lesson": {
