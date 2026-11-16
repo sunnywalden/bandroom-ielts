@@ -91,6 +91,10 @@ DETECTOR_RECOGNIZER = (
     "Haopeng/CROTTC-IF-l2-arctic@9149e5107b3332b9aa3f5573f6328a4e312006ad"
 )
 DETECTOR_ASR = "openai-whisper large-v3-turbo"
+# Phone inventory identity. A profile built under a different inventory fails
+# closed server-side, so this must change whenever the phone set changes.
+CALIBRATION_INVENTORY_VERSION = "arpabet-v1"
+MAX_CALIBRATION_CANDIDATES = 24
 
 SELF_LISTEN_HEADER = "六、建议自听对比（非错误断言）"
 DEFAULT_SELF_LISTEN_MAX_N = 3
@@ -1468,18 +1472,26 @@ def candidates_from_payload(
             continue
         seen.add(key)
         seconds = round(timestamp_ms / 1000.0, 2)
-        candidates.append(
-            {
-                "word": word,
-                "timestamp_ms": timestamp_ms,
-                "seconds": seconds,
-                "detector_confidence": round(float(item.get("confidence")), 4),
-                "is_error_assertion": False,
-                "suggestion_zh": (
-                    f"在 {seconds:.2f} 秒处的 {word}，可对比标准读音自听判断。"
-                ),
-            }
-        )
+        candidate: dict[str, Any] = {
+            "word": word,
+            "timestamp_ms": timestamp_ms,
+            "seconds": seconds,
+            "detector_confidence": round(float(item.get("confidence")), 4),
+            "is_error_assertion": False,
+            "suggestion_zh": (
+                f"在 {seconds:.2f} 秒处的 {word}，可对比标准读音自听判断。"
+            ),
+        }
+        # The phone pair is carried for the server-side calibration payload only.
+        # It never reaches the learner: `_t3_item` ignores it, so TierItem and
+        # every rendered template stay phone-free, and a catch trial
+        # (expected === actual) cannot be distinguished in the UI.
+        expected = _coerce_phone(item.get("expected"))
+        actual = _coerce_phone(item.get("actual"))
+        if expected and actual:
+            candidate["expected_phone"] = expected
+            candidate["actual_phone"] = actual
+        candidates.append(candidate)
         if len(candidates) >= limit:
             break
     return candidates
@@ -1667,6 +1679,77 @@ def collect_self_listen_candidates(
 # ---------------------------------------------------------------------------
 # Public orchestration entry point
 # ---------------------------------------------------------------------------
+
+
+def build_grounded_analysis(
+    self_listen: Sequence[Mapping[str, Any]],
+    assignment: TierAssignment,
+    analysis: Mapping[str, Any],
+    *,
+    max_candidates: int = MAX_CALIBRATION_CANDIDATES,
+) -> dict[str, Any] | None:
+    """Build the server-side calibration payload from raw detector candidates.
+
+    This is the transport that lets the site issue candidateIds. Without it the
+    personal-calibration loop is inert: no candidates are ever shown, so no
+    verdicts, so no multi-session data, so V3 can never be reached.
+
+    Deliberately built from the RAW candidates rather than from ``TierItem``:
+    the rendered tier items are phone-free by design, and the learner must never
+    see an expected->actual pair (it would turn a hedged suggestion into an
+    implicit assertion and would distinguish catch trials).
+    """
+    calibrated = analysis.get("calibrated") or {}
+    try:
+        speech = float(calibrated.get("speech_duration_seconds") or 0.0)
+    except (TypeError, ValueError):
+        speech = 0.0
+    if not math.isfinite(speech) or speech < 0:
+        speech = 0.0
+    t2_keys = {(item.word, item.timestamp_ms) for item in assignment.t2_items}
+    items: list[dict[str, Any]] = []
+    for raw in self_listen or ():
+        if not isinstance(raw, Mapping):
+            continue
+        word = str(raw.get("word") or "").strip()
+        expected = _coerce_phone(raw.get("expected_phone"))
+        actual = _coerce_phone(raw.get("actual_phone"))
+        at_ms = _coerce_timestamp_ms(raw)
+        if not word or not expected or not actual or at_ms <= 0:
+            continue
+        if len(word) > 80 or len(expected) > 8 or len(actual) > 8:
+            continue
+        if at_ms > 10800000:
+            continue
+        try:
+            confidence = float(raw.get("detector_confidence"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+            continue
+        item: dict[str, Any] = {
+            "word": word,
+            "expected": expected,
+            "actual": actual,
+            "atMs": at_ms,
+            "detectorConfidence": confidence,
+            "tier": "T2" if (word, at_ms) in t2_keys else "T3",
+        }
+        # A control item must never contribute to a profile. The detector only
+        # emits substitutions, so this is defensive rather than expected.
+        if expected == actual:
+            item["catchTrial"] = True
+        items.append(item)
+        if len(items) >= max(0, int(max_candidates)):
+            break
+    if not items:
+        return None
+    return {
+        "detectorVersion": DETECTOR_RECOGNIZER,
+        "inventoryVersion": CALIBRATION_INVENTORY_VERSION,
+        "speechSeconds": round(speech, 4),
+        "candidates": items,
+    }
 
 
 def build_evidence_text(recording_id: str, analysis: Mapping[str, Any]) -> str:
@@ -1903,6 +1986,7 @@ def review_speaking_grounded(
             evidence=build_evidence_text(recording_id, analysis),
             attempt=attempt_id,
             pronunciation=GROUNDED_PRONUNCIATION,
+            analysis=build_grounded_analysis(self_listen, assignment, analysis),
         )
     except ValueError as exc:
         raise ContentRuleError(

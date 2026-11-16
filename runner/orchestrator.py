@@ -795,6 +795,7 @@ class CoachRunner:
             pronunciation=produced.pronunciation,
             audio_used=True,
             response=str(attempt.get("response") or ""),
+            analysis=getattr(produced, "analysis", None),
         )
         # The grounded path intentionally emits no pronunciation rating: the MCP
         # schema marks it optional and prescribes absence for technical decoding,

@@ -66,6 +66,7 @@ class ValidatedFeedback:
     evidence: str
     attempt: str
     pronunciation: Pronunciation | None = None
+    analysis: Mapping[str, Any] | None = None
 
 
 @lru_cache(maxsize=8)
@@ -147,6 +148,7 @@ def validate_feedback(
     audio_used: bool = False,
     response: str = "",
     require_citation: bool = True,
+    analysis: Mapping[str, Any] | None = None,
 ) -> ValidatedFeedback:
     """Validate model output against the server's coaching rules.
 
@@ -215,12 +217,123 @@ def validate_feedback(
     if require_citation and response:
         _require_citation(evidence_text, response, recording_id)
 
+    grounded = coerce_grounded_analysis(analysis)
+    if grounded is not None:
+        # Mirrors the server guard, plus the runner-side invariant that grounded
+        # evidence can only exist if the whole clip was actually decoded.
+        if stage != "speak" or not recording_id:
+            raise ContentRuleError(
+                "grounded_analysis_without_recording",
+                "grounded analysis requires a speaking attempt with a submitted recording",
+                retryable=True,
+            )
+        if not audio_used:
+            raise ContentRuleError(
+                "grounded_analysis_without_audio",
+                "grounded analysis requires the whole clip to be heard",
+                retryable=True,
+            )
+
     return ValidatedFeedback(
         feedback=feedback_text,
         evidence=evidence_text,
         attempt=attempt_text,
         pronunciation=pron,
+        analysis=grounded,
     )
+
+
+MAX_ANALYSIS_CANDIDATES = 24
+_ANALYSIS_FIELDS = frozenset(
+    {"detectorVersion", "inventoryVersion", "speechSeconds", "candidates"}
+)
+_CANDIDATE_FIELDS = frozenset(
+    {"word", "expected", "actual", "atMs", "detectorConfidence", "tier", "catchTrial"}
+)
+
+
+def coerce_grounded_analysis(value: Any) -> dict[str, Any] | None:
+    """Mirror ``feedbackSpec.groundedAnalysis`` before the payload leaves the runner.
+
+    The server issues candidateIds itself; the runner only supplies evidence.
+    Bounds here are the same as the Zod schema so a violation fails locally
+    rather than as a remote tool error after the model call has been paid for.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ContentRuleError("invalid_grounded_analysis", "groundedAnalysis must be an object")
+    extra = set(value) - _ANALYSIS_FIELDS
+    if extra:
+        raise ContentRuleError(
+            "invalid_grounded_analysis",
+            f"groundedAnalysis has unknown fields: {sorted(extra)}",
+        )
+    out: dict[str, Any] = {}
+    for name in ("detectorVersion", "inventoryVersion"):
+        raw = value.get(name)
+        if not isinstance(raw, str) or not raw.strip():
+            raise ContentRuleError("invalid_grounded_analysis", f"{name} must be a non-empty string")
+        if len(raw.strip()) > 80:
+            raise ContentRuleError("invalid_grounded_analysis", f"{name} exceeds 80 characters")
+        out[name] = raw.strip()
+    speech = value.get("speechSeconds")
+    if isinstance(speech, bool) or not isinstance(speech, (int, float)):
+        raise ContentRuleError("invalid_grounded_analysis", "speechSeconds must be numeric")
+    if not 0 <= float(speech) <= 10800:
+        raise ContentRuleError("invalid_grounded_analysis", "speechSeconds out of range")
+    out["speechSeconds"] = float(speech)
+
+    candidates = value.get("candidates")
+    if not isinstance(candidates, (list, tuple)):
+        raise ContentRuleError("invalid_grounded_analysis", "candidates must be an array")
+    if len(candidates) > MAX_ANALYSIS_CANDIDATES:
+        raise ContentRuleError(
+            "invalid_grounded_analysis",
+            f"candidates exceeds {MAX_ANALYSIS_CANDIDATES}",
+        )
+    items: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            raise ContentRuleError("invalid_grounded_analysis", "each candidate must be an object")
+        unknown = set(candidate) - _CANDIDATE_FIELDS
+        if unknown:
+            raise ContentRuleError(
+                "invalid_grounded_analysis",
+                f"candidate has unknown fields: {sorted(unknown)}",
+            )
+        item: dict[str, Any] = {}
+        for name, limit in (("word", 80), ("expected", 8), ("actual", 8)):
+            raw = candidate.get(name)
+            if not isinstance(raw, str) or not raw.strip():
+                raise ContentRuleError("invalid_grounded_analysis", f"candidate {name} required")
+            if len(raw.strip()) > limit:
+                raise ContentRuleError(
+                    "invalid_grounded_analysis", f"candidate {name} exceeds {limit} characters"
+                )
+            item[name] = raw.strip()
+        at_ms = candidate.get("atMs")
+        if isinstance(at_ms, bool) or not isinstance(at_ms, int) or not 0 <= at_ms <= 10800000:
+            raise ContentRuleError("invalid_grounded_analysis", "candidate atMs out of range")
+        item["atMs"] = at_ms
+        confidence = candidate.get("detectorConfidence")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            raise ContentRuleError("invalid_grounded_analysis", "detectorConfidence must be numeric")
+        if not 0 <= float(confidence) <= 1:
+            raise ContentRuleError("invalid_grounded_analysis", "detectorConfidence out of range")
+        item["detectorConfidence"] = float(confidence)
+        tier = candidate.get("tier")
+        if tier not in ("T2", "T3"):
+            raise ContentRuleError("invalid_grounded_analysis", "candidate tier must be T2 or T3")
+        item["tier"] = tier
+        catch = candidate.get("catchTrial")
+        if catch is not None:
+            if not isinstance(catch, bool):
+                raise ContentRuleError("invalid_grounded_analysis", "catchTrial must be boolean")
+            item["catchTrial"] = catch
+        items.append(item)
+    out["candidates"] = items
+    return out
 
 
 def _coerce_pronunciation(value: Pronunciation | Mapping[str, Any] | None) -> Pronunciation | None:
@@ -315,4 +428,16 @@ def feedback_to_tool_args(
             "reviewedWholeClip": True,
             "observation": value.pronunciation.observation,
         }
+    if value.analysis is not None:
+        # Without this the server never issues calibration candidates and the
+        # personal-calibration loop stays inert: no candidates, no verdicts, no
+        # multi-session data, so V3 could never be reached.
+        if stage != "speak" or not recording_id or not audio_used:
+            raise ContentRuleError(
+                "grounded_analysis_not_allowed",
+                "grounded analysis requires a speaking attempt and audible recording",
+                retryable=False,
+            )
+        arguments["recordingId"] = recording_id
+        arguments["groundedAnalysis"] = dict(value.analysis)
     return arguments

@@ -24,6 +24,16 @@ globalThis.testCloud={DB:{
   catch(error){db.exec('ROLLBACK');throw error}
  },
 }};
+// Minimal in-memory R2 so a grounded speaking review can resolve its recording.
+const r2Objects=new Map();
+globalThis.testCloud.BUCKET={
+ async head(key){const body=r2Objects.get(key);
+  return body?{size:body.length,etag:'fixture-etag',httpMetadata:{contentType:'audio/webm'}}:null},
+ async get(key){const body=r2Objects.get(key);
+  return body?{size:body.length,etag:'fixture-etag',httpMetadata:{contentType:'audio/webm'},
+   arrayBuffer:async()=>body.buffer.slice(body.byteOffset,body.byteOffset+body.byteLength)}:null},
+ async put(key,body){r2Objects.set(key,new Uint8Array(body))},
+};
 globalThis.user={userId:'feedback-fixture'};
 registerHooks({resolve(spec,ctx,next){
  const mock=src=>({url:'data:text/javascript,'+encodeURIComponent(src),shortCircuit:true});
@@ -130,6 +140,53 @@ assert.equal((await call('add_coach_feedback',{...manualFeedback,feedback:'Diffe
 assert.equal(db.prepare('SELECT COUNT(*) n FROM teacher_feedback WHERE review_task_id=?').get('manual-task').n,1);check();
 assert.equal(db.prepare('SELECT state FROM review_tasks WHERE id=?').get('manual-task').state,'completed');check();
 assert.match(db.prepare('SELECT output_sha256_v2 AS digest FROM review_receipts WHERE task_id=?').get('manual-task').digest,/^[a-f0-9]{64}$/);check();
+// rev2 calibration transport, SUCCESS path. The earlier groundedAnalysis tests
+// only covered rejection, which is why a second defect survived delivery: the
+// enriched analysis was passed in `output` (hashed into the receipt) but not in
+// `feedback`, so teacher_feedback.analysis_json stayed null and the UI could
+// never obtain a candidateId. The owner could not answer, so the loop was inert.
+const speakKey='11111111-1111-4111-8111-111111111114',speakTaskId='v2:'+speakKey;
+const speakRecording=audioId;
+const speakSnapshot={sourceId:revisionAttempt.id,attempt:{...revisionAttempt,id:speakTaskId,stage:'speak',recordingId:speakRecording,response:'Spoken fixture response'},context:{prompt:'Spoken prompt'}};
+db.prepare('INSERT INTO review_jobs VALUES (?,?,?,?,?,?,?,?)').run(speakTaskId,user.userId,12,speakKey,'d'.repeat(64),21,JSON.stringify(speakSnapshot),'2026-11-09T01:00:00Z');
+db.prepare(`INSERT INTO review_tasks(id,review_job_id,user_id,kind,attempt_id,day,attempt_revision,stage,state,fence,attempts,next_at,created_at,updated_at,recording_id)
+ VALUES (?,?,?,?,?,?,?,'speak','queued',0,0,?,?,?,?)`).run('speak-task',speakTaskId,user.userId,'speaking',speakTaskId,12,21,Date.now(),Date.now(),Date.now(),speakRecording);
+const groundedAnalysis={detectorVersion:'detector-v1',inventoryVersion:'arpabet-v1',speechSeconds:58.5,
+  candidates:[{word:'they',expected:'DH',actual:'D',atMs:5210,detectorConfidence:.91,tier:'T3'},
+              {word:'have',expected:'HH',actual:'HV',atMs:54790,detectorConfidence:.84,tier:'T2'}]};
+await globalThis.testCloud.BUCKET.put(`speaking/${encodeURIComponent(user.userId)}/${speakRecording}`,new Uint8Array([1,2,3,4]));
+const speakFeedback={day:12,stage:'speak',attempt:speakTaskId,evidence:'Spoken fixture response — 已校准停顿证据',
+  feedback:'Grounded fixture correction',recordingId:speakRecording,groundedAnalysis};
+const speakSaved=unpack(await call('add_coach_feedback',speakFeedback));
+assert.ok(speakSaved.receiptId,'grounded speaking feedback saves a receipt');check();
+const issued=db.prepare('SELECT candidate_id,expected,actual FROM calibration_candidates WHERE attempt_id=? ORDER BY at_ms').all(speakTaskId);
+assert.equal(issued.length,2,'server issues one candidateId per transported candidate');check();
+const storedRaw=db.prepare('SELECT analysis_json AS a FROM teacher_feedback WHERE review_task_id=?').get('speak-task').a;
+assert.ok(storedRaw,'analysis_json must be persisted, not merely hashed into the receipt');check();
+const stored=JSON.parse(storedRaw);
+assert.equal(stored.items.length,2);check();
+assert.ok(stored.items.every(i=>i.candidateId&&i.tier==='T3'),'every stored item is T3 with a server id');check();
+assert.deepEqual(stored.items.map(i=>i.candidateId),issued.map(r=>r.candidate_id));check();
+assert.equal(stored.items[1].requestedTier,'T2','requested tier is preserved but never asserted');check();
+const sessionSpeak=unpack(await call('read_study_session',{day:12,attemptId:speakTaskId}));
+assert.ok(sessionSpeak.feedback[0].analysis,'the UI must receive the analysis carrying candidateIds');check();
+assert.equal(sessionSpeak.feedback[0].analysis.items.length,2);check();
+// Legacy v1 speaking attempts have no review task and take the direct-insert
+// path. Day 12 production submissions are v1, so this path must persist the
+// analysis too — otherwise candidates are issued but the UI can never see them.
+const legacySpeak=attempts.find(a=>a.field==='speakingPart2');
+assert.ok(legacySpeak&&legacySpeak.recordingId===audioId,'fixture has a v1 speaking attempt');check();
+const legacySaved=unpack(await call('add_coach_feedback',{day:12,stage:'speak',attempt:legacySpeak.id,
+  evidence:'Spoken fixture response — 已校准停顿证据',feedback:'Legacy grounded correction',
+  recordingId:audioId,groundedAnalysis}));
+assert.ok(legacySaved.saved);check();
+const legacyRaw=db.prepare('SELECT analysis_json AS a FROM teacher_feedback WHERE attempt=?').get(legacySpeak.id).a;
+assert.ok(legacyRaw,'legacy v1 path must persist analysis_json as well');check();
+const legacyStored=JSON.parse(legacyRaw);
+assert.equal(legacyStored.items.length,2);check();
+assert.ok(legacyStored.items.every(i=>i.candidateId&&i.tier==='T3'));check();
+const legacySession=unpack(await call('read_study_session',{day:12,attemptId:legacySpeak.id}));
+assert.ok(legacySession.feedback[0].analysis,'UI receives candidateIds for v1 attempts too');check();
 const heartbeat=(status,startedAt,lastSuccessAt,nextExpectedAt)=>db.prepare(`INSERT OR REPLACE INTO automation_heartbeats
  (user_id,automation_id,generation,client_run_id,started_at,finished_at,last_success_at,next_expected_at,status,detail)
  VALUES (?,?,?,?,?,?,?,?,?,?)`).run(user.userId,'Automation_fixture',1,'run-heartbeat',startedAt,null,lastSuccessAt,nextExpectedAt,status,null);
@@ -148,5 +205,5 @@ globalThis.user=null;
 assert.equal((await http.GET()).status,401);assert.equal((await rpc('add_coach_feedback',feedback)).status,401);check();
 const unchanged=db.prepare('SELECT revision,state FROM learner_states WHERE user_id=?').get('feedback-fixture');
 assert.equal(unchanged.revision,21);assert.equal(unchanged.state,snapshot);
-assert.equal(db.prepare('SELECT COUNT(*) n FROM teacher_feedback').get().n,3);check();
+assert.equal(db.prepare('SELECT COUNT(*) n FROM teacher_feedback').get().n,5);check();
 console.log(JSON.stringify({suite:'feedback-api',checks:assertions,passed:true,learnerStateUnchanged:true}));
