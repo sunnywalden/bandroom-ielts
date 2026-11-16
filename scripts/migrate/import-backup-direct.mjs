@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Direct backup-v3 import for the owner-authorized one-time migration.
+// Direct backup import (formats 1-4) for the owner-authorized one-time migration.
 //
 //   node scripts/migrate/import-backup-direct.mjs --backup <file.bandroom> \
 //     --user-id <originalUserId> [--out <dir>] \
@@ -39,6 +39,22 @@ const TABLES = {
   review_jobs: [
     "user_id", "id", "day", "submission_key", "request_hash", "revision",
     "snapshot", "created_at",
+  ],
+  // Format 4 (design rev2 §8/FIX-16). calibration_events.id is intentionally
+  // omitted so the import cannot collide with an existing event id; the stable
+  // identity is (user_id, attempt_id, candidate_id).
+  personal_calibration: [
+    "user_id", "expected", "actual", "n_confirmed", "n_rejected", "n_unsure",
+    "n_shown", "state", "rule_version", "detector_version", "inventory_version",
+    "updated_at",
+  ],
+  calibration_candidates: [
+    "candidate_id", "user_id", "attempt_id", "recording_id", "word", "expected",
+    "actual", "at_ms", "detector_confidence", "shown_at", "answered_at",
+  ],
+  calibration_events: [
+    "user_id", "attempt_id", "candidate_id", "expected", "actual", "verdict",
+    "is_catch_trial", "created_at",
   ],
 };
 
@@ -109,8 +125,13 @@ export function validateManifest(header) {
   const manifest = header?.signed?.manifest;
   if (
     !manifest ||
-    ![1, 2, 3].includes(manifest.format) ||
-    ((manifest.format === 2 || manifest.format === 3) && !Array.isArray(manifest.reviewJobs)) ||
+    ![1, 2, 3, 4].includes(manifest.format) ||
+    (manifest.format >= 2 && !Array.isArray(manifest.reviewJobs)) ||
+    (manifest.format >= 4 && (
+      !Array.isArray(manifest.personalCalibration) ||
+      !Array.isArray(manifest.calibrationCandidates) ||
+      !Array.isArray(manifest.calibrationEvents)
+    )) ||
     !Array.isArray(manifest.audio) ||
     !Array.isArray(manifest.feedback) ||
     !Array.isArray(manifest.lessons) ||
@@ -280,12 +301,55 @@ export function buildDirectImportSql(manifest, options = {}) {
     snapshot: row.snapshot ?? null,
     created_at: row.createdAt,
   }));
+  // Formats 1-3 predate calibration; absent arrays import as empty, which is a
+  // valid no-op against an empty/new target and fails closed against existing
+  // calibration rows at the restore layer.
+  const profileRows = (manifest.personalCalibration ?? []).map((row) => ({
+    user_id: userId,
+    expected: row.expected,
+    actual: row.actual,
+    n_confirmed: Number(row.nConfirmed ?? 0),
+    n_rejected: Number(row.nRejected ?? 0),
+    n_unsure: Number(row.nUnsure ?? 0),
+    n_shown: Number(row.nShown ?? 0),
+    state: row.state ?? "CANDIDATE",
+    rule_version: row.ruleVersion,
+    detector_version: row.detectorVersion,
+    inventory_version: row.inventoryVersion,
+    updated_at: Number(row.updatedAt ?? 0),
+  }));
+  const candidateRows = (manifest.calibrationCandidates ?? []).map((row) => ({
+    candidate_id: row.candidateId,
+    user_id: userId,
+    attempt_id: row.attemptId,
+    recording_id: row.recordingId,
+    word: row.word,
+    expected: row.expected,
+    actual: row.actual,
+    at_ms: Number(row.atMs ?? 0),
+    detector_confidence: Number(row.detectorConfidence ?? 0),
+    shown_at: Number(row.shownAt ?? 0),
+    answered_at: row.answeredAt == null ? null : Number(row.answeredAt),
+  }));
+  const eventRows = (manifest.calibrationEvents ?? []).map((row) => ({
+    user_id: userId,
+    attempt_id: row.attemptId,
+    candidate_id: row.candidateId,
+    expected: row.expected,
+    actual: row.actual,
+    verdict: row.verdict,
+    is_catch_trial: row.isCatchTrial ? 1 : 0,
+    created_at: Number(row.createdAt ?? 0),
+  }));
 
   const statements = [
     ...insertStatements("learner_states", stateRows),
     ...insertStatements("teacher_feedback", feedbackRows),
     ...insertStatements("teacher_lessons", lessonRows),
     ...insertStatements("review_jobs", jobRows),
+    ...insertStatements("personal_calibration", profileRows),
+    ...insertStatements("calibration_candidates", candidateRows),
+    ...insertStatements("calibration_events", eventRows),
   ];
   const rebuilt = rebuildTasks(manifest, { userId, now });
   statements.push(...rebuilt.statements);
@@ -295,10 +359,13 @@ export function buildDirectImportSql(manifest, options = {}) {
     teacher_feedback: feedbackRows.length,
     teacher_lessons: lessonRows.length,
     review_jobs: jobRows.length,
+    personal_calibration: profileRows.length,
+    calibration_candidates: candidateRows.length,
+    calibration_events: eventRows.length,
     review_tasks: rebuilt.ids.length,
   };
   const sql = [
-    "-- Bandroom backup v3 direct import (owner-authorized one-time migration).",
+    "-- Bandroom backup direct import (owner-authorized one-time migration; formats 1-4).",
     `-- Generated: ${new Date(now).toISOString()}`,
     "-- Apply with: wrangler d1 execute <database> --remote --file <this file>",
     "-- Statements are idempotent (INSERT ... ON CONFLICT DO NOTHING).",

@@ -5,6 +5,12 @@ Status: **implemented and tested in the working tree; NOT deployed.**
 No git write command, no `wrangler`, no launchd change, and no write under
 `~/.bandroom-runner-prod/` was performed. The lead deploys.
 
+> **Superseded in part (2026-11-15, design rev2):** the tier validation model,
+> grounded timeout, per-user pause calibration, Stage B/T3 delivery and
+> canonical contrast audio are documented in `GROUNDED_TIER_GATE.md`. That file
+> is authoritative for those areas; the Stage A decode/prosody mechanics below
+> are unchanged.
+
 The research coach evidence remains sealed under
 `acceptance-2026-11-10/iteration-25/`; this change only copies code into the
 product repository.

@@ -12,6 +12,7 @@ import { reviewContext } from "./review-context";
 import { listRecoverable } from "./recording-recovery";
 import { initial, oldResults, part3, writings, type Ledger } from "@/app/ledger";
 import { callReviewTool, reviewTools } from "./review-tools";
+import { calibrationToolNames, calibrationTools, callCalibrationTool, issueCalibrationCandidates } from "./calibration";
 import { claimManualReviewTask, completeReviewTask, createReviewTaskStatement, findReviewTaskByAttempt, reviewTaskDb, ReviewTaskError } from "./review-tasks";
 
 const text = (max: number, description: string) => z.string().trim().min(1).max(max).describe(description);
@@ -73,6 +74,24 @@ const feedbackSpec = z.strictObject({
     observation:text(1000,"Concrete audible words, sounds, stress, rhythm or intelligibility observations from this particular attempt."),
   }).optional().describe("Optional practice rating only with recordingId, actual audible evidence and full-clip listening. Leave absent for transcripts, metadata, technical decoding or text-only clients. Never aggregate into an overall Speaking band."),
   attempt: text(160, "Use the exact reviewAttempts[].id from read_study_session for the answer being reviewed. Legacy descriptive labels are for historic records only. Never invent an ID."),
+  // Contract amendment (design rev2 FIX-6 / review BL-F): the grounded speaking
+  // path needs a transport for its tiered evidence. feedbackSpec was a closed
+  // strictObject with no analysis field, so the three-tier provenance had no way
+  // to reach the DB. This optional, bounded object is that transport. The server
+  // issues candidateIds itself — the runner never supplies them — and stores the
+  // enriched analysis via completeReviewTask's output.analysis.
+  groundedAnalysis:z.strictObject({
+    detectorVersion:text(80,"Detector identity; a profile built by another detector fails closed."),
+    inventoryVersion:text(80,"Phone inventory identity, e.g. arpabet-v1."),
+    speechSeconds:z.number().min(0).max(10800).describe("Effective speech duration, for the showing-policy-invariant progress metric."),
+    candidates:z.array(z.strictObject({
+      word:text(80,"The learner word this candidate points at."),expected:text(8,"ARPABET"),actual:text(8,"ARPABET"),
+      atMs:z.number().int().min(0).max(10800000),
+      detectorConfidence:z.number().min(0).max(1),
+      tier:z.enum(["T2","T3"]).describe("T2 is history-conditioned SUGGESTION, not assertion; promotion is disabled pending V3."),
+      catchTrial:z.boolean().optional().describe("Control item; stored as expected===actual and excluded from profile counts."),
+    })).max(24).describe("Bounded to keep the payload and the issuance transaction small."),
+  }).optional().describe("Grounded speaking evidence only. Requires stage=speak and recordingId. Omit for text reviews."),
 });
 const publishSpec = z.strictObject({ day: z.number().int().min(17).max(62), lesson: lessonSpec });
 const recordingSpec = z.strictObject({
@@ -92,7 +111,9 @@ const coachingTools = [
 ].map(({schema,readOnly,...tool})=>({...tool,inputSchema:z.toJSONSchema(schema),annotations:{readOnlyHint:readOnly,destructiveHint:false}}));
 
 const reviewToolNames = new Set(reviewTools.map(tool => tool.name));
-export const coachTools = [...coachingTools, ...reviewTools];
+// Pronunciation calibration tools are appended last so the reviewed 16-tool
+// contract stays in its frozen order; rev2 §9 adds exactly these three.
+export const coachTools = [...coachingTools, ...reviewTools, ...calibrationTools];
 
 const feedbackColumns = {id:teacherFeedback.id,day:teacherFeedback.day,stage:teacherFeedback.stage,
   feedback:teacherFeedback.feedback,evidence:teacherFeedback.evidence,pronunciation:teacherFeedback.pronunciation,analysisJson:teacherFeedback.analysisJson,attempt:teacherFeedback.attempt,createdAt:teacherFeedback.createdAt};
@@ -241,8 +262,10 @@ export async function callCoach(userId:string, name:string, args:unknown) {
     switch(name) {
       case "read_study_session": {const q=readSpec.parse(args);return content(await studySession(userId,q.day,q.inspectUnlinkedRecordings,q.attemptId));}
       case "add_coach_feedback": {
-        const {recordingId,pronunciation,...values}=feedbackSpec.parse(args);
+        const {recordingId,pronunciation,groundedAnalysis,...values}=feedbackSpec.parse(args);
         if(pronunciation&&!recordingId)throw new CoachError("A pronunciation rating requires a submitted recording you actually heard. For text or self-report, leave pronunciation unassessed.");
+        if(groundedAnalysis&&(values.stage!=="speak"||!recordingId))
+          throw new CoachError("Grounded analysis requires a speaking attempt with a submitted recording you actually heard.");
         if(values.stage==="speak") {
           // A fragment may receive a provisional criterion rating, never a whole-skill band.
           // The same rules guard complete_review_task via lib/content-rules.ts.
@@ -282,6 +305,34 @@ export async function callCoach(userId:string, name:string, args:unknown) {
           if(!fixed&&!historic&&!fields[values.stage].some(k=>entry[k]!==undefined))throw new CoachError("Submit a response in this stage before adding an assessment.");
         }
         const rating=pronunciation&&recordingId?{...pronunciation,recordingId,scope:"partial" as const}:null;
+        // FIX-6: issue calibration candidates SERVER-SIDE and enrich the analysis
+        // with the issued ids. The runner never supplies candidateIds, so a client
+        // cannot promote a class that was never actually shown (review MJ-04).
+        let storedAnalysis:Record<string,unknown>|null=null;
+        if(groundedAnalysis){
+          const issued=await issueCalibrationCandidates(reviewTaskDb(),userId,{
+            attemptId:values.attempt,recordingId,
+            detectorVersion:groundedAnalysis.detectorVersion,
+            inventoryVersion:groundedAnalysis.inventoryVersion,
+            candidates:groundedAnalysis.candidates.map(c=>({
+              word:c.word,expected:c.expected,actual:c.actual,atMs:c.atMs,
+              detectorConfidence:c.detectorConfidence,...(c.catchTrial?{catchTrial:true}:{}),
+            })),
+          });
+          storedAnalysis={
+            schema:"bandroom-grounded-analysis-v1",
+            detectorVersion:groundedAnalysis.detectorVersion,
+            inventoryVersion:groundedAnalysis.inventoryVersion,
+            speechSeconds:groundedAnalysis.speechSeconds,
+            // T2 stays a history-conditioned SUGGESTION; promotion is disabled
+            // pending the V3 gate, so every issued item is rendered as T3.
+            items:groundedAnalysis.candidates.map((c,i)=>({
+              candidateId:issued.candidateIds[i],word:c.word,expected:c.expected,actual:c.actual,
+              atMs:c.atMs,detectorConfidence:c.detectorConfidence,
+              tier:"T3",requestedTier:c.tier,isCatchTrial:Boolean(c.catchTrial),
+            })),
+          };
+        }
         // New v2 submissions always carry a review task. Route manual feedback
         // through the same fence/receipt transaction so automatic and manual
         // completions cannot both write a formal result for one attempt.
@@ -311,7 +362,7 @@ export async function callCoach(userId:string, name:string, args:unknown) {
             try{
               const completed=await completeReviewTask(taskDb,userId,{
                 taskId:target.id,fence:target.fence,
-                output:{feedback:values.feedback,evidence:values.evidence,analysis:null},
+                output:{feedback:values.feedback,evidence:values.evidence,analysis:storedAnalysis},
                 feedback:{id:`rt:${target.id}`,day:values.day,stage:values.stage,attempt:values.attempt,
                   evidence:values.evidence,feedback:values.feedback,pronunciation:rating??undefined},
                 manualGrantSha256:target.claimKind==="manual"?target.manualGrantSha256??undefined:undefined,
@@ -369,6 +420,9 @@ export async function callCoach(userId:string, name:string, args:unknown) {
         return {content:[{type:"text",text:JSON.stringify({...info,guidance:"If this client omits the audio block, use bytes mode in code tools to decode privately. Do not infer pronunciation from metadata."})},{type:"audio",data:await encoded(file),mimeType}]};
       }
       default:
+        // Calibration tools take the session userId directly; their strict input
+        // schemas have no userId field, so a client cannot choose the account.
+        if (calibrationToolNames.has(name)) return callCalibrationTool(reviewTaskDb(), userId, name, args);
         if (reviewToolNames.has(name)) return callReviewTool(userId, name, args);
         return toolError("Unknown coaching tool.");
     }

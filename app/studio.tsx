@@ -12,15 +12,16 @@ import ReviewRequest from './review-request'
 import BackupPanel from './backup-panel'
 import Reports, { type ReportState } from './reports'
 import AttemptFeedback,{FeedbackProvider,UnmatchedFeedback,FeedbackIdentificationStatus} from './attempt-feedback'
+import {PronunciationProfilePanel} from './pronunciation-coach'
 import {requestJSON} from './request-json'
 import {newClientId} from './client-id'
-import type {AutomationStatus,ReviewLink,ReviewTaskStatus} from './feedback-model'
+import type {AutomationStatus,CoachFeedback,ReviewLink,ReviewTaskStatus} from './feedback-model'
 import {useDraft} from './use-draft'
 
 const tabs=[['home','今日练习',LayoutDashboard],['history','学习档案',BookOpen],['notes','错题手记',NotebookPen],['report','阶段评估',Activity]] as const
 type Tab=typeof tabs[number][0]|'lesson'|'settings'
 const titles:Record<Tab,[string,string,string]>={home:['Study desk','今日练习','从上次停下的地方继续，每次专注一道题。'],lesson:['Practice room','练习室',''],history:['Learning archive','学习档案','查阅每一课的提交记录、独立首稿与修订。'],notes:['Correction notebook','错题手记','用一个新句子，检验容易反复出现的表达。'],report:['Progress review','阶段评估','按实际学习日期回看证据，每七天一个观察窗口。'],settings:['Study preferences','训练设置','确认考试类型，查看课程的预算和评估规则。']}
-type Feedback={id:string;day:number;stage:string;evidence:string;attempt:string;feedback:string;createdAt:string}
+type Feedback=CoachFeedback
 type Snapshot=ReportState
 type Checkpoint={account:string;revision:number;state:Snapshot|null}
 type SaveReply={revision:number;error?:string;attemptId?:string;submissionKey?:string;sourceId?:string}
@@ -270,7 +271,7 @@ export default function Studio(){
  {tab==='notes'&&<div className="notebook"><div className="note-picks">{notes.map((n,i)=><button className={i===note?'selected':''} key={n.word} onClick={()=>{setNote(i);setReply('');setResult(null)}}><span>0{i+1}</span>{n.word}</button>)}</div><section className="card pad"><div className="eyebrow">Active recall · Day {notes[note].day}</div><h2>{notes[note].word}</h2><p className="sample-line">{notes[note].cue}</p><label>凭记忆填入一个词<input value={reply} onChange={e=>{setReply(e.target.value);setResult(null)}} placeholder="Your answer" autoComplete="off"/></label><button className="primary" disabled={!reply.trim()||pending||result!==null} onClick={async()=>{const ok=reply.trim().toLowerCase()===notes[note].key,word=notes[note].word;if(await persist(p=>({...p,practice:{...p.practice,[word]:{count:(p.practice[word]?.count||0)+1,date:dayStamp(),lastCorrect:ok}}})))setResult(ok)}}>核对并记录<ArrowRight size={16}/></button>
  {result!==null&&<div className="notice"><b>{result?'答对了。':'参考答案为 '+notes[note].key+'。'}</b><p>{notes[note].after}</p><p>{notes[note].tip}</p></div>}<details><summary>回看纠错笔记<ChevronDown size={15}/></summary><p className="before">{notes[note].before}</p><p className="example">{notes[note].after}</p><p>{notes[note].tip}</p></details>
  {s.practice[notes[note].word]&&<small className="muted">已提交 {s.practice[notes[note].word].count} 次 · 最近 {s.practice[notes[note].word].date}</small>}</section></div>}
- {tab==='report'&&<Reports account={account} s={s} persist={persist} pending={pending} feedback={feedback}/>}
+ {tab==='report'&&<><Reports account={account} s={s} persist={persist} pending={pending} feedback={feedback}/><PronunciationProfilePanel feedback={feedback} onManageRecordings={()=>navigate('history')}/></>}
  {tab==='settings'&&<><section className="card pad settings"><div className="eyebrow">Course preferences</div><h2>考试与训练安排</h2><label>考试类型<select value={s.exam} onChange={e=>{const v=e.target.value as Ledger['exam'];void persist(p=>({...p,exam:v}))}}><option>未选择</option><option>Academic</option><option>General Training</option></select></label><p>确认后可用于安排对应的阅读整卷与 Writing Task 1。</p><div className="record-list">{[['整体目标','Overall '+overallTarget.toFixed(1)],['每课预算','通常 110 分钟，最高 120 分钟'],['新课第一项','口语 · 工作日 15–20 分钟，周末 25–30 分钟'],['课程日期','按北京时间记录首次分配'],['评估周期','每 7 天回顾，每 28 天合评'],['目标节点','2026 年 12 月 22 日'],['完成条件','核心练习已提交，并由你最终打卡']].map(([k,v])=><div key={k}><span>{k}</span><b>{v}</b></div>)}</div></section><BackupPanel account={account} onRestored={refresh}/></>}
  </main><footer className="footer"><span><Mark/>Bandroom</span><small>PERSONAL IELTS STUDY STUDIO</small></footer></div></div></FeedbackProvider>
 }

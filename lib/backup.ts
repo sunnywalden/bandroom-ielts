@@ -1,4 +1,4 @@
-import { archiveLimit,clipLimit,hash,headerBytes,metadataLimit,toHex,uuid, type Clip, type Data, type Manifest, type RemoteClip, type Signed, type Review, type Course,type Header,type SavedReviewJob } from './backup-format';
+import { archiveLimit,clipLimit,hash,headerBytes,metadataLimit,toHex,uuid, type CalibrationCandidateRow, type CalibrationEventRow, type CalibrationProfileRow, type Clip, type Data, type Manifest, type RemoteClip, type Signed, type Review,type Header,type SavedReviewJob } from './backup-format';
 
 export class BackupError extends Error {
   status:number;
@@ -44,12 +44,23 @@ function refs(state:Data['state'],reviewJobs:SavedReviewJob[]=[]){
   return {cloud:[...cloud].sort(),device:[...device].sort()};
 }
 async function snapshot(db:D1Database,uid:string):Promise<Data>{
-  const [states,feedback,lessons,jobs]=await db.batch([
+  const [states,feedback,lessons,jobs,profile,candidates,events]=await db.batch([
     db.prepare('SELECT revision,state FROM learner_states WHERE user_id=?').bind(uid),
     db.prepare('SELECT id,day,stage,attempt,evidence,feedback,created_at AS createdAt,pronunciation,analysis_json AS analysisJson FROM teacher_feedback WHERE user_id=? ORDER BY id').bind(uid),
     db.prepare('SELECT day,lesson FROM teacher_lessons WHERE user_id=? ORDER BY day').bind(uid),
     db.prepare(`SELECT id,day,submission_key AS submissionKey,request_hash AS requestHash,revision,snapshot,created_at AS createdAt
-      FROM review_jobs WHERE user_id=? ORDER BY id`).bind(uid)
+      FROM review_jobs WHERE user_id=? ORDER BY id`).bind(uid),
+    // Format 4 (FIX-16): calibration rows are part of the owner's backup.
+    db.prepare(`SELECT expected,actual,n_confirmed AS nConfirmed,n_rejected AS nRejected,n_unsure AS nUnsure,
+      n_shown AS nShown,state,rule_version AS ruleVersion,detector_version AS detectorVersion,
+      inventory_version AS inventoryVersion,updated_at AS updatedAt
+      FROM personal_calibration WHERE user_id=? ORDER BY expected,actual`).bind(uid),
+    db.prepare(`SELECT candidate_id AS candidateId,attempt_id AS attemptId,recording_id AS recordingId,word,
+      expected,actual,at_ms AS atMs,detector_confidence AS detectorConfidence,shown_at AS shownAt,answered_at AS answeredAt
+      FROM calibration_candidates WHERE user_id=? ORDER BY shown_at,candidate_id`).bind(uid),
+    db.prepare(`SELECT attempt_id AS attemptId,candidate_id AS candidateId,expected,actual,verdict,
+      is_catch_trial AS isCatchTrial,created_at AS createdAt
+      FROM calibration_events WHERE user_id=? ORDER BY created_at,candidate_id`).bind(uid)
   ]);
   const state=states.results[0] as {revision:number;state:string}|undefined;
   const reviewJobs=(jobs.results as (Omit<SavedReviewJob,'snapshot'>&{snapshot:string})[])
@@ -62,7 +73,15 @@ async function snapshot(db:D1Database,uid:string):Promise<Data>{
     catch{return base;}
   });
   return {...(reviewJobs.length?{reviewJobs}:{}),state:state?JSON.parse(String(state.state)):null,revision:Number(state?.revision||0),
-    feedback:savedFeedback,lessons:(lessons.results as {day:number;lesson:string}[]).map(r=>({day:Number(r.day),lesson:JSON.parse(String(r.lesson))}))};
+    feedback:savedFeedback,lessons:(lessons.results as {day:number;lesson:string}[]).map(r=>({day:Number(r.day),lesson:JSON.parse(String(r.lesson))})),
+    personalCalibration:(profile.results as CalibrationProfileRow[]).map(row=>({...row,
+      nConfirmed:Number(row.nConfirmed),nRejected:Number(row.nRejected),nUnsure:Number(row.nUnsure),
+      nShown:Number(row.nShown),updatedAt:Number(row.updatedAt)})),
+    calibrationCandidates:(candidates.results as CalibrationCandidateRow[]).map(row=>({...row,
+      atMs:Number(row.atMs),detectorConfidence:Number(row.detectorConfidence),shownAt:Number(row.shownAt),
+      answeredAt:row.answeredAt==null?null:Number(row.answeredAt)})),
+    calibrationEvents:(events.results as CalibrationEventRow[]).map(row=>({...row,
+      isCatchTrial:Boolean(row.isCatchTrial),createdAt:Number(row.createdAt)}))};
 }
 async function inspect(bucket:R2Bucket,uid:string,id:string):Promise<StoredClip|null>{
   const obj=await bucket.get(path(uid,id));if(!obj)return null;
@@ -86,11 +105,19 @@ export async function exportBackup(db:D1Database,bucket:R2Bucket,uid:string,key:
   }
   const hasEvidence=data.feedback.some(row=>row.analysis!==undefined)||audio.some(clip=>clip.meta!==undefined);
   const reviewJobs=data.reviewJobs??[];
-  const format=hasEvidence?3:(reviewJobs.length?2:1);
+  const {personalCalibration:profile=[],calibrationCandidates:candidates=[],calibrationEvents:events=[],reviewJobs:_reviewJobs,...base}=data;
+  void _reviewJobs; // removed from `base`; re-added only when format > 1
+  // Format 4 is emitted whenever any calibration row exists, so an older reader
+  // fails closed on the unknown format instead of silently dropping the profile.
+  // Empty calibration data keeps the highest legacy format for compatibility.
+  const hasCalibration=profile.length>0||candidates.length>0||events.length>0;
+  const format=hasCalibration?4:(hasEvidence?3:(reviewJobs.length?2:1));
   const analysisBytes=data.feedback.reduce((total,row)=>total+
     (row.analysis===undefined?0:utf8.encode(JSON.stringify(row.analysis)).length),0);
   if(analysisBytes>4*1024*1024)return reject(413,'纠音证据超过单份备份的 4 MiB 上限，无法安全导出。');
-  const manifest:Manifest={format,owner:await ownerTag(uid),created,...data,...(format>1?{reviewJobs}:{}),audio,local:ids.device};
+  const manifest:Manifest={format,owner:await ownerTag(uid),created,...base,...(format>1?{reviewJobs}:{}),
+    ...(format>=4?{personalCalibration:profile,calibrationCandidates:candidates,calibrationEvents:events}:{}),
+    audio,local:ids.device};
   if(utf8.encode(JSON.stringify(manifest)).length>metadataLimit-1024)return reject(413,'课程记录超出单份备份的 8 MiB 上限。');
   return {manifest,signature:await recordSignature(key,manifest)};
 }
@@ -128,7 +155,9 @@ export async function downloadBackup(db:D1Database,bucket:R2Bucket,uid:string,ke
 }
 async function authentic(uid:string,key:string,signed:Signed){
   const m=signed?.manifest;
-  if(!m||![1,2,3].includes(m.format)||((m.format===2||m.format===3)&&!Array.isArray(m.reviewJobs))||!Array.isArray(m.audio)||!Array.isArray(m.feedback)||!Array.isArray(m.lessons)||!Array.isArray(m.local))return reject(422,'备份格式无效。');
+  if(!m||![1,2,3,4].includes(m.format)||(m.format>=2&&!Array.isArray(m.reviewJobs))||
+    (m.format>=4&&(!Array.isArray(m.personalCalibration)||!Array.isArray(m.calibrationCandidates)||!Array.isArray(m.calibrationEvents)))||
+    !Array.isArray(m.audio)||!Array.isArray(m.feedback)||!Array.isArray(m.lessons)||!Array.isArray(m.local))return reject(422,'备份格式无效。');
   if(m.owner!==await ownerTag(uid))return reject(403,'此备份属于其他账号或站点。');
   if(!equalSig(signed.signature,await recordSignature(key,m)))return reject(422,'备份签名无效或内容已被修改。');
   return m;
@@ -183,6 +212,14 @@ export async function restoreBackup(db:D1Database,bucket:R2Bucket,uid:string,key
     m.format<3?withoutAnalysis(m.feedback):m.feedback,x=>x.id);
   const lessons=compareRows(data.lessons,m.lessons,x=>x.day);
   const reviewJobs=compareRows(data.reviewJobs??[],m.reviewJobs??[],x=>x.id);
+  // Format <4 has no calibration section. If the current database already has
+  // calibration rows, such a backup cannot restore cleanly: the extra rows are
+  // not in the archive, and silently deleting them would lose confirmations.
+  const profile=compareRows(data.personalCalibration??[],m.personalCalibration??[],
+    x=>`${x.expected}\u0000${x.actual}`);
+  const candidates=compareRows(data.calibrationCandidates??[],m.calibrationCandidates??[],x=>x.candidateId);
+  const events=compareRows(data.calibrationEvents??[],m.calibrationEvents??[],
+    x=>`${x.attemptId}\u0000${x.candidateId}`);
   const missing:string[]=[];
   for(const c of m.audio){
     const found=await inspect(bucket,uid,c.id);
@@ -195,7 +232,8 @@ export async function restoreBackup(db:D1Database,bucket:R2Bucket,uid:string,key
       missing.push(c.id);
   }
   const stateToAdd=!data.state&&!!m.state;
-  const result={missing,stateToAdd,lessons:lessons.length,feedback:feedback.length,reviewJobs:reviewJobs.length};
+  const result={missing,stateToAdd,lessons:lessons.length,feedback:feedback.length,reviewJobs:reviewJobs.length,
+    personalCalibration:profile.length,calibrationCandidates:candidates.length,calibrationEvents:events.length};
   if(!apply)return result;
   if(missing.length)return reject(409,'录音尚未全部通过校验，课程记录尚未恢复。');
   // The read snapshot includes append-only coach tables. Recheck counts/revision in the same transaction as every insert.
@@ -203,10 +241,14 @@ export async function restoreBackup(db:D1Database,bucket:R2Bucket,uid:string,key
     COALESCE((SELECT revision FROM learner_states WHERE user_id=?),0)=? AND
     (SELECT COUNT(*) FROM teacher_lessons WHERE user_id=?)=? AND
     (SELECT COUNT(*) FROM teacher_feedback WHERE user_id=?)=? AND
-    (SELECT COUNT(*) FROM review_jobs WHERE user_id=?)=? THEN 'true' ELSE 'conflict' END)`)
-    .bind(uid,data.revision,uid,data.lessons.length,uid,data.feedback.length,uid,data.reviewJobs?.length??0)];
+    (SELECT COUNT(*) FROM review_jobs WHERE user_id=?)=? AND
+    (SELECT COUNT(*) FROM personal_calibration WHERE user_id=?)=? AND
+    (SELECT COUNT(*) FROM calibration_candidates WHERE user_id=?)=? AND
+    (SELECT COUNT(*) FROM calibration_events WHERE user_id=?)=? THEN 'true' ELSE 'conflict' END)`)
+    .bind(uid,data.revision,uid,data.lessons.length,uid,data.feedback.length,uid,data.reviewJobs?.length??0,
+      uid,data.personalCalibration?.length??0,uid,data.calibrationCandidates?.length??0,uid,data.calibrationEvents?.length??0)];
   if(stateToAdd)commands.push(db.prepare('INSERT INTO learner_states(user_id,revision,state) VALUES(?,?,?)').bind(uid,m.revision+1,JSON.stringify(m.state)));
-  function batches<T extends Review|Course|SavedReviewJob>(rows:T[],query:string){
+  function batches<T>(rows:T[],query:string){
     for(let i=0;i<rows.length;i+=35)commands.push(db.prepare(query).bind(uid,JSON.stringify(rows.slice(i,i+35))));
   }
   batches(lessons,"INSERT INTO teacher_lessons(user_id,day,lesson) SELECT ?,value->>'$.day',value->'$.lesson' FROM json_each(?)");
@@ -215,6 +257,21 @@ export async function restoreBackup(db:D1Database,bucket:R2Bucket,uid:string,key
   batches(reviewJobs,`INSERT INTO review_jobs(user_id,id,day,submission_key,request_hash,revision,snapshot,created_at)
     SELECT ?,value->>'$.id',value->>'$.day',value->>'$.submissionKey',value->>'$.requestHash',
       value->>'$.revision',value->'$.snapshot',value->>'$.createdAt' FROM json_each(?)`);
+  batches(profile,`INSERT INTO personal_calibration(user_id,expected,actual,n_confirmed,n_rejected,n_unsure,n_shown,
+      state,rule_version,detector_version,inventory_version,updated_at)
+    SELECT ?,value->>'$.expected',value->>'$.actual',value->>'$.nConfirmed',value->>'$.nRejected',
+      value->>'$.nUnsure',value->>'$.nShown',value->>'$.state',value->>'$.ruleVersion',
+      value->>'$.detectorVersion',value->>'$.inventoryVersion',value->>'$.updatedAt' FROM json_each(?)`);
+  batches(candidates,`INSERT INTO calibration_candidates(candidate_id,user_id,attempt_id,recording_id,word,
+      expected,actual,at_ms,detector_confidence,shown_at,answered_at)
+    SELECT value->>'$.candidateId',?,value->>'$.attemptId',value->>'$.recordingId',value->>'$.word',
+      value->>'$.expected',value->>'$.actual',value->>'$.atMs',value->>'$.detectorConfidence',
+      value->>'$.shownAt',value->>'$.answeredAt' FROM json_each(?)`);
+  batches(events,`INSERT INTO calibration_events(user_id,attempt_id,candidate_id,expected,actual,verdict,
+      is_catch_trial,created_at)
+    SELECT ?,value->>'$.attemptId',value->>'$.candidateId',value->>'$.expected',value->>'$.actual',
+      value->>'$.verdict',CASE WHEN value->>'$.isCatchTrial' IN ('1','true') THEN 1 ELSE 0 END,
+      value->>'$.createdAt' FROM json_each(?)`);
   try {await db.batch(commands);}catch(e){
     if(/malformed JSON|UNIQUE constraint/i.test(String(e)+' '+String((e as Error).cause)))return reject(409,'记录在恢复过程中发生变化。请重新核对备份。');
     throw e;
