@@ -1,7 +1,8 @@
-// tools/list snapshot (MJ-17). The only intentional contract delta from the
-// pre-refactor list is the heartbeat description "official Work" ->
-// "official runner"; its inputSchema is byte-identical. Any other change
-// updates these digests and must be treated as a contract version change.
+// tools/list snapshot. rev2 §9 intentionally adds three calibration tools
+// (record_pronunciation_verdict, read_pronunciation_profile,
+// reset_pronunciation_profile); the original 16 tools keep their order and
+// heartbeat description. Any further change updates these digests and must be
+// treated as a contract version change.
 import test from "node:test";
 import assert from "node:assert/strict";
 import {registerHooks} from "node:module";
@@ -36,8 +37,9 @@ const EXPECTED_NAMES = [
   "read_review_checkpoint", "fail_review_task", "complete_review_task",
   "get_analysis_bundle", "get_review_transfer", "read_review_recording",
   "read_review_receipt", "report_scheduler_heartbeat",
+  "record_pronunciation_verdict", "read_pronunciation_profile", "reset_pronunciation_profile",
 ];
-const ALL_SHA256 = "d541cada75c3e9f34da56a02e30942d05e0de6148592eeeac0f7f1957a916787";
+const ALL_SHA256 = "0a9688965d65d6a359a23ece443ca59d08cddaa064ee3491c3e89a2b635bc3a7";
 const HEARTBEAT_SCHEMA_SHA256 = "ec4f5fd56ea44f485b2941a23436eb69a546eadd15f64e459e1792533815a530";
 
 const payload = coachTools.map(tool => ({
@@ -48,20 +50,23 @@ const payload = coachTools.map(tool => ({
 }));
 const sha256 = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-test("tools/list exposes the 16-tool contract in stable order", () => {
+test("tools/list exposes the 19-tool contract in stable order", () => {
   assert.deepEqual(payload.map(tool => tool.name), EXPECTED_NAMES);
   assert.deepEqual(Object.keys(MCP_TOOL_SCOPES), EXPECTED_NAMES);
   for (const tool of payload) {
     assert.equal(typeof tool.description, "string");
     assert.equal(typeof tool.inputSchema, "object");
     assert.equal(typeof tool.actions, "undefined");
-    assert.equal(tool.annotations.destructiveHint, false);
+    // Only the calibration reset is destructive; every other tool is additive.
+    assert.equal(tool.annotations.destructiveHint, tool.name === "reset_pronunciation_profile", tool.name);
     assert.equal(typeof tool.annotations.readOnlyHint, "boolean");
     if ("idempotentHint" in tool.annotations) assert.equal(tool.annotations.idempotentHint, true);
   }
+  // The original 16 tools keep their reviewed order before the three additions.
+  assert.deepEqual(payload.slice(0, 16).map(tool => tool.name), EXPECTED_NAMES.slice(0, 16));
 });
 
-test("heartbeat description is the sole documented description change", () => {
+test("the original heartbeat tool keeps its reviewed contract", () => {
   const heartbeat = payload.find(tool => tool.name === "report_scheduler_heartbeat");
   assert.match(heartbeat.description, /official runner schedule/);
   assert.doesNotMatch(heartbeat.description, /official Work/);

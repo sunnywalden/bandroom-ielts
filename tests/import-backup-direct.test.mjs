@@ -240,7 +240,7 @@ try{
 
   const target=await createRuntime();
   const migrationFiles=await applyMigrations(target.db);
-  equal(migrationFiles.length,7);
+  equal(migrationFiles.length,8);
   for(const statement of plan.statements)await target.db.prepare(statement).run();
   for(const item of plan.audio){
     await target.bucket.put(item.key,item.bytes,{httpMetadata:{contentType:item.type}});
@@ -308,7 +308,7 @@ try{
   ok(badOwnerCli.stderr.includes('owner'));
   const tampered=Buffer.from(backup);tampered[tampered.length-1]^=1;
   throws(()=>direct.planDirectImport(tampered,{userId:uid}),/SHA-256/);
-  const badFormat=await archive({...structuredClone(manifest),format:4},[],[new Blob([wave]),new Blob([webm])]);
+  const badFormat=await archive({...structuredClone(manifest),format:5},[],[new Blob([wave]),new Blob([webm])]);
   throws(()=>direct.planDirectImport(Buffer.from(badFormat),{userId:uid}),/备份格式无效/);
 
   // Device blobs follow media blobs in unpack/pack order.
@@ -322,6 +322,43 @@ try{
   equal(devicePlan.audio[1].kind,'device');
   equal(devicePlan.audio[1].id,deviceId);
   ok(devicePlan.audio[1].key.endsWith(`/${deviceId}`));
+
+  // --- Format 4 calibration import (FIX-16) ---------------------------------
+  const calibrationCandidate=randomUUID();
+  const calibrationManifest={...structuredClone(manifest),format:4,
+    personalCalibration:[{expected:"TH",actual:"S",nConfirmed:1,nRejected:0,nUnsure:0,nShown:2,
+      state:"CANDIDATE",ruleVersion:"r6-suppress-1",detectorVersion:"detector-v1",inventoryVersion:"arpabet-v1",updatedAt:1700}],
+    calibrationCandidates:[{candidateId:calibrationCandidate,attemptId:completedJobId,recordingId:recordingA,
+      word:"think",expected:"TH",actual:"S",atMs:20310,detectorConfidence:.82,shownAt:1600,answeredAt:1650}],
+    calibrationEvents:[{attemptId:completedJobId,candidateId:calibrationCandidate,expected:"TH",actual:"S",
+      verdict:"confirmed",isCatchTrial:false,createdAt:1700}]};
+  const calibrationBackup=await archive(calibrationManifest,[],[new Blob([wave]),new Blob([webm])]);
+  const calibrationPlan=direct.planDirectImport(Buffer.from(calibrationBackup),{userId:uid,now:1234567890});
+  equal(calibrationPlan.report.backup.format,4);
+  equal(calibrationPlan.summary.tables.personal_calibration,1);
+  equal(calibrationPlan.summary.tables.calibration_candidates,1);
+  equal(calibrationPlan.summary.tables.calibration_events,1);
+  ok(calibrationPlan.sql.includes("INSERT INTO personal_calibration"));
+  ok(calibrationPlan.sql.includes("INSERT INTO calibration_candidates"));
+  ok(calibrationPlan.sql.includes("INSERT INTO calibration_events"));
+  for(const statement of calibrationPlan.statements)await target.db.prepare(statement).run();
+  const importedProfile=await target.db.prepare("SELECT * FROM personal_calibration WHERE user_id=?").bind(uid).first();
+  equal(importedProfile.expected,"TH");
+  equal(importedProfile.n_shown,2);
+  equal(importedProfile.detector_version,"detector-v1");
+  const importedCandidate=await target.db.prepare("SELECT * FROM calibration_candidates WHERE candidate_id=?").bind(calibrationCandidate).first();
+  equal(importedCandidate.attempt_id,completedJobId);
+  equal(importedCandidate.user_id,uid);
+  const importedEvent=await target.db.prepare("SELECT * FROM calibration_events WHERE candidate_id=?").bind(calibrationCandidate).first();
+  equal(importedEvent.verdict,"confirmed");
+  equal(importedEvent.is_catch_trial,0);
+  for(const statement of calibrationPlan.statements)await target.db.prepare(statement).run();
+  const calibrationCounts=await target.db.prepare(`SELECT
+    (SELECT COUNT(*) FROM personal_calibration) AS p,
+    (SELECT COUNT(*) FROM calibration_candidates) AS c,
+    (SELECT COUNT(*) FROM calibration_events) AS e`).first();
+  deepEqual({p:Number(calibrationCounts.p),c:Number(calibrationCounts.c),e:Number(calibrationCounts.e)},
+    {p:1,c:1,e:1},"format-4 replay is idempotent");
 
   // --- --execute with injected spawnSync ------------------------------------
   const artifacts=direct.writeArtifacts(plan,join(tmp,'exec-out'),{bucket:'BUCKET'});

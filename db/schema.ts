@@ -154,3 +154,67 @@ export const analysisEvents = sqliteTable("analysis_events", {
   requestId: text("request_id"),
   metadataJson: text("metadata_json", { mode: "json" }).$type<Record<string, unknown>>(),
 }, table => [index("analysis_events_task").on(table.taskId, table.at)]);
+
+// Personal pronunciation calibration (design rev2 §8, FIX-15/17/22).
+// The three tables are additive: existing tables and their data stay unchanged.
+// userId is taken from the authenticated session on write; it is never supplied
+// by an MCP client. state is CANDIDATE | TRUSTED | SUPPRESSED. TRUSTED promotion
+// is disabled until the V3 gate passes (rev2 §4.2), so this data layer only
+// derives CANDIDATE/SUPPRESSED.
+export const personalCalibration = sqliteTable("personal_calibration", {
+  userId: text("user_id").notNull(),
+  expected: text("expected").notNull(),
+  actual: text("actual").notNull(),
+  nConfirmed: integer("n_confirmed").notNull().default(0),
+  nRejected: integer("n_rejected").notNull().default(0),
+  nUnsure: integer("n_unsure").notNull().default(0),
+  nShown: integer("n_shown").notNull().default(0),
+  state: text("state").notNull().default("CANDIDATE"),
+  ruleVersion: text("rule_version").notNull(),
+  detectorVersion: text("detector_version").notNull(),
+  inventoryVersion: text("inventory_version").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, table => [
+  primaryKey({ columns: [table.userId, table.expected, table.actual] }),
+  index("personal_calibration_user_state").on(table.userId, table.state),
+]);
+
+// Server-issued display record. A verdict can only reference a candidate row
+// that this server created for this user, which prevents clients from inventing
+// (word, expected, actual, atMs) tuples. Catch trials are canonical correct
+// items and are represented by expected === actual; isCatchTrial is derived
+// server-side from the stored candidate rather than trusted from the client.
+export const calibrationCandidates = sqliteTable("calibration_candidates", {
+  candidateId: text("candidate_id").primaryKey(),
+  userId: text("user_id").notNull(),
+  attemptId: text("attempt_id").notNull(),
+  recordingId: text("recording_id").notNull(),
+  word: text("word").notNull(),
+  expected: text("expected").notNull(),
+  actual: text("actual").notNull(),
+  atMs: integer("at_ms").notNull(),
+  detectorConfidence: real("detector_confidence").notNull(),
+  shownAt: integer("shown_at").notNull(),
+  answeredAt: integer("answered_at"),
+}, table => [
+  index("calibration_candidates_user_attempt").on(table.userId, table.attemptId),
+]);
+
+// Append-only verdict log. expected/actual are denormalised from the immutable
+// candidate so the (user_id, expected, actual) index can serve profile
+// recomputation without a join. The unique key is the idempotency contract:
+// a retried/double-clicked/replayed verdict cannot double-count.
+export const calibrationEvents = sqliteTable("calibration_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull(),
+  attemptId: text("attempt_id").notNull(),
+  candidateId: text("candidate_id").notNull(),
+  expected: text("expected").notNull(),
+  actual: text("actual").notNull(),
+  verdict: text("verdict").notNull(),
+  isCatchTrial: integer("is_catch_trial", { mode: "boolean" }).notNull().default(false),
+  createdAt: integer("created_at").notNull(),
+}, table => [
+  uniqueIndex("calibration_events_candidate").on(table.userId, table.attemptId, table.candidateId),
+  index("calibration_events_profile").on(table.userId, table.expected, table.actual),
+]);

@@ -3,6 +3,7 @@ import {createContext,useContext,useEffect,useState,type ReactNode} from 'react'
 import {feedbackFor,reviewAttempts,reviewRequest,type AutomationStatus,type CoachFeedback,type ReviewAttempt,type ReviewLink,type ReviewTaskStatus} from './feedback-model';
 import {displayPronunciationErrors} from './pronunciation-display';
 import RecordingClipPlayer from './recording-clip-player';
+import {PronunciationCoach,TieredFeedbackProse} from './pronunciation-coach';
 import './feedback.css';
 
 type Context = {attempts:ReviewAttempt[];feedback:CoachFeedback[];tasks:ReviewTaskStatus[];automation?:AutomationStatus;error:boolean;refresh:()=>void;ready:boolean;identificationFailed:boolean;retry:()=>void};
@@ -120,8 +121,9 @@ export default function AttemptFeedback({field,index=0}:{field:string;index?:num
     {!rows.length&&!task&&linked&&<p className="af-hint" role="status">已保存，正在核对批改队列…</p>}
     {!rows.length&&task&&<TaskState task={task} automation={automation} refresh={refresh}/>}
     <div aria-live="polite" aria-relevant="additions text">{rows.map(row=><article className="af-review" key={row.id}>
-      <p>{row.feedback}</p>
+      <TieredFeedbackProse feedback={row.feedback}/>
       {row.analysis&&<PronunciationErrors analysis={row.analysis} recordingId={attempt.recordingId}/>}
+      {row.analysis&&<PronunciationCoach analysis={row.analysis} recordingId={attempt.recordingId} feedbackText={row.feedback}/>}
       <details><summary>批改依据与时间</summary><p>{row.evidence}</p><time dateTime={row.createdAt}>{new Date(row.createdAt).toLocaleString('zh-CN')}</time></details>
     </article>)}</div>
     {!rows.length&&(!task||task.state!=='completed')&&<><p className="af-hint">{task?'自动批改未返回？复制本题请求，粘贴到 Work 会话并发送；手动批改会成为本次作答的唯一结果。':'复制本题请求，粘贴到 Work 会话并发送。Work 写回后，留在这里或稍后重新打开本题都能看到结果。'}</p>
@@ -135,5 +137,5 @@ export function UnmatchedFeedback(){
   const {attempts,feedback,ready}=useContext(FeedbackContext);
   if(!ready)return null;
   const rows=feedback.filter(f=>!attempts.some(a=>feedbackFor(a,[f]).length));
-  return rows.length?<details className="af-legacy"><summary>其他已保存的教练评语 · {rows.length}</summary><p className="af-hint">这些评语未绑定到当前这一次提交，保留供你回看。</p>{rows.map(f=><article key={f.id}><small>{f.attempt} · {f.evidence}</small><p>{f.feedback}</p></article>)}</details>:null;
+  return rows.length?<details className="af-legacy"><summary>其他已保存的教练评语 · {rows.length}</summary><p className="af-hint">这些评语未绑定到当前这一次提交，保留供你回看。</p>{rows.map(f=><article key={f.id}><small>{f.attempt} · {f.evidence}</small><TieredFeedbackProse feedback={f.feedback}/></article>)}</details>:null;
 }
