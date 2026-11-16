@@ -440,3 +440,50 @@ Modified:
 Read-only cross-checks (not modified): the sealed evidence under
 `acceptance-2026-11-10/iteration-*/`, including
 `~/.bandroom-acoustic/PAUSE_HEADROOM_REDO2.json`.
+---
+
+## Addendum (2026-11-16): the calibration transport and control items
+
+### The tier gate is unchanged; what was missing was the transport
+
+The structural tier gate described above still holds: T2/T3 sections are rendered
+by deterministic templates, never model prose, and phoneme assertions stay
+globally disabled. But the **calibration payload had no way to reach the site**:
+
+- `Feedback` / `ValidatedFeedback` now carry an optional `analysis`.
+- `coerce_grounded_analysis` mirrors `feedbackSpec.groundedAnalysis` bounds
+  locally, so a violation fails **before** the paid model call, not after it.
+- `feedback_to_tool_args` emits `groundedAnalysis` for speaking reviews with a
+  recording actually heard.
+- `candidates_from_payload` carries the detector's `expected`/`actual` pair on
+  the **raw candidate only**. `_t3_item` ignores it, so `TierItem` and every
+  rendered template remain phone-free. This is what keeps a hedged T3 suggestion
+  from becoming an implicit assertion, and keeps a catch trial indistinguishable.
+
+Without these, no candidate was ever issued, so no verdicts, so no multi-session
+data, so the V3 gates could never be reached.
+
+### Control items (catch trials)
+
+`select_catch_trial` picks an **unflagged**, high-ASR-confidence word from the
+detector's word inventory on roughly a third of recordings (stable hash of the
+audio SHA, so re-runs are reproducible). It is added to the analysis payload by
+`build_grounded_analysis`, which reserves one slot so the 24-candidate bound
+still holds.
+
+A control is never built from a flagged word: that would be confounded, because
+the learner could correctly hear a real error and confirm it. Controls use an
+identical phone pair (`AH`/`AH` sentinel) and `catchTrial: true`; the server
+excludes them from every profile count while still issuing them so the UI can
+reference them.
+
+Controls do **not** enter `classify_candidates` and do **not** appear in the
+prose self-listening section, so `validate_grounded_feedback` is unaffected.
+
+### Tests
+
+`runner/tests/test_calibration_transport.py` (39) covers the transport, the
+schema bounds, and the leak boundary (tier documents stay phone-free; a catch
+trial is indistinguishable in shape).
+`runner/tests/test_catch_trials.py` (11) covers control selection, cadence
+determinism, the unflagged-word requirement, and the candidate bound.
