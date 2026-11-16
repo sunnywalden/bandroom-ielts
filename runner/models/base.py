@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
 from ..audio import PreparedAudio
-from ..content_rules import Pronunciation
+from ..content_rules import Pronunciation, coerce_grounded_analysis
 
 
 class ModelError(Exception):
@@ -26,8 +26,11 @@ class Feedback:
     evidence: str
     attempt: str
     pronunciation: Pronunciation | None = None
+    analysis: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
+        if self.analysis is not None:
+            coerce_grounded_analysis(self.analysis)
         # Mirror feedbackSpec limits before the value reaches the site.
         for name, maximum in (("feedback", 6000), ("evidence", 2000)):
             value = getattr(self, name)
