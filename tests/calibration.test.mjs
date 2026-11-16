@@ -187,6 +187,53 @@ try{
   const profileAfterCatch=await readCalibrationProfile(db,userA);
   equal(profileAfterCatch.totals.nRejected,0,"catch trial excluded from counts");
   equal(profileAfterCatch.totals.nShown,2);
+  equal(profileAfterCatch.catchTrials.shown,1,"control issuance is surfaced");
+  equal(profileAfterCatch.catchTrials.rejected,1,"control verdict is surfaced");
+  equal(profileAfterCatch.catchTrials.constantConfirmerFlag,false,"one control cannot flag");
+
+  // --- constant-confirmer detection -----------------------------------------
+  // A catch trial has expected===actual, so confirming it is definitionally
+  // non-discriminating. Without this signal a user who confirms everything
+  // would build a profile that looks confident but carries no information.
+  const controls=(n,offset)=>Array.from({length:n},(_,i)=>({
+    word:"control",expected:"AH",actual:"AH",atMs:1000*(i+offset),detectorConfidence:.95,catchTrial:true}));
+  const confirmer="owner-confirmer";
+  const confirmerIssue=await issueCalibrationCandidates(db,confirmer,{
+    attemptId:"attempt-ctrl",recordingId:"rec-ctrl",detectorVersion:"detector-v1",
+    inventoryVersion:"arpabet-v1",candidates:controls(6,1)});
+  const beforeAnswer=await readCalibrationProfile(db,confirmer);
+  equal(beforeAnswer.catchTrials.shown,6);
+  equal(beforeAnswer.catchTrials.answered,0);
+  equal(beforeAnswer.catchTrials.confirmRate,null,"no rate before any answer");
+  equal(beforeAnswer.catchTrials.constantConfirmerFlag,false);
+  for(const id of confirmerIssue.candidateIds.slice(0,5))
+    await recordCalibrationVerdict(db,confirmer,{candidateId:id,verdict:"confirmed"});
+  const flagged=await readCalibrationProfile(db,confirmer);
+  equal(flagged.catchTrials.answered,5);
+  equal(flagged.catchTrials.confirmRate,1);
+  equal(flagged.catchTrials.constantConfirmerFlag,true,"five confirmed controls flag the listener");
+  equal(flagged.totals.categories,0,"controls never create profile categories");
+  equal(flagged.notes.trustPromotion,"disabled-pending-v3","flag does not enable promotion");
+
+  const discriminator="owner-discriminator";
+  const discIssue=await issueCalibrationCandidates(db,discriminator,{
+    attemptId:"attempt-ctrl2",recordingId:"rec-ctrl2",detectorVersion:"detector-v1",
+    inventoryVersion:"arpabet-v1",candidates:controls(6,1)});
+  for(const id of discIssue.candidateIds.slice(0,5))
+    await recordCalibrationVerdict(db,discriminator,{candidateId:id,verdict:"rejected"});
+  const clean=await readCalibrationProfile(db,discriminator);
+  equal(clean.catchTrials.confirmRate,0);
+  equal(clean.catchTrials.constantConfirmerFlag,false,"rejecting controls is discriminating");
+
+  const partial="owner-partial";
+  const partialIssue=await issueCalibrationCandidates(db,partial,{
+    attemptId:"attempt-ctrl3",recordingId:"rec-ctrl3",detectorVersion:"detector-v1",
+    inventoryVersion:"arpabet-v1",candidates:controls(6,1)});
+  for(const id of partialIssue.candidateIds.slice(0,4))
+    await recordCalibrationVerdict(db,partial,{candidateId:id,verdict:"confirmed"});
+  const tooFew=await readCalibrationProfile(db,partial);
+  equal(tooFew.catchTrials.answered,4);
+  equal(tooFew.catchTrials.constantConfirmerFlag,false,"below the frozen minimum, no flag");
 
   // --- concurrent distinct verdicts for one category ------------------------
   const concurrentIssue=await issueCalibrationCandidates(db,userA,{
