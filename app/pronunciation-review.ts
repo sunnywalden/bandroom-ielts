@@ -115,6 +115,13 @@ export type NormalizedPronunciation = {
   progress: ProgressInput[];
 };
 
+export type CatchTrialSummary = {
+  shown: number;
+  answered: number;
+  confirmed: number;
+  constantConfirmerFlag: boolean;
+};
+
 export type ProfileSnapshot = {
   exists: boolean;
   classes: ProfileClass[];
@@ -123,6 +130,7 @@ export type ProfileSnapshot = {
   ruleVersion?: string;
   detectorVersion?: string;
   inventoryVersion?: string;
+  catchTrials?: CatchTrialSummary;
 };
 
 const record = (value: unknown): Record<string, unknown> | null =>
@@ -768,6 +776,13 @@ export function normalizeProfileResult(raw: unknown): ProfileSnapshot {
   const inventoryVersion = text(root.inventoryVersion) ?? text(firstRawClass?.inventoryVersion);
   const progressSource = profileRaw.progress ?? root.progress ?? root.progress_metrics
     ?? root.progressMetrics ?? root.candidate_rates;
+  const catchRaw = record(profileRaw.catchTrials) ?? record(root.catchTrials);
+  const catchTrials = catchRaw ? {
+    shown: count(catchRaw.shown) ?? 0,
+    answered: count(catchRaw.answered) ?? 0,
+    confirmed: count(catchRaw.confirmed) ?? 0,
+    constantConfirmerFlag: catchRaw.constantConfirmerFlag === true,
+  } : undefined;
   return {
     exists,
     classes,
@@ -776,5 +791,6 @@ export function normalizeProfileResult(raw: unknown): ProfileSnapshot {
     ...(ruleVersion ? { ruleVersion } : {}),
     ...(detectorVersion ? { detectorVersion } : {}),
     ...(inventoryVersion ? { inventoryVersion } : {}),
+    ...(catchTrials ? { catchTrials } : {}),
   };
 }

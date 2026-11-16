@@ -324,3 +324,28 @@ test('deterministic T3/T2/portrait/reliability prose is split verbatim', () => {
   assert.equal(parts.reliabilityTail, reliability);
   assert.deepEqual(splitDeterministicSections('纯 T1 散文'), {t1: '纯 T1 散文'});
 });
+test('profile normalizer surfaces the control-item signal', () => {
+  const flagged = normalizeProfileResult({
+    profileExists: true, classes: [],
+    catchTrials: {shown: 6, answered: 5, confirmed: 5, rejected: 0, unsure: 0,
+      confirmRate: 1, constantConfirmerFlag: true},
+  });
+  assert.deepEqual(flagged.catchTrials,
+    {shown: 6, answered: 5, confirmed: 5, constantConfirmerFlag: true});
+
+  const nested = normalizeProfileResult({
+    profile: {classes: [], catchTrials: {shown: 2, answered: 2, confirmed: 0,
+      constantConfirmerFlag: false}},
+  });
+  assert.equal(nested.catchTrials?.constantConfirmerFlag, false);
+  assert.equal(nested.catchTrials?.answered, 2);
+
+  const absent = normalizeProfileResult({profileExists: true, classes: []});
+  assert.equal(absent.catchTrials, undefined);
+
+  // A malformed flag must never read as flagged.
+  const malformed = normalizeProfileResult({
+    catchTrials: {shown: 6, answered: 5, confirmed: 5, constantConfirmerFlag: 'yes'},
+  });
+  assert.equal(malformed.catchTrials?.constantConfirmerFlag, false);
+});
