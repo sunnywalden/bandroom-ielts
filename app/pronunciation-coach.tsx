@@ -6,7 +6,7 @@ import {
   SAME_CLASS_CONFIRMATIONS_REQUIRED, TIER_HEADINGS, VERDICT_LABELS, VERDICT_RECORDED_LABELS,
   buildProgressSeries, classProgress, extractPronunciation, formatTimestampSeconds,
   normalizeProfileResult, progressDisclosure, progressFromFeedback, reliabilityDisclosure,
-  splitDeterministicSections, type ClassProgress, type ProfileClass, type ProfileSnapshot,
+  splitDeterministicSections, type CatchTrialSummary, type ClassProgress, type ProfileClass, type ProfileSnapshot,
   type ProgressFeedbackRow, type ProgressSeries, type PronunciationCandidate,
   type ReliabilitySummary, type Verdict,
 } from './pronunciation-review';
@@ -41,6 +41,33 @@ export function ColdStartDisclosure() {
     <p>{COLD_START_COPY.sameClassRule}</p>
     <p>{COLD_START_COPY.pedagogy}</p>
     <p className="pc-hint">可在「阶段评估 → 个人发音画像」查看每个类别的同类确认进度。</p>
+  </section>;
+}
+
+/**
+ * Control items are indistinguishable from real candidates by design, so the
+ * learner is never told which was which. This disclosure only reports the
+ * aggregate consequence: confirming most controls means the answers are not
+ * distinguishing errors, and the profile cannot learn from them.
+ */
+export function ControlItemDisclosure({controls}:{controls:CatchTrialSummary}) {
+  if (controls.answered<=0) return null;
+  if (!controls.constantConfirmerFlag) {
+    return <p className="pc-hint">
+      已回答 {controls.answered} 个对照项，其中 {controls.confirmed} 个判为有问题。
+      对照项不计入类别进度。
+    </p>;
+  }
+  return <section className="pc-coldstart" aria-label="确认结果区分度不足">
+    <h4>确认结果区分度不足</h4>
+    <p>
+      在最近 {controls.answered} 个对照项中，你有 {controls.confirmed} 个判为「有问题」。
+      对照项本身并不包含发音错误，因此这样的回答无法用于区分你的真实发音类别。
+    </p>
+    <p>
+      个人校准暂时不会从这些回答中学习。建议先听标准读音再判断，
+      拿不准时选「不确定」——它不会被计入任何类别。
+    </p>
   </section>;
 }
 
@@ -356,6 +383,7 @@ export function PronunciationProfilePanel({onManageRecordings,feedback}:{
     </div>}
     {status==='ready'&&snapshot&&<>
       {!snapshot.exists&&<ColdStartDisclosure/>}
+      {snapshot.catchTrials&&<ControlItemDisclosure controls={snapshot.catchTrials}/>}
       <SameClassProgress classes={snapshot.classes}/>
       {snapshot.reliability&&<ReliabilityBlock reliability={snapshot.reliability}/>}
       <ProgressChart series={buildProgressSeries(chartProgress)} derived={chartDerived}/>

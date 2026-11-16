@@ -402,6 +402,24 @@ export type CalibrationProfile = {
   /** Alias consumed by the UI normalizer (app/pronunciation-review.ts). */
   classes: CalibrationProfileRow[];
   totals: { nConfirmed: number; nRejected: number; nUnsure: number; nShown: number; categories: number };
+  /**
+   * Control-item signal. A catch trial has expected === actual, so "confirmed"
+   * is definitionally non-discriminating. A listener who confirms most controls
+   * is not distinguishing errors, and their profile must not be trusted.
+   * This never changes promotion (disabled pending V3); it exposes the evidence.
+   */
+  catchTrials: {
+    shown: number;
+    confirmed: number;
+    rejected: number;
+    unsure: number;
+    answered: number;
+    /** null until enough controls have been answered to judge. */
+    confirmRate: number | null;
+    constantConfirmerFlag: boolean;
+    minAnsweredForFlag: number;
+    confirmRateFlagThreshold: number;
+  };
   notes: {
     scope: "single-owner";
     trustPromotion: "disabled-pending-v3";
@@ -410,6 +428,10 @@ export type CalibrationProfile = {
   };
 };
 
+/** Frozen thresholds for the constant-confirmer rule. */
+export const CATCH_TRIAL_MIN_ANSWERED = 5;
+export const CATCH_TRIAL_CONFIRM_RATE_FLAG = 0.8;
+
 export async function readCalibrationProfile(
   db: CalibrationDb, userId: string,
 ): Promise<CalibrationProfile> {
@@ -417,9 +439,31 @@ export async function readCalibrationProfile(
   const result = await db.prepare(`SELECT ${profileColumns} FROM personal_calibration
     WHERE user_id=? ORDER BY n_shown DESC, expected, actual`).bind(userId).all();
   const rows = (result.results ?? []).map(toProfile);
+  const catchShown = await db.prepare(`SELECT COUNT(*) AS n FROM calibration_candidates
+    WHERE user_id=? AND expected=actual`).bind(userId).first();
+  const catchEvents = await db.prepare(`SELECT verdict, COUNT(*) AS n FROM calibration_events
+    WHERE user_id=? AND is_catch_trial=1 GROUP BY verdict`).bind(userId).all();
+  const byVerdict: Record<string, number> = {};
+  for (const row of (catchEvents.results ?? []) as { verdict: string; n: number }[]) {
+    byVerdict[row.verdict] = Number(row.n);
+  }
+  const confirmed = byVerdict.confirmed ?? 0;
+  const rejected = byVerdict.rejected ?? 0;
+  const unsure = byVerdict.unsure ?? 0;
+  const answered = confirmed + rejected + unsure;
+  const confirmRate = answered > 0 ? confirmed / answered : null;
   return {
     rows,
     classes: rows,
+    catchTrials: {
+      shown: Number((catchShown as { n?: number } | null)?.n ?? 0),
+      confirmed, rejected, unsure, answered,
+      confirmRate,
+      constantConfirmerFlag: answered >= CATCH_TRIAL_MIN_ANSWERED
+        && (confirmRate ?? 0) >= CATCH_TRIAL_CONFIRM_RATE_FLAG,
+      minAnsweredForFlag: CATCH_TRIAL_MIN_ANSWERED,
+      confirmRateFlagThreshold: CATCH_TRIAL_CONFIRM_RATE_FLAG,
+    },
     totals: {
       nConfirmed: rows.reduce((n, row) => n + row.nConfirmed, 0),
       nRejected: rows.reduce((n, row) => n + row.nRejected, 0),
