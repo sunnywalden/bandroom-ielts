@@ -11,6 +11,15 @@ export type CoachAnalysis = {
   analysisVersion?: string; recordingSha256?: string;
   errors?: PronunciationError[];
   coverage?: {analyzedSamples?: Array<[number,number]>; fraction?: number};
+  // Tiered audio-coach evidence (design rev2). Kept unknown here because the
+  // display model validates the shape in app/pronunciation-review.ts.
+  pronunciation?: unknown;
+  pronunciationCoach?: unknown;
+  reliability?: unknown;
+  tiers?: unknown;
+  profile?: unknown;
+  progress?: unknown;
+  prosody?: unknown;
 };
 export type CoachFeedback = {id:string;day:number;stage:string;attempt:string;evidence:string;feedback:string;createdAt:string;analysis?:CoachAnalysis};
 export type ReviewAttempt = {

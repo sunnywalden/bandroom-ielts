@@ -24,7 +24,7 @@ let poll;
 globalThis.setInterval=(fn,ms,...args)=>[3000,15000].includes(ms)?(poll=fn,'feedback-poll'):realInterval(fn,ms,...args);
 globalThis.clearInterval=id=>id==='feedback-poll'?poll=undefined:realClear(id);
 const response=(status,data)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}});
-let root,state,revision,feedback,reviewLinks,reviewTasks,automation,calls,coachFault,stateFault;
+let root,state,revision,feedback,reviewLinks,reviewTasks,automation,calls,coachFault,stateFault,mcpCalls;
 async function receipt(payload){
  if(!payload.submissionKey)return response(200,{revision});
  const id='v2:'+payload.submissionKey;
@@ -54,10 +54,14 @@ async function row(field,message){
  return {id:crypto.randomUUID(),day:12,stage:attempt.stage,attempt:reviewLinks.find(link=>link.sourceId===attempt.id)?.id??attempt.id,evidence:'Synthetic submitted evidence',feedback:message,createdAt:'2026-11-09T01:00:00Z'};
 }
 beforeEach(()=>{
- localStorage.clear();calls=[];feedback=[];reviewLinks=[];reviewTasks=[];automation=undefined;coachFault=stateFault=null;revision=21;
+ localStorage.clear();calls=[];mcpCalls=[];feedback=[];reviewLinks=[];reviewTasks=[];automation=undefined;coachFault=stateFault=null;revision=21;
  state={version:1,day:12,stage:'write',finished:false,completed:Array.from({length:11},(_,i)=>i+1),checked:{11:'2026-11-09'},started:{11:'2026-11-02',12:'2026-11-09'},exam:'未选择',practice:{},entries:{11:{speakingReview:'Preserved older feedback'},12:{writeOriginal:'Independent original answer.',writeCondition:'独立 · 未计时'}}};
  globalThis.fetch=async(url,init={})=>{
   calls.push([url,init]);
+  if(url==='/api/mcp'){
+   const body=JSON.parse(init.body);mcpCalls.push(body);
+   return response(200,{jsonrpc:'2.0',id:body.id,result:{content:[{type:'text',text:JSON.stringify({saved:true})}]}});
+  }
   if(url==='/api/review-tasks/takeover')return response(200,{claimed:true,taskId:'task-queued',fence:2,state:'running'});
   if(url==='/api/coach')return coachFault?coachFault(init):response(200,{account:'fixture-feedback-ui',extras:{},feedback:structuredClone(feedback),reviewLinks:structuredClone(reviewLinks),reviewTasks:structuredClone(reviewTasks),automation});
   if(url==='/api/state'&&!init.method)return response(200,{account:'fixture-feedback-ui',revision,state:structuredClone(state)});
@@ -359,5 +363,43 @@ test('additions are hidden by the precision-first display',async()=>{
  assert.equal(section.querySelectorAll('.af-error-card').length,0);
  assert.equal(section.querySelectorAll('[aria-label="实验性发音提示与回听"]').length,0);
  assert.match(section.textContent,/回听两处添音/);
+ assert.equal(puts().length,0);
+});
+
+test('tiered pronunciation evidence renders confirmation and submits one verdict',async()=>{
+ state.entries[12].writeOriginal='Independent answer with tiered pronunciation evidence.';
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='writeOriginal');
+ assert.ok(source);
+ const t3='六、建议自听对比（非错误断言）：\n1. 在 20.31 秒处的 the，可对比标准读音自听判断。';
+ const t2='【T2 历史确认】\n1. 你在 8.10 秒处的 think：这一类常被读成 /d/。';
+ const reliability='【T1 可靠性披露】本次检测到 36 次停顿，该计数仅供参考。';
+ feedback=[{id:'fb-tier',day:12,stage:'write',attempt:source.id,evidence:'Tiered fixture',
+  feedback:`T1 韵律建议。\n${t3}\n七、你的发音画像（建议性质）：\n本画像只记录检测器提出的类别。\n${t2}\n${reliability}`,
+  createdAt:'2026-11-09T01:00:00Z',analysis:{pronunciation:{
+   items:[{candidateId:'c-tier',word:'the',expected:'DH',actual:'D',atMs:20310,tier:'T3',isCatchTrial:false,detectorConfidence:0.64}],
+   reliability:{pauseCount:36,pausePrecision:0.65},
+   profile:{exists:false,classes:[]},
+  }}}];
+ await mount();
+ const section=document.querySelector('[aria-label="写作首稿反馈"]');
+ assert.ok(section);
+ assert.match(section.textContent,/20\.31 秒/);
+ assert.match(section.textContent,/还没有你的个人发音画像/);
+ assert.match(section.textContent,/36 次停顿/);
+ assert.match(section.textContent,/确实读错/);
+ const prose=section.querySelector('.pc-prose');
+ assert.ok(prose);
+ assert.ok(!prose.querySelector('p').textContent.includes('六、建议自听对比'));
+ assert.equal(section.querySelector('[data-tier="T3"] .pc-tier-text').textContent,t3);
+ assert.equal(section.querySelector('[data-tier="T2"] .pc-tier-text').textContent,t2);
+ assert.equal(section.querySelector('[data-tier="reliability"] .pc-tier-text').textContent,reliability);
+ assert.equal(section.querySelectorAll('.pc-reliability').length,0,'prose reliability is not duplicated');
+ const card=section.querySelector('.pc-card');
+ assert.ok(card);
+ await click(button('不确定'));
+ assert.equal(mcpCalls.length,1);
+ assert.equal(mcpCalls[0].params.name,'record_pronunciation_verdict');
+ assert.deepEqual(mcpCalls[0].params.arguments,{candidateId:'c-tier',verdict:'unsure'});
+ assert.match(card.textContent,/已记录：不确定（不计入画像）/);
  assert.equal(puts().length,0);
 });

@@ -4,6 +4,11 @@
 # Copied: 2026-11-15. API and calibration contract are unchanged; only this
 # provenance header was added. Do not weaken require_measurement() or the
 # calibrated_measurements() contract.
+# 2026-11-15 rev2 extension: an optional `pause_low_noise_multiplier` keyword
+# was added to detect_pauses()/analyze_wav() so a per-user pause calibration can
+# lower the threshold. The default is the shipped calibrated constant, so all
+# existing callers are behaviourally identical. The calibrated contract
+# (require_measurement / calibrated_measurements) is untouched.
 """Deterministic prosody and fluency measurements with explicit calibration status.
 
 This module is the L4 prosody/fluency layer of the measurement-grounded audio
@@ -613,7 +618,11 @@ class PauseDetection:
         return len(self.pauses)
 
 
-def _noise_and_thresholds(rms: np.ndarray) -> tuple[float, float, float]:
+def _noise_and_thresholds(
+    rms: np.ndarray,
+    *,
+    low_multiplier: float = PAUSE_LOW_NOISE_MULTIPLIER,
+) -> tuple[float, float, float]:
     """Estimate the noise floor and the hysteresis thresholds.
 
     The 10th percentile is capped at 25% of the 90th percentile.  Without the
@@ -621,11 +630,21 @@ def _noise_and_thresholds(rms: np.ndarray) -> tuple[float, float, float]:
     equal to the speech level, which would classify the whole file as silence.
     The cap is inactive on the calibration corpus because every Suitcase
     recording contains genuine noise-only frames.
+
+    ``low_multiplier`` is overridable so a per-user pause calibration can lower
+    the threshold.  The default is the shipped calibrated constant; raising the
+    multiplier admits more frames as silence and lowering it detects fewer
+    pauses.
     """
+    low_multiplier = float(low_multiplier)
+    if not (0.1 <= low_multiplier <= 5.0):
+        raise ValueError(
+            f"low_multiplier must be in [0.1, 5.0], got {low_multiplier!r}"
+        )
     p10 = float(np.percentile(rms, NOISE_PERCENTILE))
     p90 = float(np.percentile(rms, 90.0))
     noise = min(p10, p90 * 0.25)
-    low = max(PAUSE_ABSOLUTE_FLOOR, noise * PAUSE_LOW_NOISE_MULTIPLIER)
+    low = max(PAUSE_ABSOLUTE_FLOOR, noise * low_multiplier)
     high = max(
         PAUSE_HIGH_ABSOLUTE_FLOOR,
         noise * PAUSE_HIGH_NOISE_MULTIPLIER,
@@ -639,6 +658,7 @@ def detect_pauses(
     sample_rate: int = TARGET_SAMPLE_RATE,
     *,
     min_pause_seconds: float = PAUSE_MIN_SECONDS,
+    pause_low_noise_multiplier: float = PAUSE_LOW_NOISE_MULTIPLIER,
 ) -> PauseDetection:
     """Detect silent pauses using a noise-floor-relative hysteresis threshold.
 
@@ -648,12 +668,19 @@ def detect_pauses(
     Here the threshold is tied to the estimated noise floor, and a Schmitt
     trigger plus a short conditional bridge prevents one pause from being
     split into several.
+
+    ``pause_low_noise_multiplier`` is the per-user calibration hook.  The
+    measured calibrated default is ``PAUSE_LOW_NOISE_MULTIPLIER`` (1.6); the
+    production calibration clamps user values to ``[0.9, 1.6]`` because the
+    detector collapses to zero detections below roughly 0.8.
     """
     energy = frame_energy(samples, sample_rate)
     rms = energy.rms
     times = energy.times
     frame_seconds = energy.frame_seconds
-    noise, low, high = _noise_and_thresholds(rms)
+    noise, low, high = _noise_and_thresholds(
+        rms, low_multiplier=pause_low_noise_multiplier
+    )
 
     # Schmitt-trigger segmentation: enter silence below `low`, leave above
     # `high`.  This ignores small energy wobbles inside a pause.
@@ -1347,6 +1374,7 @@ def analyze_wav(
     transcript_source: str = "supplied",
     pause_mode: str = "auto",
     include_contour: bool = True,
+    pause_low_noise_multiplier: float = PAUSE_LOW_NOISE_MULTIPLIER,
 ) -> dict[str, Any]:
     """Analyse a WAV file and return a calibration-annotated prosody document.
 
@@ -1368,6 +1396,10 @@ def analyze_wav(
         otherwise), ``"waveform_only"`` or ``"word_gated"``.
     include_contour:
         Include the per-frame F0 contour in the output.
+    pause_low_noise_multiplier:
+        Per-user pause calibration hook.  The default is the shipped calibrated
+        value (1.6).  The caller must clamp calibrated values to ``[0.9, 1.6]``
+        to stay above the measured collapse point.
     """
     if word_source not in {"human_annotation", "asr", "supplied", "none"}:
         raise ValueError(f"invalid word_source: {word_source!r}")
@@ -1385,7 +1417,11 @@ def analyze_wav(
         transcript_source = "supplied"
 
     energy = frame_energy(samples, audio.sample_rate)
-    raw_detection = detect_pauses(samples, audio.sample_rate)
+    raw_detection = detect_pauses(
+        samples,
+        audio.sample_rate,
+        pause_low_noise_multiplier=pause_low_noise_multiplier,
+    )
 
     # Word-gating improves precision but loses recall when part of an
     # annotated pause is not below the energy threshold.  Waveform-only is the
@@ -1552,6 +1588,9 @@ def analyze_wav(
             "transcript_source": transcript_source if tokens_available else "none",
             "word_count": word_count,
             "pause_mode": effective_mode,
+            "pause_low_noise_multiplier": round(
+                float(pause_low_noise_multiplier), 4
+            ),
             "has_transcript": bool(transcript),
         },
         "fluency": {

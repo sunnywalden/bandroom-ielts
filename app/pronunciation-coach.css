@@ -1,0 +1,62 @@
+.pc-coach{display:grid;gap:14px;margin-top:14px}
+.pc-coach h4,.pc-profile h4{margin:0 0 6px;font-size:14px;color:#2f4b3d}
+.pc-hint{margin:4px 0;font-size:13px;color:#53685b;line-height:1.65}
+.pc-error{color:#863f2c;font-size:13px}
+.pc-recorded{margin:6px 0 0;font-size:13px;color:#285740}
+.pc-tier{border:1px solid #d6e0d4;border-radius:10px;background:#fbfcf8;padding:12px 14px}
+.pc-tier-text{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:#243d34;line-height:1.7}
+.pc-coldstart{border:1px solid #e3dbbe;border-left:4px solid #8a6d1d;border-radius:10px;background:#fbf8ee;padding:12px 14px}
+.pc-coldstart p{margin:6px 0;font-size:13px;line-height:1.7;color:#5b4d2b}
+.pc-reliability{border:1px solid #d6e0d4;border-radius:10px;background:#f7faf3;padding:12px 14px}
+.pc-reliability p{margin:6px 0;font-size:13px;line-height:1.7;color:#3e5c4a}
+.pc-confirm{display:grid;gap:10px}
+.pc-card{border:1px solid #d6e0d4;border-radius:10px;padding:12px;background:#fbfcf8}
+.pc-card-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.pc-card-head strong{font-size:17px}
+.pc-time{font-family:var(--mono);font-size:13px;color:#53685b;background:#eef3ea;border-radius:12px;padding:2px 8px}
+.pc-detector-hint{margin:8px 0;font-size:13px;color:#4a5e52}
+.pc-verdicts{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 6px}
+.pc-verdicts button{min-height:40px}
+.pc-verdicts button[aria-pressed="true"]{outline:2px solid #20584a;outline-offset:2px}
+.pc-canonical{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px}
+.pc-canonical audio{display:none}
+.pc-canonical .pc-hint{margin:0}
+.pc-verdicts button:disabled{opacity:.65;cursor:default}
+.pc-class-progress ul{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:10px}
+.pc-class-progress li{display:grid;grid-template-columns:minmax(84px,auto) 1fr auto;align-items:center;gap:8px 12px;padding:8px 0;border-top:1px solid #e1e8dd}
+.pc-class-progress li:first-child{border-top:0}
+.pc-class-key{font-family:var(--mono);font-size:13px;color:#243d34}
+.pc-class-progress progress{width:100%;height:12px;accent-color:#2f6b4f}
+.pc-class-count{font-size:13px;color:#285740;white-space:nowrap}
+.pc-class-progress small{grid-column:1/-1;color:#65736e;font-size:12px}
+.pc-progress{margin-top:12px;border-top:1px solid #e1e8dd;padding-top:12px}
+.pc-legend{list-style:none;display:flex;gap:14px;flex-wrap:wrap;margin:6px 0;padding:0;font-size:12px;color:#3e5c4a}
+.pc-legend li{display:flex;align-items:center;gap:6px}
+.pc-swatch{width:10px;height:10px;border-radius:2px;display:inline-block}
+.pc-chart{width:100%;height:auto;display:block;margin:6px 0;overflow:visible}
+.pc-grid{stroke:#e1e8dd;stroke-width:1}
+.pc-axis{fill:#65736e;font-size:10px}
+.pc-direct{fill:#3e5c4a;font-size:10px;font-weight:600}
+.pc-ci{opacity:.45;stroke-width:2}
+.pc-chart circle:focus{outline:2px solid #20584a;outline-offset:2px}
+.pc-table{margin-top:8px;font-size:12px;color:#3e5c4a}
+.pc-table summary{cursor:pointer}
+.pc-table table{width:100%;border-collapse:collapse;margin-top:6px}
+.pc-table th,.pc-table td{text-align:left;padding:4px 6px;border-bottom:1px solid #e1e8dd;white-space:nowrap}
+.pc-table th{font-weight:600;color:#243d34}
+.pc-profile{margin:20px 0}
+.pc-profile-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.pc-profile-head h2{margin:2px 0 8px}
+.pc-error-box{border:1px solid #e3c9bd;border-radius:10px;background:#fbf3ef;padding:12px 14px}
+.pc-error-box button{margin-top:6px}
+.pc-reset{margin-top:12px;border-top:1px solid #e1e8dd;padding-top:12px}
+.pc-dialog{margin-top:10px;border:2px solid #8a6d1d;border-radius:10px;background:#fffdf6;padding:14px;max-width:620px}
+.pc-dialog p{margin:6px 0;font-size:13px;line-height:1.7;color:#4a3f22}
+.pc-dialog .pc-retention{font-weight:600;color:#243d34}
+.pc-dialog-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+@media(max-width:600px){
+  .pc-verdicts button{flex:1 1 100%}
+  .pc-class-progress li{grid-template-columns:1fr auto}
+  .pc-class-progress progress{grid-column:1/-1}
+  .pc-table{overflow-x:auto}
+}
