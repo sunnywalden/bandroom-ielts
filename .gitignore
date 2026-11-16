@@ -60,3 +60,7 @@ __pycache__/
 /runner/config.qa.toml
 /runner/config.prod.toml
 /runner/run-prod.sh
+
+# Generated gate evaluation output (analysis/scripts/calibration-gates)
+/analysis/scripts/calibration-gates/V3_GATE_RESULT.json
+/analysis/scripts/calibration-gates/v3_export_*.json
