@@ -436,3 +436,103 @@ Observed results (2026-11-15, Node 24.15.0, Miniflare):
 | `pnpm exec eslint <changed files>` | clean |
 
 Nothing was deployed and no wrangler command was run.
+---
+
+## Addendum (2026-11-16): catch trials, the constant-confirmer rule, and the two gates
+
+The section above predates three changes. This addendum records the current
+state; the earlier text is kept for traceability. **The closing line "Nothing
+was deployed" is superseded** — the work below is deployed to production.
+
+### Catch trials are now generated (they previously could not exist)
+
+The detector only emits substitutions (`expected != actual`), so a control item
+(`expected === actual`) could never appear naturally. Any gate requiring catch
+trials was therefore unmeetable regardless of how much data accumulated.
+
+`runner/grounded_audio.py::select_catch_trial` now emits a control on roughly a
+third of recordings, chosen by a stable hash of the audio SHA so a re-run is
+reproducible. The control word is taken from the detector's **unflagged**,
+high-ASR-confidence words — never a flagged one, because a control on a genuinely
+mispronounced word is confounded: the learner could correctly hear a real error
+and confirm it, which would look like non-discrimination.
+
+Controls carry an identical phone pair and `catchTrial: true`. They travel in the
+`groundedAnalysis` payload **only**; `TierItem` and every rendered template stay
+phone-free, so a control is indistinguishable in the confirmation UI. Server-side
+they are issued as candidates (so the UI can reference them) but excluded from
+`n_shown`, from category creation, and from every profile count.
+
+### The constant-confirmer rule now has a consumer
+
+`readCalibrationProfile` returns a `catchTrials` block with `shown`, `confirmed`,
+`rejected`, `unsure`, `answered`, `confirmRate`, and `constantConfirmerFlag`.
+Frozen thresholds are exported constants:
+
+```
+CATCH_TRIAL_MIN_ANSWERED      = 5
+CATCH_TRIAL_CONFIRM_RATE_FLAG = 0.8
+```
+
+A listener who confirms most controls is not distinguishing errors, so their
+verdicts carry no information. The flag is disclosed in the UI
+(`ControlItemDisclosure`) **without ever naming which item was a control**, and
+the V3 readiness pipeline excludes such listeners from adequacy. The flag does
+**not** change promotion behaviour.
+
+### Two gates, not one — and why
+
+T2's actual claim is per-user ("your history suggests this class"). Gating that
+behind a cross-user generalization requirement binds a technical capability to
+user acquisition, which is a category error.
+
+| Gate | Question | Requirement | A PASS permits |
+| --- | --- | --- | --- |
+| **V3-G** (`v3_gate.py`, unchanged) | Does the mechanism generalize across users? | >= 6 users | product-wide claims; T2 by default for new users |
+| **V3-P** (`v3_personal_gate.py`) | Is **this user's** calibration reliable? | >= 2 history + >= 2 future sessions, >= 20 future candidates, human truth, catch trials, not a constant confirmer | T2 **for that user only**, per class |
+
+V3-P **imports V3-G's constants and statistical helpers** (`T2_ABS_PRECISION`,
+`T2_LB_FLOOR`, `TP_RETENTION_MIN`, `FROZEN_N`, `FROZEN_PROMOTE_POSTERIOR_LB`,
+`wilson_lb`, `beta_ppf_10`), so no threshold can drift between them; tests assert
+identity, including function-object identity.
+
+Because candidates within one recording are correlated, the unit of replication
+for a single user is the **session**, not the candidate. V3-P therefore adds
+`multi_session_evidence` (>= 2 future sessions each contributing T2 candidates)
+and `session_consistency` (at least half of those sessions meet their own
+baseline). A test proves that a perfect pooled precision driven entirely by one
+future session still **FAILS**.
+
+Both gates are pre-registered before any real multi-session data existed.
+**Neither is satisfied today**; T2 remains globally disabled and the product
+remains T1 + T3. The remaining blockers are data, human annotation, and time —
+not engineering.
+
+### Transport defects found and fixed after the initial delivery
+
+The calibration loop was initially **inert**: three independent breaks meant no
+candidate could ever reach the learner. Existing tests only exercised rejection
+paths, so all three survived.
+
+1. The runner never sent `groundedAnalysis` (`ValidatedFeedback` had no analysis field).
+2. `candidates_from_payload` dropped the detector's `expected`/`actual` pair.
+3. The enriched analysis was passed only in `output` (hashed into the receipt),
+   never persisted to `teacher_feedback.analysis_json` — on **both** the
+   review-task path and the legacy v1 direct-insert path. Day 12 submissions are
+   v1, so the legacy path was the one that mattered in production.
+
+All three are fixed, with regression tests proven meaningful by reverting each
+fix and observing the corresponding assertion fail.
+
+### Current verification
+
+| Suite | Result |
+| --- | --- |
+| Python runner | 207 |
+| `tests/calibration.test.mjs` (SQLite and Miniflare D1) | 106 / 106 |
+| `tests/feedback-api.mjs` | 56 |
+| `tests/pronunciation-coach-ui.mjs` | 14 |
+| `tests/pronunciation-review.test.mjs` | 21 |
+| V3-P gate tests | 32 |
+| Live isolated-QA end-to-end (incl. a real control item) | 14/14 |
+| Production grounded contract | 8/8 |
