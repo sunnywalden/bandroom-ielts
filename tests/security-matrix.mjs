@@ -209,6 +209,12 @@ test("MCP requires identity and enforces the scope matrix", async () => {
   assert.equal(publish.status, 403);
   const publishBody = await publish.json();
   assert.equal(publishBody.error.code, -32003);
+  // rev2 §9: service identities cannot answer or reset the owner's calibration.
+  for (const name of ["record_pronunciation_verdict", "reset_pronunciation_profile"]) {
+    const response = await mcp.POST(rpc({jsonrpc: "2.0", id: 20, method: "tools/call", params: {name, arguments: {}}}));
+    assert.equal(response.status, 403, name);
+    assert.equal((await response.json()).error.code, -32003, name);
+  }
 
   globalThis.__secCtx = owner;
   const unknown = await mcp.POST(rpc({jsonrpc: "2.0", id: 3, method: "tools/call", params: {name: "not_a_tool", arguments: {}}}));

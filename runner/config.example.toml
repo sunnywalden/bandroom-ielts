@@ -20,6 +20,9 @@ api_key_env = "DASHSCOPE_API_KEY"
 text_model = "qwen3.8-max"
 audio_model = "qwen3.8-omni-flash"
 text_timeout_seconds = 120
+# Grounded feedback only: 240-300 s (research build measured 77-162 s).
+# p95 must be measured before the lead enables the grounded mode.
+grounded_text_timeout_seconds = 240
 audio_timeout_seconds = 240
 
 [runner]
@@ -70,5 +73,10 @@ staging_dir = "~/.bandroom-acoustic"
 detector_whisper = "~/.cache/whisper/large-v3-turbo.pt"
 detector_timeout_seconds = 900
 detector_cache_dir = "~/.bandroom-runner/acoustic-cache"
+# T2 gate: no class passes the Wilson 0.85 lower bound today, so this
+# stays false and T2 is re-rendered as hedged T3 wording.
+phoneme_assertions_enabled = false
+# Canonical qwen3-tts-flash contrast audio (native endpoint); fail-closed.
+contrast_audio_enabled = false
 self_listen_enabled = false
 self_listen_max_n = 3

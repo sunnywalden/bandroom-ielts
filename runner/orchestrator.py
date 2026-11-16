@@ -137,6 +137,11 @@ class RunnerConfig:
     text_model: str = "qwen3.8-max"
     audio_model: str = "qwen3.8-omni-flash"
     text_timeout: float = 120.0
+    # Grounded feedback is a long plain-text generation; the research build
+    # measured 77-162 s, so the shipped 120 s text timeout produced tail
+    # failures.  This separate budget is config-driven and clamped to
+    # [240, 300] s.  p95 must still be measured before enabling.
+    grounded_text_timeout: float = grounded_audio.GROUNDED_TEXT_TIMEOUT_SECONDS
     audio_timeout: float = 240.0
     automation_id: str = "bandroom-coach-runner"
     generation: int = 1
@@ -202,6 +207,23 @@ def load_config(path: str | Path) -> RunnerConfig:
     if grounded.self_listen_max_n < 0:
         raise ConfigError("[grounded] self_listen_max_n must be >= 0")
 
+    grounded_text_timeout = float(
+        model.get(
+            "grounded_text_timeout_seconds",
+            grounded_audio.GROUNDED_TEXT_TIMEOUT_SECONDS,
+        )
+    )
+    if not (
+        grounded_audio.GROUNDED_TEXT_TIMEOUT_MIN
+        <= grounded_text_timeout
+        <= grounded_audio.GROUNDED_TEXT_TIMEOUT_MAX
+    ):
+        raise ConfigError(
+            "[model] grounded_text_timeout_seconds must be in "
+            f"[{grounded_audio.GROUNDED_TEXT_TIMEOUT_MIN:.0f}, "
+            f"{grounded_audio.GROUNDED_TEXT_TIMEOUT_MAX:.0f}] s"
+        )
+
     return RunnerConfig(
         base_url=site.get("base_url", "https://bandroom.example.com"),
         mcp_path=site.get("mcp_path", "/mcp"),
@@ -215,6 +237,7 @@ def load_config(path: str | Path) -> RunnerConfig:
         text_model=model.get("text_model", "qwen3.8-max"),
         audio_model=model.get("audio_model", "qwen3.8-omni-flash"),
         text_timeout=float(model.get("text_timeout_seconds", 120)),
+        grounded_text_timeout=grounded_text_timeout,
         audio_timeout=float(model.get("audio_timeout_seconds", 240)),
         automation_id=runner.get("automation_id", "bandroom-coach-runner"),
         generation=int(runner.get("generation", 1)),

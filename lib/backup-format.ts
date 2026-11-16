@@ -10,8 +10,15 @@ export type SavedReviewJob = {
   id:string;day:number;submissionKey:string;requestHash:string;revision:number;createdAt:string;
   snapshot:import("./review-jobs").FrozenReview;
 };
-export type Data = {state:Record<string,unknown>|null;revision:number;feedback:Review[];lessons:Course[];reviewJobs?:SavedReviewJob[]};
-export type Manifest = Data & {format:1|2|3;owner:string;created:string;audio:RemoteClip[];local:string[]};
+// Format 4 adds the personal calibration tables (design rev2 §8/FIX-16).
+// userId is not stored in the manifest: the authenticated restore target owns
+// every row, matching how feedback/lessons already work.
+export type CalibrationProfileRow = {expected:string;actual:string;nConfirmed:number;nRejected:number;nUnsure:number;nShown:number;state:string;ruleVersion:string;detectorVersion:string;inventoryVersion:string;updatedAt:number};
+export type CalibrationCandidateRow = {candidateId:string;attemptId:string;recordingId:string;word:string;expected:string;actual:string;atMs:number;detectorConfidence:number;shownAt:number;answeredAt:number|null};
+export type CalibrationEventRow = {attemptId:string;candidateId:string;expected:string;actual:string;verdict:string;isCatchTrial:boolean;createdAt:number};
+export type Data = {state:Record<string,unknown>|null;revision:number;feedback:Review[];lessons:Course[];reviewJobs?:SavedReviewJob[];
+  personalCalibration?:CalibrationProfileRow[];calibrationCandidates?:CalibrationCandidateRow[];calibrationEvents?:CalibrationEventRow[]};
+export type Manifest = Data & {format:1|2|3|4;owner:string;created:string;audio:RemoteClip[];local:string[]};
 export type Signed = {manifest:Manifest;signature:string};
 export type Header = {signed:Signed;device:Clip[];deviceSeal?:string};
 const encoder=new TextEncoder();
@@ -40,7 +47,9 @@ export async function unpack(file:Blob) {
   if(!length||length>metadataLimit||start+length>file.size) throw Error('备份头部损坏。');
   const header=JSON.parse(await file.slice(start,start+length).text()) as Header;
   const m=header.signed?.manifest, media=m?.audio;
-  if(!m||![1,2,3].includes(m.format)||((m.format===2||m.format===3)&&!Array.isArray(m.reviewJobs))||!Array.isArray(media)||!Array.isArray(m.local)||!Array.isArray(header.device)||
+  if(!m||![1,2,3,4].includes(m.format)||(m.format>=2&&!Array.isArray(m.reviewJobs))||
+    (m.format>=4&&(!Array.isArray(m.personalCalibration)||!Array.isArray(m.calibrationCandidates)||!Array.isArray(m.calibrationEvents)))||
+    !Array.isArray(media)||!Array.isArray(m.local)||!Array.isArray(header.device)||
     header.device.length!==m.local.length||header.device.some((c,i)=>c.id!==m.local[i]))throw Error('备份录音索引损坏。');
   let offset=start+length;
   const result:Blob[]=[];

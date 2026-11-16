@@ -37,6 +37,7 @@ contract-prescribed; the legacy ``_review_audio`` path keeps its own
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -52,7 +53,16 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .audio import AudioError, sha256_bytes
 from .content_rules import ContentRuleError, load_prompt
+from .contrast_audio import enrich_candidates
 from .models import Feedback, ModelError
+from .pause_calibration import (
+    DEFAULT_MULTIPLIER,
+    PauseCalibrationState,
+    PauseCalibrationStore,
+    calibrate_pause_multiplier,
+    reliability_disclosure,
+    reliability_document,
+)
 
 LOG = logging.getLogger("bandroom.runner.grounded")
 
@@ -103,6 +113,109 @@ _CALIBRATED_KEYS = (
 )
 _MAX_PAUSES_IN_EVIDENCE = 60
 
+# ---------------------------------------------------------------------------
+# Tier contract (design rev2 §0.2 / §5 / §6)
+# ---------------------------------------------------------------------------
+# T1: calibrated prosody measurements.  Statable, but every review carries the
+#     per-user reliability disclosure from ``pause_calibration``.
+# T2: history-conditioned items with word / phone-pair / timestamp provenance
+#     from the user's own confirmed history.  Only these items may carry
+#     assertive wording, and only inside the deterministic T2 block.
+# T3: uncalibrated detector candidates.  Hedged self-listening suggestions
+#     only.  Assertive wording is rejected.
+T3_SECTION_HEADER = "六、建议自听对比（非错误断言）"
+T2_BLOCK_MARKER = "【T2 历史确认】"
+PORTRAIT_HEADER = "七、你的发音画像（建议性质）"
+RELIABILITY_MARKER = "【T1 可靠性披露】"
+NO_ERROR_STATEMENT = "未发现可核实的音素错误"
+NO_ERROR_OTHER_STATEMENT = "未发现其他可核实的音素错误"
+GROUNDED_TEXT_TIMEOUT_SECONDS = 240.0
+GROUNDED_TEXT_TIMEOUT_MIN = 240.0
+GROUNDED_TEXT_TIMEOUT_MAX = 300.0
+
+_PHONE_TOKEN = re.compile(r"^[A-Z]{1,4}[0-2]?$")
+_PHONE_PAIR_TOKEN = re.compile(r"\b([A-Z]{1,4}[0-2]?)\s*(?:→|->|>)\s*([A-Z]{1,4}[0-2]?)\b")
+_IPA_SLASH = re.compile(r"(?<![A-Za-z0-9])/[^/\s]{1,16}/(?![A-Za-z0-9])")
+_PHONEME_HINT = re.compile(r"听起来(?:像|接近)|像是|接近\s*/")
+_PORTRAIT_HEADER = re.compile(r"七\s*[、.)]\s*(?:\*\*)?\s*你的发音画像")
+_PORTRAIT_NEXT = re.compile(
+    r"(?m)^\s*(?:#{1,4}\s*)?(?:\*\*)?(?:[八九]|1[0-2]|[89])\s*[、.)]"
+)
+_T2_MARKER = re.compile(re.escape(T2_BLOCK_MARKER))
+_NEXT_MARKER = re.compile(r"【[^】]{1,24}】")
+_STRENGTH_TERM = re.compile(r"强项|优势|strengths?\b", re.I)
+
+
+@dataclass(frozen=True)
+class TierItem:
+    """One slot-filled T2 or T3 item with its provenance."""
+
+    word: str
+    timestamp_ms: int
+    seconds: float
+    tier: str
+    expected_phone: str | None = None
+    actual_phone: str | None = None
+    detector_confidence: float | None = None
+    provenance: str = ""
+    downgraded_reason: str = ""
+
+    def as_document(self) -> dict[str, Any]:
+        return {
+            "word": self.word,
+            "tier": self.tier,
+            "timestamp_ms": self.timestamp_ms,
+            "seconds": round(self.seconds, 2),
+            "expected_phone": self.expected_phone,
+            "actual_phone": self.actual_phone,
+            "detector_confidence": self.detector_confidence,
+            "provenance": self.provenance,
+            "downgraded_reason": self.downgraded_reason or None,
+            "is_error_assertion": self.tier == "T2",
+        }
+
+
+@dataclass(frozen=True)
+class TierAssignment:
+    """Deterministic tier assignment produced before any model call."""
+
+    t2_items: tuple[TierItem, ...] = ()
+    t3_items: tuple[TierItem, ...] = ()
+    downgraded: tuple[TierItem, ...] = ()
+    rejected: tuple[dict[str, Any], ...] = ()
+    phoneme_assertions_enabled: bool = False
+
+    @property
+    def t2_words(self) -> frozenset[str]:
+        return frozenset(item.word for item in self.t2_items)
+
+    @property
+    def t3_words(self) -> frozenset[str]:
+        return frozenset(item.word for item in self.t3_items)
+
+    @property
+    def t2_pairs(self) -> frozenset[tuple[str, str, str]]:
+        return frozenset(
+            (item.word, item.expected_phone or "", item.actual_phone or "")
+            for item in self.t2_items
+        )
+
+    def to_document(self) -> dict[str, Any]:
+        return {
+            "phoneme_assertions_enabled": self.phoneme_assertions_enabled,
+            "t2_count": len(self.t2_items),
+            "t3_count": len(self.t3_items),
+            "downgraded_count": len(self.downgraded),
+            "rejected_count": len(self.rejected),
+            "t2_items": [item.as_document() for item in self.t2_items],
+            "t3_items": [item.as_document() for item in self.t3_items],
+            "policy": (
+                "T2 items require word + phone pair + timestamp + provenance and "
+                "are gated by phoneme_assertions_enabled. T3 items are hedged "
+                "self-listening candidates only."
+            ),
+        }
+
 
 class DetectorUnavailable(RuntimeError):
     """The optional frozen-detector stage could not run safely."""
@@ -136,6 +249,14 @@ class GroundedConfig:
     detector_timeout_seconds: float = 900.0
     self_listen_enabled: bool = False
     self_listen_max_n: int = DEFAULT_SELF_LISTEN_MAX_N
+    # T2 gate.  False (the shipped default) re-renders history items as hedged
+    # T3 wording; it can only be flipped by the lead after the assertion gate
+    # (per-class Wilson lower bound >= 0.85) passes.  No class passes today.
+    phoneme_assertions_enabled: bool = False
+    # Canonical TTS contrast audio.  Off by default; fail-closed when enabled.
+    contrast_audio_enabled: bool = False
+    contrast_audio_timeout_seconds: float = 60.0
+    pause_calibration_default_multiplier: float = DEFAULT_MULTIPLIER
     detector_cache_dir: Path = field(
         default_factory=lambda: _home_path("~/.bandroom-runner/acoustic-cache")
     )
@@ -174,6 +295,10 @@ class GroundedConfig:
             "detector_timeout_seconds",
             "self_listen_enabled",
             "self_listen_max_n",
+            "phoneme_assertions_enabled",
+            "contrast_audio_enabled",
+            "contrast_audio_timeout_seconds",
+            "pause_calibration_default_multiplier",
             "detector_cache_dir",
             "ffmpeg",
         }
@@ -198,6 +323,20 @@ class GroundedConfig:
             values["self_listen_enabled"] = bool(raw["self_listen_enabled"])
         if "self_listen_max_n" in raw:
             values["self_listen_max_n"] = int(raw["self_listen_max_n"])
+        if "phoneme_assertions_enabled" in raw:
+            values["phoneme_assertions_enabled"] = bool(
+                raw["phoneme_assertions_enabled"]
+            )
+        if "contrast_audio_enabled" in raw:
+            values["contrast_audio_enabled"] = bool(raw["contrast_audio_enabled"])
+        if "contrast_audio_timeout_seconds" in raw:
+            values["contrast_audio_timeout_seconds"] = float(
+                raw["contrast_audio_timeout_seconds"]
+            )
+        if "pause_calibration_default_multiplier" in raw:
+            values["pause_calibration_default_multiplier"] = float(
+                raw["pause_calibration_default_multiplier"]
+            )
         if "ffmpeg" in raw and raw["ffmpeg"] is not None:
             values["ffmpeg"] = str(raw["ffmpeg"])
         return cls(**values)
@@ -272,8 +411,17 @@ def wav_duration_seconds(path: str | Path) -> float:
         raise AudioError("invalid_audio", f"decoded WAV is unreadable: {exc}") from exc
 
 
-def analyze_calibrated(wav_path: str | Path) -> dict[str, Any]:
-    """Run the vendored prosody module and surface only calibrated metrics."""
+def analyze_calibrated(
+    wav_path: str | Path,
+    *,
+    pause_low_noise_multiplier: float = DEFAULT_MULTIPLIER,
+) -> dict[str, Any]:
+    """Run the vendored prosody module and surface only calibrated metrics.
+
+    ``pause_low_noise_multiplier`` carries the per-user pause calibration.  The
+    caller clamps it to the valid range; this function still rejects clearly
+    invalid values through ``prosody.analyze_wav``.
+    """
     module = _prosody_module()
     try:
         document = module.analyze_wav(
@@ -284,6 +432,7 @@ def analyze_calibrated(wav_path: str | Path) -> dict[str, Any]:
             transcript_source="none",
             pause_mode="waveform_only",
             include_contour=False,
+            pause_low_noise_multiplier=float(pause_low_noise_multiplier),
         )
         module.validate_output_schema(document)
         calibrated = module.calibrated_measurements(document)
@@ -331,6 +480,7 @@ def analyze_calibrated(wav_path: str | Path) -> dict[str, Any]:
         "module": "runner.prosody (vendored from iteration-25/prosody/prosody.py)",
         "version": document.get("version"),
         "calibration_version": document.get("calibration_version"),
+        "pause_low_noise_multiplier": round(float(pause_low_noise_multiplier), 4),
         "calibrated": surfaced,
         "pause_list_truncated": truncated,
         "policy": (
@@ -357,34 +507,61 @@ def build_evidence_document(
     analysis: Mapping[str, Any],
     *,
     self_listen: Sequence[Mapping[str, Any]] = (),
+    tier_assignment: TierAssignment | None = None,
+    reliability: Mapping[str, Any] | None = None,
+    contrast_summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     calibrated = analysis.get("calibrated") or {}
-    return {
+    suggestions = [
+        {
+            "word": item.get("word"),
+            "seconds": item.get("seconds"),
+            "timestamp_ms": item.get("timestamp_ms"),
+            "is_error_assertion": False,
+        }
+        for item in self_listen
+    ]
+    # Attach any canonical TTS reference by (word, timestamp) without changing
+    # the hedged status of the item.
+    contrast_by_key = {
+        (str(item.get("word") or ""), int(item.get("timestamp_ms") or 0)): item.get(
+            "contrast_audio"
+        )
+        for item in self_listen
+        if item.get("contrast_audio")
+    }
+    for suggestion in suggestions:
+        key = (str(suggestion.get("word") or ""), int(suggestion.get("timestamp_ms") or 0))
+        if key in contrast_by_key:
+            suggestion["contrast_audio"] = contrast_by_key[key]
+    document: dict[str, Any] = {
         "calibrated_prosody": _evidence_values(calibrated),
         "prosody_provenance": {
             "module": analysis.get("module"),
             "version": analysis.get("version"),
             "calibration_version": analysis.get("calibration_version"),
+            "pause_low_noise_multiplier": analysis.get(
+                "pause_low_noise_multiplier", DEFAULT_MULTIPLIER
+            ),
             "policy": (
                 "Only calibrated pause/timing metrics are included; no other "
                 "acoustic construct is presented as a measurement."
             ),
             "pause_list_truncated": bool(analysis.get("pause_list_truncated")),
         },
-        "self_listen_suggestions": [
-            {
-                "word": item.get("word"),
-                "seconds": item.get("seconds"),
-                "timestamp_ms": item.get("timestamp_ms"),
-                "is_error_assertion": False,
-            }
-            for item in self_listen
-        ],
+        "self_listen_suggestions": suggestions,
         "self_listen_policy": (
             "Unverified detector candidates for self-listening only; they are "
             "never error assertions and must not be called mistakes."
         ),
     }
+    if tier_assignment is not None:
+        document["tier_assignment"] = tier_assignment.to_document()
+    if reliability is not None:
+        document["t1_reliability"] = dict(reliability)
+    if contrast_summary is not None:
+        document["contrast_audio"] = dict(contrast_summary)
+    return document
 
 
 def _learner_payload(attempt: Mapping[str, Any], day: int) -> dict[str, Any]:
@@ -401,9 +578,18 @@ def build_prompt(
     *,
     day: int,
     self_listen: Sequence[Mapping[str, Any]] = (),
+    tier_assignment: TierAssignment | None = None,
+    reliability: Mapping[str, Any] | None = None,
+    contrast_summary: Mapping[str, Any] | None = None,
 ) -> tuple[str, str]:
     system = load_prompt("grounded_audio")
-    evidence = build_evidence_document(analysis, self_listen=self_listen)
+    evidence = build_evidence_document(
+        analysis,
+        self_listen=self_listen,
+        tier_assignment=tier_assignment,
+        reliability=reliability,
+        contrast_summary=contrast_summary,
+    )
     learner = json.dumps(_learner_payload(attempt, day), ensure_ascii=False, indent=2)
     evidence_text = json.dumps(evidence, ensure_ascii=False, indent=2)
     user = (
@@ -413,9 +599,335 @@ def build_prompt(
         "<learner_data untrusted=\"true\">\n"
         f"{learner}\n"
         "</learner_data>\n\n"
-        "请严格按硬性规则直接输出最终中文反馈（六个部分，恰好一个微练习）。"
+        "只输出第一至第五部分（评估、精确引文、建议改写、修改原因、下一步）。"
+        "第六、第七部分与 T1 可靠性披露由系统按结构化模板生成，你不要输出；"
+        "不要提及或断言任何音素/发音错误。"
     )
     return system, user
+
+
+# ---------------------------------------------------------------------------
+# Deterministic T2/T3 classification + template rendering (FIX-5 / BL-E)
+# ---------------------------------------------------------------------------
+# The model writes ONLY the T1 prose (sections 一-五).  These functions fill the
+# T2/T3 slots and the portrait section from structured data, so "T3 never
+# masquerades as T2" is enforced by construction rather than by a regex over
+# free prose.
+
+
+def _tier_word(value: Any) -> str:
+    return re.sub(r"^[^a-z]+|[^a-z]+$", "", str(value or "").lower())
+
+
+def _coerce_phone(value: Any) -> str:
+    token = str(value or "").strip().upper()
+    return token if _PHONE_TOKEN.match(token) else ""
+
+
+def _coerce_timestamp_ms(item: Mapping[str, Any]) -> int:
+    for key in ("timestamp_ms", "timestampMs", "time_ms"):
+        if item.get(key) is not None:
+            try:
+                return max(0, int(round(float(item[key]))))
+            except (TypeError, ValueError):
+                return 0
+    for key in ("seconds", "time", "at"):
+        if item.get(key) is not None:
+            try:
+                seconds = float(item[key])
+            except (TypeError, ValueError):
+                return 0
+            return max(0, int(round(seconds * 1000.0)))
+    return 0
+
+
+def _provenance_label(value: Any) -> str:
+    if isinstance(value, Mapping):
+        for key in ("source", "kind", "type"):
+            if value.get(key):
+                return str(value[key])
+        return "mapping" if value else ""
+    return str(value or "").strip()
+
+
+def _t3_item(value: Mapping[str, Any]) -> TierItem | None:
+    word = _tier_word(value.get("word"))
+    timestamp_ms = _coerce_timestamp_ms(value)
+    if not word or timestamp_ms <= 0:
+        return None
+    try:
+        confidence = float(value.get("detector_confidence"))
+    except (TypeError, ValueError):
+        confidence = None
+    return TierItem(
+        word=word,
+        timestamp_ms=timestamp_ms,
+        seconds=round(timestamp_ms / 1000.0, 2),
+        tier="T3",
+        detector_confidence=confidence,
+    )
+
+
+def _t2_item(value: Mapping[str, Any]) -> tuple[TierItem | None, str]:
+    """Return a valid T2 item or ``(None, reason)``.
+
+    T2 requires all four provenance elements: word, differing phone pair,
+    timestamp, and a non-empty provenance label.  Anything incomplete is
+    downgraded to a hedged T3 suggestion, never asserted.
+    """
+    base = _t3_item(value)
+    if base is None:
+        return None, "missing_word_or_timestamp"
+    expected = _coerce_phone(
+        value.get("expected_phone", value.get("expected"))
+    )
+    actual = _coerce_phone(value.get("actual_phone", value.get("actual")))
+    provenance = _provenance_label(
+        value.get("provenance", value.get("source"))
+    )
+    if not expected or not actual:
+        return None, "missing_phone_pair"
+    if expected == actual:
+        return None, "identical_phone_pair"
+    if not provenance:
+        return None, "missing_provenance"
+    return (
+        TierItem(
+            word=base.word,
+            timestamp_ms=base.timestamp_ms,
+            seconds=base.seconds,
+            tier="T2",
+            expected_phone=expected,
+            actual_phone=actual,
+            detector_confidence=base.detector_confidence,
+            provenance=provenance,
+        ),
+        "",
+    )
+
+
+def classify_candidates(
+    asserted_t2: Sequence[Mapping[str, Any]] | None,
+    hedged_t3: Sequence[Mapping[str, Any]] | None,
+    *,
+    phoneme_assertions_enabled: bool = False,
+    max_n: int = DEFAULT_SELF_LISTEN_MAX_N,
+) -> TierAssignment:
+    """Assign candidates to T2/T3 deterministically before the model call.
+
+    When ``phoneme_assertions_enabled`` is False, valid T2 items are
+    *re-rendered* as hedged T3 wording (mn-03); they are never silently
+    asserted.  Malformed T2 items are also downgraded, so a missing provenance
+    field can only make the output weaker.
+    """
+    limit = max(0, int(max_n))
+    t2_items: list[TierItem] = []
+    downgraded: list[TierItem] = []
+    rejected: list[dict[str, Any]] = []
+
+    for raw in asserted_t2 or ():
+        if not isinstance(raw, Mapping):
+            rejected.append({"reason": "not_a_mapping", "item": str(raw)[:120]})
+            continue
+        item, reason = _t2_item(raw)
+        if item is None:
+            fallback = _t3_item(raw)
+            if fallback is not None:
+                downgraded.append(
+                    TierItem(
+                        word=fallback.word,
+                        timestamp_ms=fallback.timestamp_ms,
+                        seconds=fallback.seconds,
+                        tier="T3",
+                        detector_confidence=fallback.detector_confidence,
+                        downgraded_reason=reason,
+                    )
+                )
+            else:
+                rejected.append({"reason": reason})
+            continue
+        if phoneme_assertions_enabled:
+            t2_items.append(item)
+        else:
+            downgraded.append(
+                TierItem(
+                    word=item.word,
+                    timestamp_ms=item.timestamp_ms,
+                    seconds=item.seconds,
+                    tier="T3",
+                    detector_confidence=item.detector_confidence,
+                    downgraded_reason="phoneme_assertions_disabled",
+                )
+            )
+
+    seen: set[tuple[str, int]] = set()
+    deduped_t2: list[TierItem] = []
+    for item in sorted(t2_items, key=lambda value: (value.timestamp_ms, value.word)):
+        if limit <= 0:
+            break
+        key = (item.word, item.timestamp_ms)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_t2.append(item)
+        if len(deduped_t2) >= limit:
+            break
+
+    t3_words = {item.word for item in deduped_t2}
+    pending: list[tuple[TierItem, bool]] = [
+        (item, True) for item in downgraded
+    ] + [
+        (item, False) for item in (hedged_t3 or ()) if isinstance(item, Mapping)
+    ]
+
+    def _sort_key(pair: tuple[TierItem | Mapping[str, Any], bool]):
+        value = pair[0]
+        if isinstance(value, TierItem):
+            return (value.timestamp_ms, value.word)
+        return (
+            _coerce_timestamp_ms(value),
+            str(value.get("word") or "").lower(),
+        )
+
+    combined: list[TierItem] = []
+    if limit > 0:
+        for value, already_tier_item in sorted(pending, key=_sort_key):
+            normalised = value if already_tier_item else _t3_item(value)  # type: ignore[arg-type]
+            if normalised is None:
+                continue
+            if normalised.word in t3_words:
+                # T2 wins when assertions are enabled; a T3 copy would be a
+                # masquerade vector.
+                continue
+            key = (normalised.word, normalised.timestamp_ms)
+            if key in seen:
+                continue
+            seen.add(key)
+            combined.append(normalised)
+            if len(combined) >= limit:
+                break
+
+    return TierAssignment(
+        t2_items=tuple(deduped_t2),
+        t3_items=tuple(combined),
+        downgraded=tuple(downgraded),
+        rejected=tuple(rejected),
+        phoneme_assertions_enabled=bool(phoneme_assertions_enabled),
+    )
+
+
+def render_t3_section(items: Sequence[TierItem]) -> str:
+    ordered = sorted(items, key=lambda item: (item.timestamp_ms, item.word))
+    lines = [f"{T3_SECTION_HEADER}："]
+    if not ordered:
+        lines.append("本次没有可自听对比的建议。")
+        return "\n".join(lines)
+    for index, item in enumerate(ordered, 1):
+        lines.append(
+            f"{index}. 在 {item.seconds:.2f} 秒处的 {item.word}，可对比标准读音自听判断。"
+        )
+    return "\n".join(lines)
+
+
+def render_t2_block(items: Sequence[TierItem]) -> str:
+    ordered = sorted(items, key=lambda item: (item.timestamp_ms, item.word))
+    if not ordered:
+        return ""
+    lines = [T2_BLOCK_MARKER]
+    for index, item in enumerate(ordered, 1):
+        lines.append(
+            f"{index}. 你在 {item.seconds:.2f} 秒处的 {item.word}：你的历史确认中 "
+            f"这一类常被读成 /{item.actual_phone}/（应为 /{item.expected_phone}/，"
+            f"{item.expected_phone}→{item.actual_phone}），本次值得对比自听。"
+        )
+    return "\n".join(lines)
+
+
+def render_portrait(
+    assignment: TierAssignment,
+    *,
+    reliability_text: str = "",
+) -> str:
+    """Deterministic portrait.  It never contains a "strengths" block (FIX-20)."""
+    lines = [
+        f"{PORTRAIT_HEADER}：",
+        "本画像只记录检测器提出、且在你的历史确认中反复出现的类别；"
+        "它不推断任何正确发音或优点，未列为问题的类别不等于已掌握。",
+    ]
+    if assignment.t2_items:
+        lines.append(
+            f"以下 {len(assignment.t2_items)} 项来自你的历史确认，"
+            "属于建议性质，不是本次新检测的错误断言。"
+        )
+        lines.append(render_t2_block(assignment.t2_items))
+    else:
+        if assignment.phoneme_assertions_enabled:
+            lines.append("你的历史确认还不足以形成 T2 类别。")
+        else:
+            lines.append(
+                "音素断言门当前关闭（无类别达到 Wilson 95% 下界 0.85），"
+                "历史类别只以未校准候选形式呈现。"
+            )
+    lines.append(
+        f"本次未校准候选 {len(assignment.t3_items)} 个，仅作自听参考，"
+        "不作为错误断言，也不用于推断正确发音。"
+    )
+    if reliability_text:
+        lines.append(reliability_text)
+    return "\n".join(lines)
+
+
+def compose_grounded_feedback(
+    body_text: str,
+    *,
+    assignment: TierAssignment,
+    reliability_text: str,
+    response: str = "",
+) -> str:
+    """Compose the final feedback from model-written T1 prose + filled slots.
+
+    Sections 一-五 come from the model.  Sections 六 (T3), 七 (portrait with the
+    optional T2 block) and the T1 reliability line are deterministic.  Any
+    model-written 六/七 text is discarded, so the model cannot smuggle a T3 word
+    into a tier section.
+    """
+    sections = _split_work_sections(body_text or "")
+    required = ("assessment", "quote", "rewrite", "reasons", "next_step")
+    missing = [name for name in required if not sections.get(name)]
+    if missing:
+        raise ContentRuleError(
+            "grounded_feedback_violation",
+            "model output is missing T1 section(s): " + ", ".join(missing),
+            retryable=True,
+        )
+    t1_prose = "\n".join(sections[name] for name in required)
+    if assignment.t2_items:
+        # The model does not know about T2, so it writes the unqualified
+        # statement.  Qualify it deterministically instead of rejecting.
+        t1_prose = t1_prose.replace(
+            NO_ERROR_STATEMENT, NO_ERROR_OTHER_STATEMENT
+        )
+    return "\n".join(
+        [
+            t1_prose,
+            render_t3_section(assignment.t3_items),
+            render_portrait(assignment, reliability_text=reliability_text),
+        ]
+    )
+
+
+def _split_work_sections(text: str) -> dict[str, str]:
+    positions: list[tuple[int, str]] = []
+    for name, pattern in _SECTION_HEADERS.items():
+        match = pattern.search(text)
+        if match:
+            positions.append((match.start(), name))
+    positions.sort()
+    sections: dict[str, str] = {}
+    for index, (start, name) in enumerate(positions):
+        end = positions[index + 1][0] if index + 1 < len(positions) else len(text)
+        sections[name] = text[start:end].strip()
+    return sections
 
 
 # ---------------------------------------------------------------------------
@@ -437,9 +949,13 @@ _REWRITE = re.compile(
 )
 _NUMBERED = re.compile(r"修改原因|(?:^|\n)\s*1[.、)]\s*\S", re.M)
 _NO_ERROR_STATEMENT = re.compile(
-    r"(?:未发现|没有|无)[^。\n]{0,30}(?:可核实的)?(?:音素|发音)?错误"
-    r"|未发现可核实"
-    r"|no (?:verified )?(?:phoneme|pronunciation) errors?",
+    # Require an explicit "did not find" statement.  A bare "无需针对音素错误
+    # 改写" is a rewrite disclaimer, not a no-error measurement statement.
+    r"(?:未发现|没有发现|未检出|未检测到|没有检测到)"
+    r"[^。\n]{0,30}(?:可核实的)?(?:音素|发音)?错误"
+    r"|无[^。\n]{0,10}可核实的(?:音素|发音)?错误"
+    r"|no (?:verified )?(?:phoneme|pronunciation) errors?"
+    r"|no verified errors?",
     re.I,
 )
 
@@ -569,14 +1085,105 @@ def _uncalibrated_violations(text: str) -> list[str]:
     return violations
 
 
+def _strip_quoted(text: str) -> str:
+    return _QUOTED_SPAN.sub(lambda match: " " * len(match.group(0)), text or "")
+
+
+def _has_ipa_near(text: str, word: str) -> bool:
+    pattern = re.compile(
+        r"[^\s，。；：、]{0,24}" + _IPA_SLASH.pattern + r"[^\s，。；：、]{0,24}"
+    )
+    for match in pattern.finditer(text or ""):
+        if re.search(r"\b" + re.escape(word) + r"\b", match.group(0), re.I):
+            return True
+    return False
+
+
+def _has_phoneme_hint_near(text: str, word: str) -> bool:
+    """True when a candidate word sits next to a hedged phoneme judgement.
+
+    This catches "office 听起来像 D" even without a timestamp or IPA notation,
+    which is the prose form a T3 word could use to pose as a T2 claim.
+    """
+    for match in _SELF_LISTEN_WORD.finditer(text or ""):
+        if match.group(0).lower() != word:
+            continue
+        window = (text or "")[max(0, match.start() - 30): match.end() + 30]
+        if _PHONEME_HINT.search(window):
+            return True
+    return False
+
+
+def _nearest_english_word(text: str) -> str:
+    tokens = [
+        match.group(0)
+        for match in _SELF_LISTEN_WORD.finditer(text or "")
+        if len(match.group(0)) >= 2 and not _PHONE_TOKEN.match(match.group(0))
+    ]
+    return tokens[-1].lower() if tokens else ""
+
+
+def _portrait_section(text: str) -> str | None:
+    match = _PORTRAIT_HEADER.search(text or "")
+    if not match:
+        return None
+    rest = (text or "")[match.start():]
+    nxt = _PORTRAIT_NEXT.search(rest)
+    return rest[: nxt.start()] if nxt else rest
+
+
+def _t2_block(text: str) -> str | None:
+    match = _T2_MARKER.search(text or "")
+    if not match:
+        return None
+    rest = (text or "")[match.end():]
+    nxt = _NEXT_MARKER.search(rest)
+    return rest[: nxt.start()] if nxt else rest
+
+
+def _tier_assertive_violations(
+    block: str,
+    *,
+    allowed_words: set[str],
+    allowed_pairs: set[tuple[str, str, str]],
+) -> list[str]:
+    """Assertive wording is allowed in T2 only for allow-listed word/pairs."""
+    violations: list[str] = []
+    for match in _ASSERTIVE_PHONEME.finditer(block or ""):
+        before = (block or "")[max(0, match.start() - 64): match.start()]
+        word = _nearest_english_word(before)
+        if word not in allowed_words:
+            violations.append(f"t2_assertive_not_allowlisted:{match.group(0)}")
+    for match in _PHONE_PAIR_TOKEN.finditer(block or ""):
+        first, second = match.group(1), match.group(2)
+        if not any(
+            {first, second} == {expected, actual}
+            for _, expected, actual in allowed_pairs
+        ):
+            violations.append(f"t2_phone_pair_not_allowlisted:{first}>{second}")
+    return violations
+
+
 def validate_grounded_feedback(
     feedback: str,
     *,
     response: str = "",
     self_listen: Sequence[Mapping[str, Any]] = (),
     max_self_listen: int = DEFAULT_SELF_LISTEN_MAX_N,
+    t2_items: Sequence[TierItem] | None = None,
+    t3_items: Sequence[TierItem] | None = None,
+    phoneme_assertions_enabled: bool | None = None,
+    reliability: Mapping[str, Any] | None = None,
+    require_profile: bool = False,
 ) -> list[str]:
-    """Return validator violations; an empty list means the text is safe."""
+    """Return validator violations; an empty list means the text is safe.
+
+    With no tier arguments this keeps the original prose validator exactly.
+    Passing any tier argument switches to structural validation: assertive
+    wording is allowed only inside the deterministic T2 block for allow-listed
+    word/phone pairs, the T3 section stays hedged, and a T3 word placed in the
+    T1 prose with a timestamp or IPA notation is rejected.
+    """
     text = (feedback or "").strip()
     violations: list[str] = []
     if not text:
@@ -586,8 +1193,6 @@ def validate_grounded_feedback(
         if not pattern.search(text):
             violations.append(f"work_format_missing:{name}")
 
-    if not _NO_ERROR_STATEMENT.search(text):
-        violations.append("missing_no_error_statement")
     if not _has_response_quote(text, response):
         violations.append("missing_grounded_quote")
     if not _REWRITE.search(text):
@@ -601,13 +1206,159 @@ def validate_grounded_feedback(
     if drills != 1:
         violations.append(f"micro_drill_count:{drills}")
 
-    violations.extend(_assertive_phoneme_violations(text))
     violations.extend(_uncalibrated_violations(text))
     if _OVERALL_BAND_CLAIM.search(text):
         violations.append("overall_speaking_band_claim")
     if _PRONUNCIATION_SCORE.search(text):
         violations.append("pronunciation_score_claim")
 
+    tier_mode = (
+        t2_items is not None
+        or t3_items is not None
+        or phoneme_assertions_enabled is not None
+        or reliability is not None
+        or require_profile
+    )
+    if not tier_mode:
+        # Legacy behaviour: no T2 allow-list exists, so no assertive wording
+        # anywhere is acceptable.
+        if not _NO_ERROR_STATEMENT.search(text):
+            violations.append("missing_no_error_statement")
+        violations.extend(_assertive_phoneme_violations(text))
+        violations.extend(
+            _legacy_self_listen_violations(
+                text,
+                self_listen=self_listen,
+                max_self_listen=max_self_listen,
+            )
+        )
+        return sorted(set(violations))
+
+    # -- structural tier validation -------------------------------------
+    t2 = list(t2_items or ())
+    t3 = list(t3_items) if t3_items is not None else [
+        item
+        for item in (
+            _t3_item(value) for value in self_listen if isinstance(value, Mapping)
+        )
+        if item is not None
+    ]
+    t2_words = {item.word for item in t2}
+    t3_words = {item.word for item in t3}
+    t2_pairs = {
+        (item.word, item.expected_phone or "", item.actual_phone or "")
+        for item in t2
+    }
+    has_no_error = bool(_NO_ERROR_STATEMENT.search(text))
+    if t2:
+        if has_no_error and "其他" not in text:
+            violations.append("missing_other_no_error_qualifier")
+    elif not has_no_error:
+        violations.append("missing_no_error_statement")
+
+    sections = _split_work_sections(text)
+    t1_prose = "\n".join(
+        sections.get(name, "")
+        for name in ("assessment", "quote", "rewrite", "reasons", "next_step")
+    )
+    t1_unquoted = _strip_quoted(t1_prose)
+    violations.extend(_assertive_phoneme_violations(t1_unquoted))
+    if _IPA_SLASH.search(t1_unquoted):
+        violations.append("ipa_notation_outside_tier_section")
+
+    # T3 section: hedged only.
+    t3_section = _self_listen_section(text)
+    t3_section_words = (
+        _self_listen_words(t3_section) if t3_section is not None else set()
+    )
+    if t3:
+        if t3_section is None:
+            violations.append("missing_self_listen_section")
+        else:
+            if not (t3_section_words & t3_words):
+                violations.append("self_listen_section_empty")
+            for token in sorted(t3_section_words - t3_words):
+                violations.append(f"self_listen_word_not_hedged:{token}")
+            if _SELF_LISTEN_ASSERTIVE.search(t3_section):
+                violations.append("self_listen_assertive_phrasing")
+            presented = sorted(t3_section_words & t3_words)
+            if len(presented) > int(max_self_listen):
+                violations.append(f"self_listen_too_many:{len(presented)}")
+            for word in presented:
+                if not _has_seconds_near(t3_section, word):
+                    violations.append(f"self_listen_missing_timestamp:{word}")
+    else:
+        if t3_section is None:
+            violations.append("missing_self_listen_section")
+        elif not _SELF_LISTEN_NONE.search(t3_section):
+            violations.append("self_listen_missing_no_suggestion_statement")
+        for token in sorted(t3_section_words):
+            violations.append(f"self_listen_word_not_hedged:{token}")
+
+    # T2 block: allow-listed items only, inside the portrait.
+    portrait = _portrait_section(text)
+    t2_block = _t2_block(portrait or "")
+    if t2:
+        if not t2_block:
+            violations.append("missing_t2_section")
+        else:
+            block_words = {
+                token.lower()
+                for token in _SELF_LISTEN_WORD.findall(t2_block)
+                if len(token) >= 2 and not _PHONE_TOKEN.match(token)
+            }
+            for token in sorted(block_words - t2_words):
+                violations.append(f"t2_word_not_allowed:{token}")
+            for token in sorted(t2_words - block_words):
+                violations.append(f"t2_word_missing:{token}")
+            violations.extend(
+                _tier_assertive_violations(
+                    t2_block, allowed_words=t2_words, allowed_pairs=t2_pairs
+                )
+            )
+    elif t2_block:
+        violations.append("t2_section_without_items")
+
+    # Cross-section leakage: a T3 word with a timestamp/IPA in the T1 prose is
+    # an attempted T2 masquerade.  Plain mentions inside learner quotes are not.
+    for word in sorted(t3_words):
+        if (
+            _has_seconds_near(t1_unquoted, word)
+            or _has_ipa_near(t1_unquoted, word)
+            or _has_phoneme_hint_near(t1_unquoted, word)
+        ):
+            violations.append(f"t3_word_outside_t3_section:{word}")
+        if t2_block and word in {
+            token.lower()
+            for token in _SELF_LISTEN_WORD.findall(t2_block)
+            if len(token) >= 2
+        }:
+            violations.append(f"t2_word_not_allowed:{word}")
+    for word in sorted(t2_words):
+        if word in t3_section_words:
+            violations.append(f"t2_word_outside_t2_section:{word}")
+        if _has_seconds_near(t1_unquoted, word) or _has_ipa_near(t1_unquoted, word):
+            violations.append(f"t2_word_outside_t2_section:{word}")
+
+    if require_profile:
+        if portrait is None:
+            violations.append("missing_profile_section")
+        elif _STRENGTH_TERM.search(portrait):
+            violations.append("profile_strengths_claim")
+
+    if reliability is not None and RELIABILITY_MARKER not in text:
+        violations.append("missing_reliability_disclosure")
+
+    return sorted(set(violations))
+
+
+def _legacy_self_listen_violations(
+    text: str,
+    *,
+    self_listen: Sequence[Mapping[str, Any]],
+    max_self_listen: int,
+) -> list[str]:
+    violations: list[str] = []
     allowed_words = {
         str(item.get("word", "")).lower()
         for item in self_listen
@@ -632,15 +1383,13 @@ def validate_grounded_feedback(
                 if not _has_seconds_near(section, word):
                     violations.append(f"self_listen_missing_timestamp:{word}")
     else:
-        # With no detector candidates the section must not invent words.
         for token in sorted(section_words):
             violations.append(f"self_listen_word_not_hedged:{token}")
         if section is None:
             violations.append("missing_self_listen_section")
         elif not _SELF_LISTEN_NONE.search(section):
             violations.append("self_listen_missing_no_suggestion_statement")
-
-    return sorted(set(violations))
+    return violations
 
 
 # ---------------------------------------------------------------------------
@@ -927,11 +1676,86 @@ def build_evidence_text(recording_id: str, analysis: Mapping[str, Any]) -> str:
     speech = float(calibrated.get("speech_duration_seconds") or 0.0)
     pause_count = int(calibrated.get("pause_count") or 0)
     pause_seconds = float(calibrated.get("pause_seconds") or 0.0)
+    multiplier = float(
+        analysis.get("pause_low_noise_multiplier", DEFAULT_MULTIPLIER)
+    )
     return (
         f"录音 {recording_id}；已校准韵律证据：总时长 {total:.2f} 秒，"
-        f"语音 {speech:.2f} 秒，停顿 {pause_count} 个、共 {pause_seconds:.2f} 秒。"
+        f"语音 {speech:.2f} 秒，停顿 {pause_count} 个、共 {pause_seconds:.2f} 秒"
+        f"（停顿阈值倍数 {multiplier:.2f}）。"
         "仅使用已校准的停顿与时长指标；未测音高、WPM 或填充词。"
+        "停顿计数附本人可靠性披露，仅供参考。"
     )
+
+
+def _analyzer_takes_multiplier(analyzer: Callable[..., Any]) -> bool:
+    try:
+        signature = inspect.signature(analyzer)
+    except (TypeError, ValueError):
+        return False
+    return "pause_low_noise_multiplier" in signature.parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
+def _run_analyzer(
+    analyzer: Callable[..., dict[str, Any]],
+    decoded: str | Path,
+    multiplier: float,
+) -> dict[str, Any]:
+    if _analyzer_takes_multiplier(analyzer):
+        return analyzer(decoded, pause_low_noise_multiplier=multiplier)
+    return analyzer(decoded)
+
+
+def _call_grounded(
+    complete: Callable[..., Any],
+    system: str,
+    user: str,
+    timeout: float,
+) -> Any:
+    try:
+        signature = inspect.signature(complete)
+    except (TypeError, ValueError):
+        return complete(system, user)
+    accepts_timeout = "timeout" in signature.parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    if accepts_timeout:
+        return complete(system, user, timeout=timeout)
+    return complete(system, user)
+
+
+def _pause_state_for_attempt(
+    attempt: Mapping[str, Any],
+    config: Any,
+    grounded: GroundedConfig,
+    supplied: PauseCalibrationState | None,
+) -> PauseCalibrationState:
+    if supplied is not None:
+        return supplied
+    user_id = str(attempt.get("userId") or attempt.get("user_id") or "owner")
+    verdicts = (
+        attempt.get("pauseConfirmations")
+        or attempt.get("pauseVerdicts")
+        or ()
+    )
+    default = float(
+        getattr(grounded, "pause_calibration_default_multiplier", DEFAULT_MULTIPLIER)
+        or DEFAULT_MULTIPLIER
+    )
+    state_dir = getattr(config, "state_dir", None)
+    if state_dir:
+        store = PauseCalibrationStore(
+            Path(os.path.expanduser(str(state_dir))) / "pause_calibration.json"
+        )
+        if verdicts:
+            store.record(user_id, verdicts)
+            store.save()
+        return store.state(user_id, default=default)
+    return calibrate_pause_multiplier(verdicts, user_id=user_id, default=default)
 
 
 def review_speaking_grounded(
@@ -943,14 +1767,16 @@ def review_speaking_grounded(
     model: Any,
     workdir: str | Path,
     decode_wav: Callable[..., tuple[Path, Path]] = decode_to_wav,
-    prosody_analyzer: Callable[[str | Path], dict[str, Any]] = analyze_calibrated,
+    prosody_analyzer: Callable[..., dict[str, Any]] = analyze_calibrated,
     logger: logging.Logger | None = None,
+    pause_calibration: PauseCalibrationState | None = None,
 ) -> Feedback:
     """Produce a validated grounded speaking review.
 
-    Returns a ``Feedback`` compatible with ``validate_feedback`` /
-    ``feedback_to_tool_args``.  The caller (orchestrator) supplies the
-    recordingId when writing back; this function never claims a phoneme error.
+    The model writes only the T1 prose (sections 一-五).  T2/T3 and the portrait
+    are filled deterministically from structured candidates, so the tier gate is
+    structural rather than a regex over free prose.  Every review carries the
+    per-user T1 reliability disclosure and uses the calibrated pause multiplier.
     """
     log = logger or LOG
     if not isinstance(raw_bytes, (bytes, bytearray)) or not raw_bytes:
@@ -977,11 +1803,21 @@ def review_speaking_grounded(
             f"recording is {decoded_duration:.1f}s; the configured limit is {max_duration:.0f}s",
             retryable=False,
         )
-    analysis = prosody_analyzer(decoded)
+
+    # Per-user pause calibration: default 1.6 until enough confirmations exist;
+    # never below the measured collapse point.
+    calibration = _pause_state_for_attempt(
+        attempt, config, grounded, pause_calibration
+    )
+    multiplier = calibration.multiplier
+    analysis = _run_analyzer(prosody_analyzer, decoded, multiplier)
     duration = float(
         (analysis.get("calibrated") or {}).get("total_duration_seconds")
         or decoded_duration
     )
+    pause_count = int((analysis.get("calibrated") or {}).get("pause_count") or 0)
+    reliability = reliability_document(calibration, pause_count=pause_count)
+    reliability_text = reliability_disclosure(calibration, pause_count=pause_count)
 
     self_listen: list[dict[str, Any]] = []
     if getattr(grounded, "self_listen_enabled", False):
@@ -993,8 +1829,35 @@ def review_speaking_grounded(
             logger=log,
         )
 
+    # Structured tier assignment happens before the model is called.
+    assignment = classify_candidates(
+        attempt.get("t2Candidates") or attempt.get("t2_candidates") or (),
+        self_listen,
+        phoneme_assertions_enabled=bool(
+            getattr(grounded, "phoneme_assertions_enabled", False)
+        ),
+        max_n=int(
+            getattr(grounded, "self_listen_max_n", DEFAULT_SELF_LISTEN_MAX_N)
+        ),
+    )
+    t3_documents = [item.as_document() for item in assignment.t3_items]
+    contrast_enabled = bool(getattr(grounded, "contrast_audio_enabled", False))
+    contrast_summary = enrich_candidates(
+        t3_documents,
+        enabled=contrast_enabled,
+        transport=getattr(config, "contrast_transport", None),
+        api_key=str(getattr(config, "api_key", "") or ""),
+        limit=int(getattr(grounded, "self_listen_max_n", DEFAULT_SELF_LISTEN_MAX_N)),
+    )
+
     system, user = build_prompt(
-        attempt, analysis, day=day, self_listen=self_listen
+        attempt,
+        analysis,
+        day=day,
+        self_listen=t3_documents,
+        tier_assignment=assignment,
+        reliability=reliability,
+        contrast_summary=contrast_summary,
     )
     complete = getattr(model, "complete_grounded", None)
     if not callable(complete):
@@ -1003,13 +1866,29 @@ def review_speaking_grounded(
             "the configured model has no grounded text completion method",
             retryable=False,
         )
-    produced = complete(system, user)
-    text = str(produced or "").strip()
+    timeout = float(
+        getattr(config, "grounded_text_timeout", GROUNDED_TEXT_TIMEOUT_SECONDS)
+        or GROUNDED_TEXT_TIMEOUT_SECONDS
+    )
+    produced = _call_grounded(complete, system, user, timeout)
+    text = compose_grounded_feedback(
+        str(produced or "").strip(),
+        assignment=assignment,
+        reliability_text=reliability_text,
+        response=str(attempt.get("response") or ""),
+    )
     violations = validate_grounded_feedback(
         text,
         response=str(attempt.get("response") or ""),
-        self_listen=self_listen,
-        max_self_listen=int(getattr(grounded, "self_listen_max_n", DEFAULT_SELF_LISTEN_MAX_N)),
+        self_listen=t3_documents,
+        max_self_listen=int(
+            getattr(grounded, "self_listen_max_n", DEFAULT_SELF_LISTEN_MAX_N)
+        ),
+        t2_items=assignment.t2_items,
+        t3_items=assignment.t3_items,
+        phoneme_assertions_enabled=assignment.phoneme_assertions_enabled,
+        reliability=reliability,
+        require_profile=True,
     )
     if violations:
         raise ContentRuleError(
