@@ -18,7 +18,7 @@ dom.window.HTMLMediaElement.prototype.load=()=>{};
 dom.window.HTMLMediaElement.prototype.play=async()=>{};
 globalThis.IS_REACT_ACT_ENVIRONMENT=true;
 const {createElement,act}=await import('react'),{createRoot}=await import('react-dom/client');
-const {PronunciationCoach,PronunciationProfilePanel}=await import('../.sites-runtime/tests/pronunciation-coach.mjs');
+const {PronunciationCoach,PronunciationProfilePanel,ControlItemDisclosure}=await import('../.sites-runtime/tests/pronunciation-coach.mjs');
 
 const analysisFixture=()=>({
  pronunciation:{
@@ -275,4 +275,26 @@ test('profile read failure is explicit and retryable',async()=>{
  fail=false;
  await click(buttons('重试读取')[0]);
  assert.match(text(),/1\/3 次同类确认/);
+});
+// --- control-item disclosure ------------------------------------------------
+// Controls are indistinguishable in the confirmation cards, so the disclosure
+// may only report the aggregate consequence, never which item was a control.
+test('control disclosure is silent before any control is answered', async () => {
+ await render(createElement(ControlItemDisclosure,{controls:{shown:3,answered:0,confirmed:0,constantConfirmerFlag:false}}));
+ assert.equal(text().trim(),'');
+});
+
+test('control disclosure reports counts without flagging a discriminating listener', async () => {
+ await render(createElement(ControlItemDisclosure,{controls:{shown:6,answered:5,confirmed:1,constantConfirmerFlag:false}}));
+ assert.match(text(),/已回答 5 个对照项/);
+ assert.match(text(),/不计入类别进度/);
+ assert.doesNotMatch(text(),/区分度不足/);
+});
+
+test('control disclosure warns a constant confirmer and never names the control word', async () => {
+ await render(createElement(ControlItemDisclosure,{controls:{shown:6,answered:5,confirmed:5,constantConfirmerFlag:true}}));
+ assert.match(text(),/确认结果区分度不足/);
+ assert.match(text(),/5 个判为/);
+ assert.match(text(),/不确定/);
+ assert.doesNotMatch(text(),/DH|AH|expected|actual/);
 });

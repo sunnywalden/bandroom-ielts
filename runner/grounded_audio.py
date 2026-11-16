@@ -1681,12 +1681,99 @@ def collect_self_listen_candidates(
 # ---------------------------------------------------------------------------
 
 
+# Catch trials are control items: expected === actual, so "confirmed" is
+# definitionally non-discriminating. They are excluded from every profile count
+# server-side. Without them the frozen V3 gate can never be satisfied, because
+# the detector only ever emits substitutions and a control would never appear.
+CATCH_TRIAL_SENTINEL_PHONE = "AH"
+CATCH_TRIAL_MIN_ASR_PROBABILITY = 0.90
+CATCH_TRIAL_MIN_WORD_SECONDS = 0.15
+CATCH_TRIAL_MODULUS = 3
+
+
+def select_catch_trial(
+    audio_sha256: str,
+    grounded: Any,
+    flagged_words: Sequence[str],
+) -> dict[str, Any] | None:
+    """Pick a control word the detector did NOT flag, deterministically.
+
+    A control built from a flagged word would be confounded: the learner could
+    correctly hear a real error and "confirm", which would look like
+    non-discrimination. So the control must come from an unflagged, high-ASR-
+    confidence word. Selection is a stable hash of the recording, so a re-run
+    of the same audio produces the same control rather than fresh randomness.
+    """
+    if not audio_sha256:
+        return None
+    digest = hashlib.sha256(f"catch|{audio_sha256}".encode("utf-8")).hexdigest()
+    if int(digest[:8], 16) % CATCH_TRIAL_MODULUS != 0:
+        return None
+    cache_dir = getattr(grounded, "detector_cache_dir", None)
+    if not cache_dir:
+        return None
+    path = detector_cache_path(audio_sha256, cache_dir)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("detectorScriptSha256") != FROZEN_DETECTOR_SHA256:
+        return None
+    if payload.get("sourceSha256") not in (None, audio_sha256):
+        return None
+
+    flagged = {_normalise_word(w) for w in flagged_words if w}
+    eligible: list[dict[str, Any]] = []
+    words = payload.get("words") or []
+    for index, raw in enumerate(words):
+        if not isinstance(raw, Mapping) or index in (0, len(words) - 1):
+            continue
+        word = _normalise_word(raw.get("word"))
+        if not word or word in flagged or len(word) > 80:
+            continue
+        try:
+            start = float(raw.get("start"))
+            end = float(raw.get("end"))
+            probability = float(raw.get("probability"))
+        except (TypeError, ValueError):
+            continue
+        if not (math.isfinite(start) and math.isfinite(end) and math.isfinite(probability)):
+            continue
+        if end - start < CATCH_TRIAL_MIN_WORD_SECONDS:
+            continue
+        if probability < CATCH_TRIAL_MIN_ASR_PROBABILITY:
+            continue
+        at_ms = int(round(start * 1000.0))
+        if at_ms <= 0 or at_ms > 10800000:
+            continue
+        eligible.append({"word": word, "atMs": at_ms, "probability": probability})
+    if not eligible:
+        return None
+    eligible.sort(key=lambda item: (item["atMs"], item["word"]))
+    chosen = eligible[int(digest[8:16], 16) % len(eligible)]
+    return {
+        "word": chosen["word"],
+        "timestamp_ms": chosen["atMs"],
+        # Not a detector confidence: a control has no substitution to score.
+        # This is the ASR confidence that the word was transcribed correctly.
+        "detector_confidence": round(chosen["probability"], 4),
+        "expected_phone": CATCH_TRIAL_SENTINEL_PHONE,
+        "actual_phone": CATCH_TRIAL_SENTINEL_PHONE,
+        "catch_trial": True,
+    }
+
+
 def build_grounded_analysis(
     self_listen: Sequence[Mapping[str, Any]],
     assignment: TierAssignment,
     analysis: Mapping[str, Any],
     *,
     max_candidates: int = MAX_CALIBRATION_CANDIDATES,
+    catch_trial: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Build the server-side calibration payload from raw detector candidates.
 
@@ -1707,6 +1794,9 @@ def build_grounded_analysis(
     if not math.isfinite(speech) or speech < 0:
         speech = 0.0
     t2_keys = {(item.word, item.timestamp_ms) for item in assignment.t2_items}
+    limit = max(0, int(max_candidates))
+    # Reserve one slot so a control never pushes the payload past the bound.
+    real_limit = max(0, limit - 1) if _catch_trial_item(catch_trial) is not None else limit
     items: list[dict[str, Any]] = []
     for raw in self_listen or ():
         if not isinstance(raw, Mapping):
@@ -1740,8 +1830,11 @@ def build_grounded_analysis(
         if expected == actual:
             item["catchTrial"] = True
         items.append(item)
-        if len(items) >= max(0, int(max_candidates)):
+        if len(items) >= real_limit:
             break
+    control = _catch_trial_item(catch_trial)
+    if control is not None:
+        items.append(control)
     if not items:
         return None
     return {
@@ -1749,6 +1842,30 @@ def build_grounded_analysis(
         "inventoryVersion": CALIBRATION_INVENTORY_VERSION,
         "speechSeconds": round(speech, 4),
         "candidates": items,
+    }
+
+
+def _catch_trial_item(catch_trial: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Validate a control item; it must be an identical phone pair."""
+    if not isinstance(catch_trial, Mapping):
+        return None
+    word = str(catch_trial.get("word") or "").strip()
+    expected = _coerce_phone(catch_trial.get("expected_phone"))
+    actual = _coerce_phone(catch_trial.get("actual_phone"))
+    at_ms = _coerce_timestamp_ms(catch_trial)
+    if not word or len(word) > 80 or not expected or expected != actual:
+        return None
+    if at_ms <= 0 or at_ms > 10800000:
+        return None
+    try:
+        confidence = float(catch_trial.get("detector_confidence"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        return None
+    return {
+        "word": word, "expected": expected, "actual": actual, "atMs": at_ms,
+        "detectorConfidence": confidence, "tier": "T3", "catchTrial": True,
     }
 
 
@@ -1903,14 +2020,21 @@ def review_speaking_grounded(
     reliability_text = reliability_disclosure(calibration, pause_count=pause_count)
 
     self_listen: list[dict[str, Any]] = []
+    catch_trial: dict[str, Any] | None = None
     if getattr(grounded, "self_listen_enabled", False):
+        audio_sha256 = sha256_bytes(raw)
         self_listen = collect_self_listen_candidates(
-            sha256_bytes(raw),
+            audio_sha256,
             source,
             grounded=grounded,
             duration_seconds=duration,
             logger=log,
         )
+        if self_listen:
+            catch_trial = select_catch_trial(
+                audio_sha256, grounded,
+                [str(item.get("word") or "") for item in self_listen],
+            )
 
     # Structured tier assignment happens before the model is called.
     assignment = classify_candidates(
@@ -1986,7 +2110,9 @@ def review_speaking_grounded(
             evidence=build_evidence_text(recording_id, analysis),
             attempt=attempt_id,
             pronunciation=GROUNDED_PRONUNCIATION,
-            analysis=build_grounded_analysis(self_listen, assignment, analysis),
+            analysis=build_grounded_analysis(
+                self_listen, assignment, analysis, catch_trial=catch_trial
+            ),
         )
     except ValueError as exc:
         raise ContentRuleError(
