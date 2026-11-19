@@ -99,8 +99,8 @@ function PrepTimer() {
 }
 
 type MicMode="idle"|"waiting"|"recording"|"stopping";
-function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive}:{
-  limit:number;clip:Blob|null;disabled:boolean;stopRequestRef:{current:(()=>void)|null};onClip:(blob:Blob)=>void;onActive:(mode:MicMode)=>void;
+function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive,heading}:{
+  limit:number;clip:Blob|null;disabled:boolean;stopRequestRef:{current:(()=>void)|null};onClip:(blob:Blob)=>void;onActive:(mode:MicMode)=>void;heading?:string;
 }) {
   const [mode,setMode] = useState<MicMode>("idle");
   const [duration,setDuration] = useState(0);
@@ -219,7 +219,7 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive}:{
       disabled={mode==="waiting" || mode==="stopping" || (disabled && mode!=="recording")} aria-label={mode==="recording"?"停止录音":"开始录音"}
       onClick={() => mode === "recording" ? stopRequestRef.current?.() : void record()}>
       {mode === "recording" ? <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg> : <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6"><rect x="8.5" y="2.5" width="7" height="13" rx="3.5"/><path d="M5.5 11v1.5a6.5 6.5 0 0 0 13 0V11M12 19v3m-3 0h6"/></svg>}
-    </button><div><strong>{mode==="stopping"?"正在整理录音":mode==="recording"?"正在录音":mode==="waiting"?"正在请求麦克风":clip?"重新录制本次草稿":"录下你的回答"}</strong><small>{mode==="recording" ? `${clock(duration)} / ${clock(limit)} · 点击停止` : `最多 ${clock(limit)} · 手动开始`}</small></div>
+    </button><div><strong>{mode==="stopping"?"正在整理录音":mode==="recording"?"正在录音":mode==="waiting"?"正在请求麦克风":clip?"重新录制本次草稿":(heading??"录下你的回答")}</strong><small>{mode==="recording" ? `${clock(duration)} / ${clock(limit)} · 点击停止` : `最多 ${clock(limit)} · 手动开始`}</small></div>
     <Wave live={mode==="recording"}/></div>
     {url && <div className="sp-play"><audio controls src={url} aria-label="试听本次录音"/><a href={url} download={clip?.type.includes("mp4")?"speaking.m4a":clip?.type.includes("ogg")?"speaking.ogg":clip?.type.includes("wav")?"speaking.wav":"speaking.webm"}>下载本次录音</a></div>}
     {notice && <p role="status" className="sp-message">{notice}</p>}
@@ -323,7 +323,8 @@ function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Pro
     <p className="sp-question" lang="en">{day11Part3 ? "Why do some drivers ignore warning lights on their dashboards, even when they know it could be dangerous?" : isFollow ? followup : prompt}</p>
     {!isFollow ? <><p className="sp-help">可以记下三个关键词：情境、你的行动、结果。准备 1 分钟，再自然讲 1–2 分钟。</p><PrepTimer/></> : <p className="sp-help">{day11Part3 ? "用 3–4 句英语回答，给出一个实际原因和一种可能后果。建议 40–60 秒。" : "先直接回答，再用一个理由或例子展开。建议 30–60 秒。"}</p>}
     {isFollow&&day!==11&&<><History items={answers(entry.speakingPart2)} title="已提交的 Part 2 回答 · 点击回听"/>{answers(entry.speakingPart2).map((_,i)=><AttemptFeedback key={i} field="speakingPart2" index={i}/>)}</>}
-    <Recorder limit={isFollow ? 60 : 120} clip={voice?.blob??null} disabled={busy||preparing} stopRequestRef={stopRequestRef} onClip={blob=>{
+    <Recorder limit={isFollow ? 60 : 120} clip={voice?.blob??null} disabled={busy||preparing} stopRequestRef={stopRequestRef}
+      heading={day11Part3?"录下你的 Part 3 回答":isFollow?"录下你的追问回答（第 2/2 题）":retake?"录下你的加练回答":undefined} onClip={blob=>{
       const draft={id:newRecordingId(),at:new Date().toISOString(),blob};
       const commit=saveOnStop.current;saveOnStop.current=false;
       void keep(draft).then(()=>{if(commit&&mounted.current)void submit(false,draft)});
@@ -350,6 +351,7 @@ function AnswerTask({day,account,phase,prompt,followup,entry,save,go,retake}:Pro
     {!voice && <label className="sp-check"><input type="checkbox" checked={attest} onChange={e=>setAttest(e.target.checked)}/> 我已在页面外开口作答，按自报口练记录。</label>}
     <p className="sp-note">仅有文字或自报记录时，发音、停顿和流利度留待音频评估。</p>
     <History items={items}/>{items.map((_,i)=><AttemptFeedback key={i} field={isFollow?"speakingFollowup":"speakingPart2"} index={i}/>)}
+    {isFollow&&!day11Part3&&<p className="sp-note">上方卡片是 Part 2 的批改与自听确认，该录音已提交保存。本题是追问（第 2/2 题），需单独录一段（或勾选自报）后保存，完成后进入口语自评。</p>}
     {message && <p className="sp-message" role="status">{message}</p>}
     <div className="actions sp-actions"><button className="primary" type="button" disabled={busy || preparing || mic==="waiting" || mic==="stopping" || (mic==="idle" && !voice && !attest)} onClick={()=>{
         if(mic==="recording"){if(stopRequestRef.current){saveOnStop.current=true;stopRequestRef.current()} return;}

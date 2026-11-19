@@ -121,7 +121,7 @@ catch/control，用户会针对性回答，控制项就不再提供信息，BL-H
 
 ## 7. 服务端契约假设（与并行工作流对齐）
 
-浏览器通过同源 `POST /api/mcp`（JSON-RPC `tools/call`）调用：
+浏览器通过同源 `POST /mcp`（JSON-RPC `tools/call`，路由为 `app/mcp/route.ts`）调用：
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
@@ -184,7 +184,10 @@ analysis.pronunciation = {
 1. **工具已由并行工作流登记，但未做真实账号联调**：只读检查 `lib/mcp-scope.ts` 确认
    `record_pronunciation_verdict` / `reset_pronunciation_profile` 为 owner-only，
    `read_pronunciation_profile` 允许 owner/coach/coach-runner。本次未修改这些文件，也未向真实会话发起
-   `/api/mcp` 调用；“浏览器会话 → tools/call → D1”链路仍需端到端验证。
+   `/mcp` 调用；“浏览器会话 → tools/call → D1”链路仍需端到端验证。
+   **2026-11-19 更正与闭环**：rev2 客户端曾误写 `/api/mcp`（该路径从未挂载，生产表现为画像读取
+   404/500），已改为 `/mcp`；`tests/pronunciation-client-route.mjs` 将真实客户端经按路径分发的
+   路由 mock 接到真实 `app/mcp/route.ts`（未知路径 404），读/裁决/重置全链路端到端验证通过。
 2. **实际存储分析已由并行工作流补齐 `candidateId`，但未做真实账号端到端**：只读检查
    `lib/coach.ts` 的 `groundedAnalysis` 路径，服务端用 `issueCalibrationCandidates` 签发 id 并写入
    `analysisJson.items`；runner 不提供 id。T2/T3 文本仍由 runner 追加在 `feedback` 中，UI 按固定标题切分。
