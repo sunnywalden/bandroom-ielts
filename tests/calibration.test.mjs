@@ -138,7 +138,7 @@ try{
   equal(profileAfterIssuance.totals.nShown,2,"nShown excludes catch trial");
   equal(profileAfterIssuance.rows.find(r=>r.expected==="TH").nShown,1);
   equal(profileAfterIssuance.rows.find(r=>r.expected==="TH").state,"CANDIDATE");
-  equal(profileAfterIssuance.notes.trustPromotion,"disabled-pending-v3");
+  equal(profileAfterIssuance.notes.trustPromotion,"retired-structurally-unreachable");
   const catchCandidate=await db.prepare("SELECT expected,actual FROM calibration_candidates WHERE candidate_id=?")
     .bind(issued.candidateIds[2]).first();
   equal(catchCandidate.expected,"DH");equal(catchCandidate.actual,"DH","catch trial stored as expected===actual");
@@ -213,7 +213,7 @@ try{
   equal(flagged.catchTrials.confirmRate,1);
   equal(flagged.catchTrials.constantConfirmerFlag,true,"five confirmed controls flag the listener");
   equal(flagged.totals.categories,0,"controls never create profile categories");
-  equal(flagged.notes.trustPromotion,"disabled-pending-v3","flag does not enable promotion");
+  equal(flagged.notes.trustPromotion,"retired-structurally-unreachable","flag does not enable promotion");
 
   const discriminator="owner-discriminator";
   const discIssue=await issueCalibrationCandidates(db,discriminator,{
