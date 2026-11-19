@@ -21,7 +21,7 @@ export async function GET() {
   const user = auth.user;
   const result = await getDb().select({ revision: learnerStates.revision, state: learnerStates.state })
     .from(learnerStates).where(eq(learnerStates.userId, user.userId)).get();
-  return json({ account:user.userId, ...(result ?? { revision: 0, state: null }) });
+  return json({ account:user.userId, displayName:user.displayName, ...(result ?? { revision: 0, state: null }) });
 }
 
 export async function PUT(request: Request) {
