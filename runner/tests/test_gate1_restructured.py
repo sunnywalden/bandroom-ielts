@@ -78,6 +78,15 @@ def test_corroborated_l3():
     assert g1r.corroborated_l3({"falsified": False}) is False
 
 
+def test_aligned_scope_violations():
+    clean = "一、评估：未发现可核实的音素错误。四、修改原因：1. 在 3.2 秒处停顿较长。五、下一步：练连读。"
+    assert g1r.aligned_scope_violations(clean) == []
+    bad = "你把 main 读错了，应为 /meɪn/，重音错误，口语总分 6.5。"
+    v = g1r.aligned_scope_violations(bad)
+    assert any("phoneme" in x for x in v)
+    assert "ipa_notation" in v and "stress_assertion" in v and "overall_band_claim" in v
+
+
 def test_decision_table():
     base = dict(missing=False, l0_pass=True, anchor_full=True, l1_pass=True, l3_pass=True, escalate=False, underpowered=False)
     assert g1r.decide(**base) == ("PASS", "G1-automated(machine-panel)")
