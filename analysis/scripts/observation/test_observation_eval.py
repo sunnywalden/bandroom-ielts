@@ -256,7 +256,7 @@ def patched_window(td, *, now_at, verdict_prior=None, status=302,
         verdict_path.write_text(json.dumps(verdict_prior))
 
     saved = {k: getattr(owe, k) for k in
-             ("WINDOW", "VERDICT", "now", "deployed_version", "runner_health",
+             ("WINDOW", "VERDICT", "SITE", "now", "deployed_version", "runner_health",
               "mcp_read", "safety_config", "http_status")}
 
     def fake_version(*, record=None, sleep=None):
@@ -271,6 +271,7 @@ def patched_window(td, *, now_at, verdict_prior=None, status=302,
 
     owe.WINDOW = window_path
     owe.VERDICT = verdict_path
+    owe.SITE = "https://fixture.example"
     owe.now = lambda: now_at
     owe.deployed_version = fake_version
     owe.runner_health = lambda: {"ok": health_ok, "failedTotal": failed_total,
@@ -386,10 +387,22 @@ def test_window_logic():
             check("C4 probes SITE root", captured == [owe.SITE + "/"])
 
 
+def test_site_fail_closed():
+    # No BANDROOM_SITE_URL (SITE empty): refuse to evaluate, write no verdict.
+    after_end = END + timedelta(seconds=7)
+    with tempfile.TemporaryDirectory() as td:
+        with patched_window(td, now_at=after_end) as (_, vp):
+            owe.SITE = ""
+            rc = owe.main([])
+            check("empty SITE: fail-closed exit 2", rc == 2)
+            check("empty SITE: no verdict written", not vp.exists())
+
+
 def main():
     test_probe_instrument()
     test_probe_hardening()
     test_window_logic()
+    test_site_fail_closed()
     failed = [n for n, ok in RESULTS if not ok]
     print(f"\nRESULT: {len(RESULTS) - len(failed)}/{len(RESULTS)} PASS"
           + (f"  FAILURES: {failed}" if failed else ""))

@@ -327,7 +327,7 @@ fails closed rather than being silently ignored.
 ### Commands
 
 ```bash
-cd /Users/henry/Documents/Codex/2026-11-08/referenced-chatgpt-conversation-this-is-an/work/bandroom/.sites-checkout
+cd <repo-root>  # the bandroom-ielts checkout
 
 # Full runner suite (baseline before this change: 106 passed)
 /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -m pytest runner/tests -q

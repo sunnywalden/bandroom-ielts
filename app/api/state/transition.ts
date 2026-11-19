@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { dayStamp, initial, labels, oldOrder, stages, type Entry, type Stage } from "../../ledger";
+import { dayStamp, initial, labels, oldOrder, sampleEpoch, stages, type Entry, type Stage } from "../../ledger";
 
 import { getExercises, type Lesson } from "../../curriculum";
 import { periods } from "../../period";
@@ -124,7 +124,7 @@ export function validTransition(previous:unknown, candidate:unknown, lesson?:Les
   if(newTests.length<tests.length || newTests.length>tests.length+1 || !tests.every((t,i)=>same(t,newTests[i])))return false;
   if(newTests.length>tests.length){
     const t=newTests[tests.length];
-    if(t.date>dayStamp()||t.date<"2026-10-29"||(t.exam!=="通用"&&t.exam!==b.exam)
+    if(t.date>dayStamp()||t.date<sampleEpoch||(t.exam!=="通用"&&t.exam!==b.exam)
       ||tests.some(old=>old.id===t.id||(old.date===t.date&&old.skill===t.skill&&old.exam===t.exam&&old.source.toLowerCase()===t.source.toLowerCase())))return false;
   }
   for(const [key,prior] of Object.entries(a.reports??{}))if(b.reports?.[key]?.created!==prior.created)return false;
