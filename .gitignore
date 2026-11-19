@@ -61,6 +61,8 @@ __pycache__/
 /runner/config.prod.toml
 /runner/run-prod.sh
 
-# Generated gate evaluation output (analysis/scripts/calibration-gates)
+# Generated gate evaluation output (any cwd, incl. repo root)
+V3_GATE_RESULT.json
+v3_export_*.json
 /analysis/scripts/calibration-gates/V3_GATE_RESULT.json
 /analysis/scripts/calibration-gates/v3_export_*.json
