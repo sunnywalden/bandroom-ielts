@@ -199,6 +199,7 @@ test('profile panel shows cold start, same-class progress, reliability, rate cha
  assert.match(text(),/1\/3 次同类确认/);
  assert.match(text(),/2\/3 次同类确认/);
  assert.match(text(),/不是所有类别的总数/);
+ assert.doesNotMatch(text(),/「其实没错」，已记录/);
  assert.match(text(),/36 次停顿/);
  assert.match(text(),/每分钟语音的候选数（展示策略不变量）/);
  assert.match(text(),/误差线表示该时间点候选发生率的置信区间/);
@@ -222,6 +223,21 @@ test('profile panel shows cold start, same-class progress, reliability, rate cha
  assert.match(text(),/已重置个人发音画像。你的录音和备份未受影响。/);
  assert.match(text(),/还没有你的个人发音画像/);
  assert.equal(document.querySelector('[role="dialog"]'),null);
+});
+
+test('rejected verdicts are disclosed per class without counting toward confirmations',async()=>{
+ const fixture=profileFixture();
+ fixture.profileExists=true;
+ fixture.classes=[
+  {expected:'V',actual:'W',nConfirmed:0,nRejected:1,nUnsure:0,nShown:1,state:'CANDIDATE'},
+  {expected:'ER',actual:'AH',nConfirmed:0,nRejected:0,nUnsure:0,nShown:1,state:'CANDIDATE'},
+ ];
+ profileReply=fixture;
+ await render(createElement(PronunciationProfilePanel,{}));
+ assert.match(text(),/0\/3 次同类确认/);
+ assert.match(text(),/还需 3 次同类确认/);
+ assert.match(text(),/另有 1 次「其实没错」，已记录，不计入确认进度。/);
+ assert.equal((text().match(/「其实没错」，已记录/g)??[]).length,1,'only the class with rejections gets the line');
 });
 
 test('reset failure is reported and leaves the profile visible',async()=>{
