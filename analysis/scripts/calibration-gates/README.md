@@ -1,4 +1,4 @@
-# Calibration gates (V3-G and V3-P)
+# Calibration gates (V3-G, V3-P and V3-P-A)
 
 Evaluation machinery for personal pronunciation calibration. Versioned here so
 the rules that gate T2 are reviewable and cannot be lost with a local directory.
@@ -17,16 +17,63 @@ acquisition, which is a category error. The two questions are separated:
 | --- | --- | --- | --- |
 | **V3-G** (`v3_gate.py`) | Does the mechanism generalize across users? | >= 6 users, each with >= 2 time-ordered sessions and >= 20 future-session candidates, human ground truth | product-wide claims; T2 by default for new users |
 | **V3-P** (`v3_personal_gate.py`) | Is **this user's** calibration reliable? | >= 2 history + >= 2 future sessions, >= 20 future candidates, human truth, catch trials present, not a constant confirmer | T2 **for that user only**, per class |
+| **V3-P-A** (`v3_personal_gate_auto.py`) | Same question, judged by calibrated machine panels | Same thresholds as V3-P plus source separation, >= 90% determinate truth coverage, >= 5 determinate controls, sealed CG manifest | T2 **for that user only**, pooled promoted set; never a human blind-test claim |
 
 V3-P **imports V3-G's constants and statistical helpers** (`T2_ABS_PRECISION`,
 `T2_LB_FLOOR`, `TP_RETENTION_MIN`, `FROZEN_N`, `FROZEN_PROMOTE_POSTERIOR_LB`,
 `wilson_lb`, `beta_ppf_10`). No threshold can drift between the gates; the tests
 assert identity, including function-object identity.
 
-Both were pre-registered before any real multi-session data existed. The V3-P
-pre-registration is recorded in the acceptance workspace
-(`iteration-25/V3P_PREREGISTRATION.md`). **Do not edit a constant to make a result
-pass.**
+## V3-P-A: machine-panel variant
+
+`v3_personal_gate_auto.py` is the pre-registered machine-panel variant
+(iteration-27 `V3PA_PREREGISTRATION.md`). It answers the same per-user question
+as V3-P but permits the historical fit and the future-session ground truth to
+come from calibrated panels rather than a human listener. The report label is
+fixed to `V3-P-A(machine-panel)`; it never claims human blind testing.
+
+The frozen `v3_gate.py` and `v3_personal_gate.py` are untouched. V3-P-A **copies**
+the V3-P `check_user` / `evaluate_user` logic with a named disclosure of the
+source lines, and imports every constant and statistical helper from the frozen
+modules. It adds only the pre-registered differences:
+
+- schema `bandroom-v3-multisession-auto-v2`; every verdict carries
+  `verdictSource` (`human`, `machine-panel-A`, `machine-panel-B`, `anchors-only`);
+  mixed fit sources are refused and the future-truth family must differ from the fit family;
+- `groundTruth.annotatedBy` accepts `calibrated-panel` (never bare `detector`)
+  and requires a sibling CG manifest
+  `{panelId, modelIds, promptSha256, cgResultSha256, calibratedAt}` whose result
+  file hash is verified fail-closed (`V3PA_CG_MANIFEST` or `--cg-manifest`);
+- three-state mapping `unsure -> isTrueError=false` (primary), determinate
+  coverage `>= 90%` or refusal, unsure count reported, and the
+  `unsure -> true` sensitivity variant computed alongside;
+- POOLED PASS only unlocks the promoted set; `per_promoted_class` is disclosure
+  only (no per-class pass rule);
+- sequential design: `>= 1` new future session per evaluation, fit frozen at the
+  first `FROZEN_N` verdicts, deterministic demotion when the rolling future-window
+  Wilson LB drops below 0.70;
+- two catch-trial tracks: the original CG-3 gate-execution rule is retained
+  unchanged (`>= 5` answered and `>= 0.80` confirmed -> refuse), and a separate
+  panel-quality monitor invalidates a batch when determinate-control
+  misconfirmation exceeds `0.20`;
+- at least `MIN_DETERMINATE_CONTROLS = 5` determinate controls are required,
+  fail-closed.
+
+### Differential test (HARD GATE)
+
+Because the V3-P logic is copied rather than imported, a **differential test is
+mandatory**. On the same human-labelled document (schema v1,
+`annotatedBy: "human"`, `verdictSource: "human"`) `v3_personal_gate_auto.py` and
+`v3_personal_gate.py` must return field-by-field byte-identical output. The
+human schema is the identity domain and stays on the copied V3-P path; the
+machine-panel semantics exist only under the auto-v2 schema. Any drift fails
+`test_v3_personal_gate_auto.py`.
+
+All three were pre-registered before any real multi-session data existed. The
+V3-P pre-registration is recorded in the acceptance workspace
+(`iteration-25/V3P_PREREGISTRATION.md`) and the V3-P-A variant in
+(`iteration-27/V3PA_PREREGISTRATION.md`). **Do not edit a constant to make a
+result pass.**
 
 ## Replication level
 
@@ -80,17 +127,50 @@ python3 -I v3_gate.py check    <data.json>
 python3 -I v3_gate.py evaluate <data.json>
 python3 -I v3_personal_gate.py check    <data.json> <userId>
 python3 -I v3_personal_gate.py evaluate <data.json> <userId>
+python3 -I v3_personal_gate_auto.py check    <data.json> <userId> --cg-manifest <manifest.json>
+python3 -I v3_personal_gate_auto.py evaluate <data.json> <userId> --cg-manifest <manifest.json>
 ```
+
+The V3-P-A command accepts the frozen v1 human schema (identity path) or the
+auto-v2 machine-panel schema. The manifest path may also be supplied through
+`V3PA_CG_MANIFEST`; a missing or hash-mismatched manifest is a refusal.
 
 `check` exits non-zero when the data is inadequate; `evaluate` refuses to run
 rather than degrading to a within-recording estimate.
 
+## Mechanism simulation (NON-GATE)
+
+`mechanism_simulation.py` exercises the V3-P feature subset on synthetic data:
+candidate -> verdict -> profile promotion -> catch-trial handling -> pooled
+statistics. It is **explicitly non-gate**:
+
+- its output is labelled `NON-GATE SIMULATION — DOES NOT AUTHORIZE ANY UNLOCK`
+  and can never enable T2;
+- it **never writes `V3_GATE_RESULT.json`** and refuses to be pointed at that
+  filename;
+- it does **not** run V3-G on sentence-block splits (splitting one recording
+  into sentence blocks is pseudo-replication); the replication unit is the
+  session;
+- it documents that V3-G does not check catch trials — catch-trial behaviour is
+  a V3-P feature — so only V3-P is exercised;
+- its synthetic speakers are disjoint by construction from any CG calibration
+  set, and the output discloses that a simulation has no inferential power for
+  the real gate.
+
+```
+python3 -I mechanism_simulation.py                          # non-gate JSON to stdout
+python3 -I mechanism_simulation.py --listener constant-confirmer
+python3 -I mechanism_simulation.py --output simulation.json  # any name but V3_GATE_RESULT.json
+```
+
 ## Tests
 
 ```
-python3 -I test_v3_gate.py            # V3-G, including refusal on single-session data
-python3 -I test_v3_personal_gate.py   # 32 assertions
-python3 -I test_v3_data_pipeline.py   # 24 assertions
+python3 -I test_v3_gate.py                  # V3-G, including refusal on single-session data
+python3 -I test_v3_personal_gate.py         # 32 assertions
+python3 -I test_v3_data_pipeline.py         # 24 assertions
+python3 -I test_v3_personal_gate_auto.py    # 80 assertions, incl. the differential HARD GATE
+python3 -I test_mechanism_simulation.py     # 23 assertions
 ```
 
 Fixtures are written to a temp directory, so running the tests never litters the
