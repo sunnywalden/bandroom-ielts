@@ -1,0 +1,144 @@
+{
+ "gop": {
+  "method": "Per word: forced-align the best cmudict canonical pronunciation to the word's phone-CTC frames using a monotone HMM (each phone >=1 frame); GOP_frame = mean_t[log P(canonical phone at t) - max_phone log P(phone at t)]. Variants: mean of per-phone GOPs (phone_mean) and worst-phone GOP (phone_min). A word is flagged when GOP <= threshold; sweep every achievable threshold. Precision = flagged words containing >=1 comparable annotated substitution / all flagged words. Coverage = comparable substitution labels in flagged words / all comparable substitution labels. Word recall = positive words flagged / all positive scored words.",
+  "verdict": {
+   "assertion_bar": "precision >= 0.85 with non-trivial coverage",
+   "any_variant_reaches_bar": false,
+   "any_variant_reaches_bar_after_filler_exclusion": false,
+   "primary_mode": "asr",
+   "primary_variant": "gop_frame_mean",
+   "best_precision_at_label_coverage_ge_0_10": {
+    "mode": "gold",
+    "variant": "gop_phone_min",
+    "point": {
+     "threshold": -6.180236,
+     "flagged_words": 44,
+     "tp_words": 29,
+     "fp_words": 15,
+     "precision": 0.659091,
+     "label_coverage": 0.101408,
+     "any_error_coverage": 0.104478,
+     "word_recall": 0.097643,
+     "any_precision": 0.840909,
+     "covered_labels": 36
+    }
+   },
+   "best_precision_at_label_coverage_ge_0_30": {
+    "mode": "gold",
+    "variant": "gop_phone_min",
+    "point": {
+     "threshold": -2.473406,
+     "flagged_words": 240,
+     "tp_words": 143,
+     "fp_words": 97,
+     "precision": 0.595833,
+     "label_coverage": 0.504225,
+     "any_error_coverage": 0.432836,
+     "word_recall": 0.481481,
+     "any_precision": 0.729167,
+     "covered_labels": 179
+    }
+   },
+   "oracle_global_threshold_at_tp_retention_ge_0_50": {
+    "mode": "gold",
+    "variant": "gop_phone_min",
+    "point": {
+     "threshold": -2.307747,
+     "flagged_words": 254,
+     "tp_words": 149,
+     "fp_words": 105,
+     "precision": 0.586614,
+     "label_coverage": 0.523944,
+     "any_error_coverage": 0.451078,
+     "word_recall": 0.501684,
+     "any_precision": 0.720472,
+     "covered_labels": 186
+    }
+   },
+   "best_after_filler_exclusion_at_label_coverage_ge_0_10": {
+    "mode": "gold",
+    "variant": "gop_frame_mean",
+    "point": {
+     "threshold": -2.061802,
+     "flagged_words": 41,
+     "tp_words": 30,
+     "fp_words": 11,
+     "precision": 0.731707,
+     "label_coverage": 0.107345,
+     "any_error_coverage": 0.08804,
+     "word_recall": 0.101351,
+     "any_precision": 0.878049,
+     "covered_labels": 38
+    }
+   },
+   "best_after_filler_exclusion_at_label_coverage_ge_0_30": {
+    "mode": "gold",
+    "variant": "gop_frame_mean",
+    "point": {
+     "threshold": -1.213077,
+     "flagged_words": 124,
+     "tp_words": 88,
+     "fp_words": 36,
+     "precision": 0.709677,
+     "label_coverage": 0.305085,
+     "any_error_coverage": 0.234219,
+     "word_recall": 0.297297,
+     "any_precision": 0.830645,
+     "covered_labels": 108
+    }
+   },
+   "max_tp_words_retained_at_precision_ge_0_85": {
+    "tp_words": 3,
+    "mode": "asr",
+    "variant": "gop_phone_mean",
+    "label_coverage": 0.008451
+   },
+   "interpretation": "GOP-style scoring with the local CROTTC phone-CTC posteriors does not reach the project's precision >= 0.85 assertion bar at non-trivial coverage. Even in the gold-transcript upper-bound mode the best precision at >=10% substitution-error coverage is ~0.66 (phone-min variant), and precision at >=30% coverage is <= 0.60. An a-priori filler-word exclusion lifts the gold-mode bound to ~0.73 at 10% coverage and ~0.69 at 30-50% coverage, still well short of 0.85. Precision >= 0.85 is attainable only by retaining a handful of true positives (at most 3 words, <=1.2% error coverage). This is consistent with, and no better than, the project's ~0.70 reranker oracle representation bound."
+  },
+  "caveats": [
+   "GOP-style with local CROTTC phone-CTC posteriors, NOT native-ASR GOP (Witt & Young 2000).",
+   "Word-level assertion, not phone-level: a flagged word covers every phone error in it.",
+   "Primary ground truth = comparable substitutions (kind 's', both EXPECTED and OBSERVED plain uppercase, different); additions/deletions are held out of the precision numerator, matching the project's scorer.",
+   "ASR mode uses Whisper word spans/tokens and can mis-transcribe; gold mode uses the annotated transcript and segmentation (upper-bound condition).",
+   "The held-out speakers are the CROTTC test split, but the audio is spontaneous Suitcase narrative, so domain shift affects the posteriors."
+  ]
+ },
+ "realtime": {
+  "model": "qwen-audio-3.0-realtime-plus",
+  "callability": {
+   "compatible_mode_http": false,
+   "native_multimodal_http": false,
+   "websocket": true
+  },
+  "pooled": {
+   "error_items": 32,
+   "control_items": 32,
+   "strict_hits": 0,
+   "posthoc_same_word_hits": 1,
+   "error_flags": 4,
+   "control_fps": 3,
+   "all_assertions": 7,
+   "strict_recall": 0.0,
+   "posthoc_same_word_recall": 0.03125,
+   "loose_recall": 0.125,
+   "strict_precision": 0.0,
+   "posthoc_same_word_precision": 0.14285714285714285,
+   "loose_precision": 0.5714285714285714,
+   "control_fp_rate": 0.09375,
+   "strict_precision_ci95": [
+    0.0,
+    0.35433884297520657
+   ],
+   "posthoc_same_word_precision_ci95": [
+    0.02567895594897479,
+    0.51313450331903
+   ],
+   "loose_precision_ci95": [
+    0.2504542304090258,
+    0.8417830777373732
+   ],
+   "parse_ok": 64,
+   "usable": 64
+  }
+ }
+}
