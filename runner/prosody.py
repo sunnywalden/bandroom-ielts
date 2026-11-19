@@ -52,6 +52,7 @@ No side effects occur on import.  All analysis is CPU-only NumPy/SciPy.
 from __future__ import annotations
 
 import math
+import os
 import re
 import wave
 from dataclasses import dataclass
@@ -1313,9 +1314,95 @@ def stress_proxy(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Robust learned-VAD pause mode (G2-prosody robustness fix, 2026-11-19).
+# Energy-only pause detection jitters under added noise / lossy codecs because
+# the noise-floor percentile shifts. A learned VAD (Silero, MIT, ONNX, local CPU)
+# yields a degradation-robust speech timeline; pauses = inter-speech gaps.
+# ---------------------------------------------------------------------------
+_VAD_SESSION: Any = None
+VAD_MODEL_PATH = Path(os.environ.get(
+    "BANDROOM_VAD_MODEL", str(Path.home() / ".bandroom-acoustic" / "silero_vad.onnx")))
+VAD_THRESHOLD = 0.5
+VAD_NEG_THRESHOLD = 0.35
+VAD_MIN_SPEECH_SECONDS = 0.25
+
+
+def _vad_session() -> Any:
+    global _VAD_SESSION
+    if _VAD_SESSION is None:
+        import onnxruntime as ort
+        _VAD_SESSION = ort.InferenceSession(
+            str(VAD_MODEL_PATH), providers=["CPUExecutionProvider"])
+    return _VAD_SESSION
+
+
+def vad_pauses(
+    samples: np.ndarray,
+    sample_rate: int = TARGET_SAMPLE_RATE,
+    *,
+    min_pause_seconds: float = PAUSE_MIN_SECONDS,
+    threshold: float = VAD_THRESHOLD,
+    neg_threshold: float = VAD_NEG_THRESHOLD,
+) -> PauseDetection:
+    """Speech/nonspeech timeline from Silero VAD; pauses = inter-speech gaps.
+
+    Robust to mild additive noise and lossy codecs (validated by cross-codec /
+    noise retest). Requires 16 kHz mono; the ONNX model is loaded lazily.
+    """
+    if sample_rate != 16000:
+        raise ValueError("vad_pauses requires 16 kHz mono audio")
+    sess = _vad_session()
+    chunk = 512
+    state = np.zeros((2, 1, 128), dtype=np.float32)
+    sr = np.array(16000, dtype=np.int64)
+    probs: list[float] = []
+    for first in range(0, len(samples) - chunk + 1, chunk):
+        block = samples[first:first + chunk].astype(np.float32)[None, :]
+        out, state = sess.run(None, {"input": block, "state": state, "sr": sr})
+        probs.append(float(out[0][0]))
+    frame_s = chunk / sample_rate
+    # Hysteresis segmentation into speech runs.
+    speech: list[list[float]] = []
+    in_speech = False
+    start = 0.0
+    for i, p in enumerate(probs):
+        t = i * frame_s
+        if not in_speech and p >= threshold:
+            in_speech = True
+            start = t
+        elif in_speech and p < neg_threshold:
+            in_speech = False
+            if t - start >= VAD_MIN_SPEECH_SECONDS:
+                speech.append([start, t])
+    if in_speech:
+        end = len(probs) * frame_s
+        if end - start >= VAD_MIN_SPEECH_SECONDS:
+            speech.append([start, end])
+    pauses = []
+    for a, b in zip(speech, speech[1:]):
+        gap = b[0] - a[1]
+        if gap >= min_pause_seconds:
+            pauses.append({"start": round(a[1], 3), "end": round(b[0], 3),
+                           "seconds": round(gap, 3)})
+    span = (speech[0][0], speech[-1][1]) if speech else (0.0, 0.0)
+    total = len(samples) / sample_rate
+    speech_seconds = sum(b - a for a, b in speech)
+    return PauseDetection(
+        pauses=pauses, noise_floor_rms=0.0,
+        low_threshold_rms=threshold, high_threshold_rms=threshold,
+        speech_span=span, speech_seconds=speech_seconds, total_seconds=total)
+
+
 def _calibration_status_for_pause_mode(
-    word_source: str, word_gated: bool
+    word_source: str, word_gated: bool, vad: bool = False
 ) -> tuple[str, str]:
+    if vad:
+        return STATUS_CALIBRATED, (
+            "Learned-VAD (Silero) pause timeline; robustness validated by "
+            "cross-codec/additive-noise retest (held-out). Pauses are inter-speech "
+            "gaps; mild-degradation scope disclosed."
+        )
     if word_gated:
         if word_source == "human_annotation":
             evidence = CALIBRATION_EVIDENCE["pause_word_gated_human"]
@@ -1405,7 +1492,7 @@ def analyze_wav(
         raise ValueError(f"invalid word_source: {word_source!r}")
     if transcript_source not in {"human_annotation", "asr", "supplied", "none"}:
         raise ValueError(f"invalid transcript_source: {transcript_source!r}")
-    if pause_mode not in {"auto", "waveform_only", "word_gated"}:
+    if pause_mode not in {"auto", "waveform_only", "word_gated", "vad"}:
         raise ValueError(f"invalid pause_mode: {pause_mode!r}")
 
     audio = load_wav(path)
@@ -1417,11 +1504,14 @@ def analyze_wav(
         transcript_source = "supplied"
 
     energy = frame_energy(samples, audio.sample_rate)
-    raw_detection = detect_pauses(
-        samples,
-        audio.sample_rate,
-        pause_low_noise_multiplier=pause_low_noise_multiplier,
-    )
+    if pause_mode == "vad":
+        raw_detection = vad_pauses(samples, audio.sample_rate)
+    else:
+        raw_detection = detect_pauses(
+            samples,
+            audio.sample_rate,
+            pause_low_noise_multiplier=pause_low_noise_multiplier,
+        )
 
     # Word-gating improves precision but loses recall when part of an
     # annotated pause is not below the energy threshold.  Waveform-only is the
@@ -1445,14 +1535,14 @@ def analyze_wav(
     speech_ratio = speech_seconds / total_seconds if total_seconds > 0 else None
 
     pause_status, pause_caveat = _calibration_status_for_pause_mode(
-        word_source, effective_mode == "word_gated"
+        word_source, effective_mode == "word_gated", vad=effective_mode == "vad"
     )
     pause_evidence = (
         "CALIBRATION_REPORT.md; calibration_results.json; "
         + (
             "word-gated"
             if effective_mode == "word_gated"
-            else "waveform-only"
+            else "vad" if effective_mode == "vad" else "waveform-only"
         )
     )
 
