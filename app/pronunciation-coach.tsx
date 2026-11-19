@@ -89,6 +89,7 @@ function ClassProgressRow({row}:{row:ClassProgress}) {
     <span className="pc-class-count">{row.nConfirmed}/{row.needed} 次同类确认</span>
     <small>{row.reached ? '已达到同类阈值；仍需通过异常确认与断言门检查。' : `还需 ${row.remaining} 次同类确认。`}</small>
     {row.nUnsure>0&&<small>另有 {row.nUnsure} 次「不确定」，不计入。</small>}
+    {row.nRejected>0&&<small>另有 {row.nRejected} 次「其实没错」，已记录，不计入确认进度。</small>}
   </li>;
 }
 
