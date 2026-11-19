@@ -520,9 +520,10 @@ def test_contrast_audio_uses_native_endpoint_shape(monkeypatch):
     assert result["status"] == "ok"
     assert result["url"] == "https://example.test/a.wav"
     assert captured["body"] == {
-        "model": "qwen3-tts-flash",
+        "model": contrast_audio.CONTRAST_TTS_MODEL,
         "input": {"text": "office", "voice": "Cherry"},
     }
+    assert contrast_audio.CONTRAST_TTS_MODEL == "qwen-audio-3.0-tts-plus"
     assert captured["headers"]["authorization"] == "Bearer sk-test"
     assert contrast_audio.CONTRAST_TTS_URL.endswith(
         "/multimodal-generation/generation"

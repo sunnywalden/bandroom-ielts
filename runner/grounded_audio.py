@@ -255,7 +255,9 @@ class GroundedConfig:
     self_listen_max_n: int = DEFAULT_SELF_LISTEN_MAX_N
     # T2 gate.  False (the shipped default) re-renders history items as hedged
     # T3 wording; it can only be flipped by the lead after the assertion gate
-    # (per-class Wilson lower bound >= 0.85) passes.  No class passes today.
+    # (per-class Wilson lower bound >= 0.70, owner amendment 2026-11-19) passes.
+    # No class passes today.  At 0.70, assertions carry a ~70% reliability
+    # disclosure and stay history-conditioned (never presented as certain).
     phoneme_assertions_enabled: bool = False
     # Canonical TTS contrast audio.  Off by default; fail-closed when enabled.
     contrast_audio_enabled: bool = False
@@ -844,6 +846,11 @@ def render_t2_block(items: Sequence[TierItem]) -> str:
             f"这一类常被读成 /{item.actual_phone}/（应为 /{item.expected_phone}/，"
             f"{item.expected_phone}→{item.actual_phone}），本次值得对比自听。"
         )
+    # Owner amendment 2026-11-19: assertion bar 0.70 -> mandatory disclosure.
+    lines.append(
+        "披露：以上为历史条件化提示，断言门为 0.70（约三成可能不成立），"
+        "不是确定结论；请以自听对比为准。"
+    )
     return "\n".join(lines)
 
 
@@ -869,7 +876,7 @@ def render_portrait(
             lines.append("你的历史确认还不足以形成 T2 类别。")
         else:
             lines.append(
-                "音素断言门当前关闭（无类别达到 Wilson 95% 下界 0.85），"
+                "音素断言门当前关闭（无类别达到 Wilson 95% 下界 0.70），"
                 "历史类别只以未校准候选形式呈现。"
             )
     lines.append(

@@ -7,7 +7,7 @@ Extensive measurement showed that phoneme-level error assertions are not reliabl
 ## The three tiers
 
 - **T1 — calibrated prosody.** Pause/duration metrics that are measured and calibrated; assertions allowed, with a per-user reliability disclosure. Personal pause thresholds are clamped and only lowered under a collapse guard.
-- **T2 — historically-confirmed categories.** Suggestions conditioned on the learner's own confirmed history ("your history shows…"), never asserted as ground truth. Promotion requires per-category evidence (Wilson 95% lower bound ≥ 0.85) plus the V3 gates.
+- **T2 — historically-confirmed categories.** Suggestions conditioned on the learner's own confirmed history ("your history shows…"), never asserted as ground truth. **Owner amendment 2026-11-19:** the assertion bar was lowered 0.85 → **0.70** (Wilson 95% lower bound ≥ 0.70). At this bar ~30% of assertions may be wrong, so every T2 assertion is history-conditioned AND carries a mandatory ~70% reliability disclosure ("以自听对比为准"), never presented as certain. No class passes today.
 - **T3 — uncalibrated suggestions.** Self-listen contrast against canonical audio; explicitly *not* error assertions.
 
 T2/T3 are rendered by **deterministic templates**, not model prose, with adversarial guards so T3 can never masquerade as T1/T2.

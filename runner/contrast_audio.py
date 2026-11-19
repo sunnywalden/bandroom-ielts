@@ -6,16 +6,18 @@ module wires the *option* for canonical contrast audio without changing the
 default: everything is **off by default and fail-closed**, and tests never touch
 the network.
 
-The E3 probe established that ``qwen3-tts-flash`` only works through the native
-DashScope multimodal endpoint::
+The E3 probe established that the qwen TTS family only works through the native
+DashScope multimodal endpoint. 2026-11-19: default upgraded to
+``qwen-audio-3.0-tts-plus`` (owner-directed) for canonical contrast audio::
 
     POST https://dashscope.aliyuncs.com/api/v1/services/aigc/
          multimodal-generation/generation
-    {"model": "qwen3-tts-flash",
+    {"model": "qwen-audio-3.0-tts-plus",
      "input": {"text": "...", "voice": "Cherry"}}
     -> output.audio.url
 
-The OpenAI-compatible ``/audio/speech`` endpoint returns 404 for this model.
+The OpenAI-compatible ``/audio/speech`` endpoint returns 404 for these models.
+Still off by default and fail-closed; a TTS call never yields a phoneme claim.
 
 Any error, missing key, timeout, non-200 response or missing URL yields
 ``status="unavailable"``.  The caller keeps the timestamp-only wording; no
@@ -29,7 +31,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable, Mapping, Sequence
 
-CONTRAST_TTS_MODEL = "qwen3-tts-flash"
+CONTRAST_TTS_MODEL = "qwen-audio-3.0-tts-plus"
 CONTRAST_TTS_VOICE = "Cherry"
 CONTRAST_TTS_URL = (
     "https://dashscope.aliyuncs.com/api/v1/services/aigc/"

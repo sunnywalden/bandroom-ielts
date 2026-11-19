@@ -16,3 +16,10 @@ Bandroom uses a gate model (G1–G5) to decide what may be asserted or enabled. 
 - G1-R (machine panel) implemented and run; honest verdict **FAIL** on the stale over-claiming eval set (audio weaker than Work, HJK falsified, anchor partial, underpowered) — escalated, not manufactured.
 - Remediation B+A (aligned scope): regenerated feedbacks via the shipped grounded coach and judged under a prosody-only rubric. Quality/safety markedly better (mean ≈4.4, zero red-team falsification, zero scope violations, non-inferiority CI near parity), but the gate still **FAIL/ESCALATE** on judge agreement (within-1 ≈0.67 < 0.7) over an underpowered 3-sample set — agreement is necessary, and a tiny sample cannot certify. Phoneme assertions remain OFF; personal calibration (C) is live and accumulates via real use.
 - G5 formal signing remains an independent project requiring owner-provided keys.
+
+## Research & decisions (2026-11-19)
+
+- **Assertion bar 0.85 → 0.70** (owner-directed). Implemented in the V3 gates with a mandatory ~70% reliability disclosure on T2 assertions; pause-calibration reliability (0.85) is unchanged. GOP evidence shows 0.70 is near the representation ceiling, so this does not by itself enable reliable assertions.
+- **GOP probe** (local CROTTC phone-CTC posteriors + cmudict, zero cost): deployable ASR protocol best precision 0.60 @ 14% error-coverage; gold-transcript upper bound 0.73 @ 11%; precision ≥0.85 only on 1–3 retained TPs (<1.2% coverage). Per-speaker variance large (txhc at chance). Confirms the limitation is representational, not thresholding — GOP is not a route to high-precision assertion.
+- **Contrast audio** default TTS upgraded to `qwen-audio-3.0-tts-plus` (native endpoint, still off by default, fail-closed; a TTS call never yields a phoneme claim).
+- **qwen-audio-3.0 family**: asr-flash = transcript only; realtime-plus = same-family audio LLM (not an independent judge, weak objective phoneme perception); tts-plus = synthesis for contrast. None closes the phoneme-assertion gap.
