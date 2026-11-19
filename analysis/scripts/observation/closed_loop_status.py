@@ -127,12 +127,18 @@ def t2_state() -> dict:
         "adequacy_floor": {"min_sessions": MIN_SESSIONS,
                            "min_future_candidates": MIN_FUTURE_CANDIDATES},
         "adequacy_met": bool(adequate),
-        # T2 is OFF unless adequacy met AND a CG-passed V3-P-A pooled PASS exists.
-        # This aggregator never asserts unlock; it reports the data floor only.
-        "t2": "OFF (data adequacy floor not met)" if not adequate
-              else "OFF pending CG + V3-P-A pooled PASS (not asserted here)",
-        "note": ">=20 is a refusal floor, not statistical sufficiency; "
-                "unlock additionally requires CG PASS + V3-P-A pooled PASS.",
+        # T2 was formally RETIRED (owner 2026-11-19, option A): structurally
+        # unreachable for a single low-volume user (data-volume floor + independent
+        # precision ceiling + low-prior CG). Permanent posture, not a future unlock.
+        # This aggregator never asserts unlock.
+        "retired": True,
+        "t2": "RETIRED (structurally unreachable; owner 2026-11-19) — "
+              + ("data adequacy floor not met" if not adequate
+                 else "data floor met but retirement stands (precision ceiling + low-prior CG)"),
+        "note": "T2 retired, not pending. >=20 is a refusal floor, not statistical "
+                "sufficiency; the precision ceiling (Wilson LB >=0.70 vs detector "
+                "oracle ~0.7033) is independent of data volume. V3 machinery remains "
+                "as versioned research tooling, not a product promise.",
     }
 
 

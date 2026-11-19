@@ -59,11 +59,12 @@ def main():
         os.environ["BANDROOM_T2_COUNTS"] = str(counts)
         t2 = cls.t2_state()
         check("adequacy not met (2 sessions)", t2["adequacy_met"] is False)
-        check("T2 OFF when floor not met", t2["t2"].startswith("OFF"))
+        check("T2 RETIRED when floor not met", t2["t2"].startswith("RETIRED"))
+        check("T2 retired flag set", t2["retired"] is True)
         check("floor values reported", t2["adequacy_floor"]["min_sessions"] == 4
               and t2["adequacy_floor"]["min_future_candidates"] == 20)
 
-        # 3. Even when floor met, aggregator never asserts unlock.
+        # 3. Even when floor met, T2 stays retired; aggregator never asserts unlock.
         counts2 = write(td, "counts2.json", {
             "sessions": {"recordingsWithCandidates": 5},
             "candidates": {"total": 40, "future": 25, "catchTrials": 6},
@@ -71,8 +72,8 @@ def main():
         os.environ["BANDROOM_T2_COUNTS"] = str(counts2)
         t2b = cls.t2_state()
         check("adequacy met (5 sessions/25 future)", t2b["adequacy_met"] is True)
-        check("floor met still OFF pending CG+V3-P-A (no unlock asserted)",
-              t2b["t2"].startswith("OFF pending"))
+        check("floor met still RETIRED (no unlock asserted)",
+              t2b["t2"].startswith("RETIRED"))
 
         # 4. Runner health read correctly.
         rstate = write(td, "runner.json", {
