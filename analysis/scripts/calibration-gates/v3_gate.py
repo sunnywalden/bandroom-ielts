@@ -16,7 +16,11 @@ Protocol (frozen):
                 future-session candidates of the SAME user
   metric        precision of the T2 SUBSET (classes that would be promoted),
                 NOT the whole retained pool
-  absolute      T2-subset precision >= 0.85, OR its 95% lower bound >= 0.80
+  absolute      T2-subset precision >= 0.70, OR its 95% lower bound >= 0.70
+                (OWNER-DIRECTED AMENDMENT 2026-11-19: assertion bar lowered
+                 0.85->0.70. Trade-off: ~30% of assertions may be wrong, so T2
+                 assertions MUST stay history-conditioned and carry a ~70%
+                 reliability disclosure; never presented as certain.)
   relative      gain CI lower bound > 0  (NOT a point estimate > 0)
   retention     TP retention >= 0.50
   sample        >= 20 future-session candidates per user; >= 6 users
@@ -31,12 +35,14 @@ from __future__ import annotations
 import argparse, json, math, pathlib, sys
 from collections import defaultdict
 
-# ---- FROZEN PRE-REGISTRATION (do not edit to make a result pass) ----
+# ---- PRE-REGISTRATION (owner-directed amendment 2026-11-19: bar 0.85->0.70) ----
+# Not an edit-to-pass: the owner explicitly lowered the assertion bar to 0.70.
+# Assertions at this bar require a ~70% reliability disclosure (see grounded_audio).
 FROZEN_N = 8                    # confirmations used to fit, per user
 FROZEN_PROMOTE_POSTERIOR_LB = 0.70   # Beta 10th percentile floor
 FROZEN_PRIOR_BASE_RATE = 0.65      # detector measured base rate
-T2_ABS_PRECISION = 0.85
-T2_LB_FLOOR = 0.80
+T2_ABS_PRECISION = 0.70
+T2_LB_FLOOR = 0.70
 TP_RETENTION_MIN = 0.50
 MIN_FUTURE_CANDIDATES = 20
 MIN_USERS = 6
