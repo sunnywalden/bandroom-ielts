@@ -221,7 +221,7 @@ Output:
   },
   "notes": {
     "scope": "single-owner",
-    "trustPromotion": "disabled-pending-v3",
+    "trustPromotion": "retired-structurally-unreachable",
     "countsExcludeCatchTrials": true,
     "voiceMayBeBiometric": true
   }

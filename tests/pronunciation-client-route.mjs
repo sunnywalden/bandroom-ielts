@@ -84,7 +84,7 @@ const profile=await client.readPronunciationProfile(fetchImpl);
 assert.equal(profile.classes.length,1);
 assert.equal(profile.classes[0].nShown,1);
 assert.equal(profile.catchTrials.shown,1);
-assert.equal(profile.notes.trustPromotion,'disabled-pending-v3');
+assert.equal(profile.notes.trustPromotion,'retired-structurally-unreachable');
 
 // Verdicts round-trip browser -> route -> D1 and rebuild counts from events.
 await client.recordPronunciationVerdict(realId,'confirmed',fetchImpl);

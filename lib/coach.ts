@@ -88,7 +88,7 @@ const feedbackSpec = z.strictObject({
       word:text(80,"The learner word this candidate points at."),expected:text(8,"ARPABET"),actual:text(8,"ARPABET"),
       atMs:z.number().int().min(0).max(10800000),
       detectorConfidence:z.number().min(0).max(1),
-      tier:z.enum(["T2","T3"]).describe("T2 is history-conditioned SUGGESTION, not assertion; promotion is disabled pending V3."),
+      tier:z.enum(["T2","T3"]).describe("T2 is history-conditioned SUGGESTION, not assertion; T2 promotion is RETIRED (structurally unreachable, owner 2026-11-19), so items render as T3."),
       catchTrial:z.boolean().optional().describe("Control item; stored as expected===actual and excluded from profile counts."),
     })).max(24).describe("Bounded to keep the payload and the issuance transaction small."),
   }).optional().describe("Grounded speaking evidence only. Requires stage=speak and recordingId. Omit for text reviews."),
@@ -324,8 +324,9 @@ export async function callCoach(userId:string, name:string, args:unknown) {
             detectorVersion:groundedAnalysis.detectorVersion,
             inventoryVersion:groundedAnalysis.inventoryVersion,
             speechSeconds:groundedAnalysis.speechSeconds,
-            // T2 stays a history-conditioned SUGGESTION; promotion is disabled
-            // pending the V3 gate, so every issued item is rendered as T3.
+            // T2 stays a history-conditioned SUGGESTION; promotion is RETIRED
+            // (structurally unreachable, owner 2026-11-19), so every issued item
+            // is rendered as T3. The V3 gates remain as versioned tooling only.
             items:groundedAnalysis.candidates.map((c,i)=>({
               candidateId:issued.candidateIds[i],word:c.word,expected:c.expected,actual:c.actual,
               atMs:c.atMs,detectorConfidence:c.detectorConfidence,

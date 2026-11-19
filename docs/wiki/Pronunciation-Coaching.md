@@ -2,7 +2,7 @@
 
 ## Why a honesty contract
 
-Extensive measurement showed that phoneme-level error assertions are not reliable enough to assert: detector precision ~0.65, reranker oracle upper bound ~0.70, LLM cascades no better, and fine-tuning below baseline. Rather than over-claim, Bandroom ships a **three-tier contract** and keeps phoneme assertions globally OFF until evidence gates pass.
+Extensive measurement showed that phoneme-level error assertions are not reliable enough to assert: detector precision ~0.65, reranker oracle upper bound ~0.70, LLM cascades no better, and fine-tuning below baseline. Rather than over-claim, Bandroom ships a **three-tier contract**. Phoneme assertions (T2) were **formally retired** (owner 2026-11-19): for a single low-volume user the evidence floor (≥4 sessions / ≥20 future candidates) may never accumulate, and the precision ceiling is independent of data volume — so T2 is structurally unreachable, a permanent posture rather than a future unlock. The shipped product is T1 (calibrated prosody) + T3 (self-listen suggestions); the personal-calibration machinery remains as versioned research tooling, not a product promise.
 
 ## The three tiers
 

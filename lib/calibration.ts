@@ -357,7 +357,10 @@ function applySuppressedCapStatement(db: CalibrationDb, userId: string, now: num
  * recomputed from calibration_events; catch-trial answers are excluded because
  * they are control items, not pronunciation evidence. n_shown is preserved from
  * the issuance UPSERT. SUPPRESSED uses the measured R6 rule (r > c and r >= 2).
- * TRUSTED is never derived here: promotion stays disabled until V3 (rev2 §4.2).
+ * TRUSTED is never derived here: T2 phoneme-assertion promotion is RETIRED
+ * (owner 2026-11-19, structurally unreachable: single-user data volume +
+ * precision ceiling + low-prior panel calibration). See iteration-27
+ * T2_STRUCTURAL_UNREACHABILITY.md. The V3 gates remain as versioned tooling.
  */
 function recomputeProfileStatement(
   db: CalibrationDb, userId: string, expected: string, actual: string, now: number,
@@ -406,7 +409,7 @@ export type CalibrationProfile = {
    * Control-item signal. A catch trial has expected === actual, so "confirmed"
    * is definitionally non-discriminating. A listener who confirms most controls
    * is not distinguishing errors, and their profile must not be trusted.
-   * This never changes promotion (disabled pending V3); it exposes the evidence.
+   * This never changes promotion (T2 retired); it exposes the evidence.
    */
   catchTrials: {
     shown: number;
@@ -422,7 +425,7 @@ export type CalibrationProfile = {
   };
   notes: {
     scope: "single-owner";
-    trustPromotion: "disabled-pending-v3";
+    trustPromotion: "retired-structurally-unreachable";
     countsExcludeCatchTrials: true;
     voiceMayBeBiometric: true;
   };
@@ -473,7 +476,7 @@ export async function readCalibrationProfile(
     },
     notes: {
       scope: "single-owner",
-      trustPromotion: "disabled-pending-v3",
+      trustPromotion: "retired-structurally-unreachable",
       countsExcludeCatchTrials: true,
       voiceMayBeBiometric: true,
     },
@@ -529,7 +532,7 @@ export const calibrationTools = [
   },
   {
     name: "read_pronunciation_profile",
-    description: "Read the authenticated owner's personal pronunciation calibration profile: per (expected, actual) ARPABET pair counts, n_shown, state (CANDIDATE/SUPPRESSED; TRUSTED promotion is disabled pending the V3 gate), and detector/inventory/rule versions. Catch-trial answers are excluded from counts. The user is taken from the session; no userId argument exists. Current deployment is single-owner. Voice recordings may be biometric personal data under PIPL/GDPR, so a multi-user deployment requires consent, retention and DPA design first.",
+    description: "Read the authenticated owner's personal pronunciation calibration profile: per (expected, actual) ARPABET pair counts, n_shown, state (CANDIDATE/SUPPRESSED; TRUSTED promotion is RETIRED — T2 phoneme assertions are structurally unreachable for a single low-volume user given the precision ceiling and low-prior panel calibration; owner retired 2026-11-19, not a future unlock), and detector/inventory/rule versions. Catch-trial answers are excluded from counts. The user is taken from the session; no userId argument exists. Current deployment is single-owner. Voice recordings may be biometric personal data under PIPL/GDPR, so a multi-user deployment requires consent, retention and DPA design first.",
     schema: readSpec,
     readOnly: true,
     destructive: false,
