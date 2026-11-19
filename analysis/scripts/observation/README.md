@@ -104,3 +104,23 @@ python3 -I test_observation_eval.py
 
 Loopback HTTP server only — no external network, no paid model call. The probe
 tests fail against the original (pre-fix) implementation by construction.
+
+## Closed-loop daily status aggregator (iteration-27)
+
+`closed_loop_status.py` is a read-only, fail-closed aggregator for the zero-human
+closed loop. It reads the production observation window, the prod runner state,
+the P0 T2 data-adequacy counts, the CG result (if any), and the G5-owner-attested
+check_local result, and emits one daily JSON + Markdown report. It asserts
+nothing positive on its own: missing/unreadable inputs are reported as `unknown`,
+CG absent is `deferred`, and T2 is reported `OFF` unless the frozen V3-P adequacy
+floor (>=4 sessions, >=20 future candidates) is met — and even then it never
+claims unlock (that additionally requires CG PASS + a V3-P-A pooled PASS).
+
+All input paths are env-overridable (`BANDROOM_WINDOW_JSON`, `BANDROOM_RUNNER_STATE`,
+`BANDROOM_T2_COUNTS`, `BANDROOM_CG_RESULT`, `BANDROOM_G5_CHECK`, `BANDROOM_STATUS_OUT`)
+so no personal path is hardcoded. Run:
+
+```
+python3 -I closed_loop_status.py --print
+python3 -I test_closed_loop_status.py   # 21/21
+```
