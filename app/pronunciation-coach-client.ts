@@ -56,7 +56,7 @@ export async function callPronunciationTool<T>(
 ): Promise<T> {
   let response: Response;
   try {
-    response = await fetchImpl('/api/mcp', {
+    response = await fetchImpl('/mcp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: ++requestId, method: 'tools/call', params: { name, arguments: args } }),

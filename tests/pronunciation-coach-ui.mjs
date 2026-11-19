@@ -77,7 +77,7 @@ afterEach(async()=>{if(root){await act(async()=>root.unmount());root=null;}docum
 beforeEach(()=>{
  calls=[];recordMode='ok';resetMode='ok';profileReply=profileFixture();
  globalThis.fetch=async(url,init={})=>{
-  assert.equal(url,'/api/mcp');
+  assert.equal(url,'/mcp');
   const body=JSON.parse(init.body);
   const name=body.params.name;
   calls.push({name,arguments:body.params.arguments,body});
