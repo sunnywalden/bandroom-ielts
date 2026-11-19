@@ -93,7 +93,7 @@ def regenerate_grounded(sample: dict, audio_dir: Path, model, day: int) -> dict:
 
 
 def run_audio_judge_aligned(samples: list, audio_dir: Path, evidence: list) -> dict:
-    out_scores, criticals, verify = {}, {}, {}
+    out_scores, out_dims, criticals, verify = {}, {}, {}, {}
     for s in samples:
         if s["stage"] != "speak" or not s.get("audio_file"):
             continue
@@ -114,10 +114,12 @@ def run_audio_judge_aligned(samples: list, audio_dir: Path, evidence: list) -> d
         vals = [v for v in sc.values() if isinstance(v, (int, float))]
         if vals:
             out_scores[s["id"]] = vals
+        # Per-dim single-judge scores (distinct dims, NOT repeated judges).
+        out_dims[s["id"]] = {k: v for k, v in sc.items() if isinstance(v, (int, float))}
         if isinstance(out, dict) and out.get("critical_error"):
             criticals[s["id"]] = [ag1.J_AUDIO]
         verify[s["id"]] = out.get("scope_violations", []) if isinstance(out, dict) else []
-    return {"scores": out_scores, "criticals": criticals, "verify": verify}
+    return {"scores": out_scores, "dims": out_dims, "criticals": criticals, "verify": verify}
 
 
 # ------------------------------------------------------------- pure helpers

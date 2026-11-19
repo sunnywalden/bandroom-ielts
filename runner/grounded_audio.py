@@ -263,6 +263,9 @@ class GroundedConfig:
     contrast_audio_enabled: bool = False
     contrast_audio_timeout_seconds: float = 60.0
     pause_calibration_default_multiplier: float = DEFAULT_MULTIPLIER
+    # Pause measurement mode. "waveform_only" (per-user calibrated) or "vad"
+    # (Silero, degradation-robust; fixed validated thresholds, disclosed).
+    pause_mode: str = "waveform_only"
     detector_cache_dir: Path = field(
         default_factory=lambda: _home_path("~/.bandroom-runner/acoustic-cache")
     )
@@ -305,6 +308,7 @@ class GroundedConfig:
             "contrast_audio_enabled",
             "contrast_audio_timeout_seconds",
             "pause_calibration_default_multiplier",
+            "pause_mode",
             "detector_cache_dir",
             "ffmpeg",
         }
@@ -343,6 +347,11 @@ class GroundedConfig:
             values["pause_calibration_default_multiplier"] = float(
                 raw["pause_calibration_default_multiplier"]
             )
+        if "pause_mode" in raw:
+            mode = str(raw["pause_mode"])
+            if mode not in {"waveform_only", "vad"}:
+                raise ValueError(f"invalid [grounded] pause_mode: {mode!r}")
+            values["pause_mode"] = mode
         if "ffmpeg" in raw and raw["ffmpeg"] is not None:
             values["ffmpeg"] = str(raw["ffmpeg"])
         return cls(**values)
@@ -421,6 +430,7 @@ def analyze_calibrated(
     wav_path: str | Path,
     *,
     pause_low_noise_multiplier: float = DEFAULT_MULTIPLIER,
+    pause_mode: str = "waveform_only",
 ) -> dict[str, Any]:
     """Run the vendored prosody module and surface only calibrated metrics.
 
@@ -436,7 +446,7 @@ def analyze_calibrated(
             transcript=None,
             word_source="none",
             transcript_source="none",
-            pause_mode="waveform_only",
+            pause_mode=pause_mode,
             include_contour=False,
             pause_low_noise_multiplier=float(pause_low_noise_multiplier),
         )
@@ -1906,14 +1916,28 @@ def _analyzer_takes_multiplier(analyzer: Callable[..., Any]) -> bool:
     )
 
 
+def _analyzer_accepts(analyzer: Callable[..., Any], name: str) -> bool:
+    try:
+        signature = inspect.signature(analyzer)
+    except (TypeError, ValueError):
+        return False
+    return name in signature.parameters or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()
+    )
+
+
 def _run_analyzer(
     analyzer: Callable[..., dict[str, Any]],
     decoded: str | Path,
     multiplier: float,
+    pause_mode: str = "waveform_only",
 ) -> dict[str, Any]:
-    if _analyzer_takes_multiplier(analyzer):
-        return analyzer(decoded, pause_low_noise_multiplier=multiplier)
-    return analyzer(decoded)
+    kwargs: dict[str, Any] = {}
+    if _analyzer_accepts(analyzer, "pause_low_noise_multiplier"):
+        kwargs["pause_low_noise_multiplier"] = multiplier
+    if _analyzer_accepts(analyzer, "pause_mode"):
+        kwargs["pause_mode"] = pause_mode
+    return analyzer(decoded, **kwargs) if kwargs else analyzer(decoded)
 
 
 def _call_grounded(
@@ -2017,7 +2041,10 @@ def review_speaking_grounded(
         attempt, config, grounded, pause_calibration
     )
     multiplier = calibration.multiplier
-    analysis = _run_analyzer(prosody_analyzer, decoded, multiplier)
+    analysis = _run_analyzer(
+        prosody_analyzer, decoded, multiplier,
+        pause_mode=getattr(grounded, "pause_mode", "waveform_only"),
+    )
     duration = float(
         (analysis.get("calibrated") or {}).get("total_duration_seconds")
         or decoded_duration
