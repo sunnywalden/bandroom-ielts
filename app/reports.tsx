@@ -1,6 +1,6 @@
 "use client";
 import { useRef, useState, type FormEvent } from "react";
-import { dayStamp, labels, oldResults, type Ledger, type Stage } from "./ledger";
+import { dayStamp, labels, oldResults, sampleEpoch, sampleHistory, type Ledger, type Stage } from "./ledger";
 import { getExercises } from "./curriculum";
 import { periods } from "./period";
 import "./reports.css";
@@ -18,7 +18,7 @@ type Stored={created:string;updated:string;week:Digest;cycle?:Digest};
 export type ReportState=Ledger&{reports?:Record<string,unknown>;fullTests?:Test[]};
 type State=ReportState;
 type Props={account:string;s:State;pending:boolean;feedback:Feedback[];persist:(make:(prev:State)=>State)=>Promise<boolean>};
-const historyDates:Record<number,string>={8:"2026-10-29",9:"2026-10-30",10:"2026-11-02",11:"2026-11-02"};
+const historyDates:Record<number,string>=sampleHistory;
 const kinds:Record<string,Skill>={listen:"Listening",read:"Reading",write:"Writing",speak:"Speaking"};
 const toDate=(s:string)=>s.length===10?s:Number.isFinite(Date.parse(s))?dayStamp(new Date(s)):"";
 const inRange=(d:string,from:string,to:string)=>Boolean(d)&&d>=from&&d<=to;
@@ -35,7 +35,7 @@ function makeDigest(s:State,comments:Feedback[],from:string,to:string):Digest {
     const rows=oldResults[day]||[];
     for(const [label,result] of rows){
       const kind=label.includes("听力")?"Listening":label.includes("阅读")?"Reading":label.includes("写作")?"Writing":label.includes("词汇")?"词汇":"综合";
-      lines.push({date,day,kind,text:label+" "+result+" · 原课记录"});
+      lines.push({date,day,kind,text:label+" "+result+" · 示例记录"});
       if(kind==="Writing") writingPresent=true;
       const [score,total]=result.split("/").map(Number);
       if(kind==="Listening"&&score<total)listenMiss=true;
@@ -92,7 +92,7 @@ function TestForm({s,persist,pending,account}:{account:string;s:State;persist:Pr
   const cachedAudio=useRef<{file:File;id:string}|null>(null);
   const exact=skill==="Listening"||skill==="Reading", specific=skill==="Reading"||skill==="Writing";
   const needsType=specific&&s.exam==="未选择";
-  const okay=proof&&source.trim()&&rater.trim()&&date>="2026-10-29"&&date<=dayStamp()&&!needsType&&(!exact||raw!==""&&Number.isInteger(Number(raw))&&+raw>=0&&+raw<=40)&&(exact||band!=="")&&(band===""||+band>=0&&+band<=9&&Number.isInteger(+band*2))&&(skill!=="Speaking"||file);
+  const okay=proof&&source.trim()&&rater.trim()&&date>=sampleEpoch&&date<=dayStamp()&&!needsType&&(!exact||raw!==""&&Number.isInteger(Number(raw))&&+raw>=0&&+raw<=40)&&(exact||band!=="")&&(band===""||+band>=0&&+band<=9&&Number.isInteger(+band*2))&&(skill!=="Speaking"||file);
   async function submit(ev:FormEvent){
     ev.preventDefault();if(!okay||busy||pending)return;setBusy(true);setInfo("");
     try{
@@ -117,7 +117,7 @@ function TestForm({s,persist,pending,account}:{account:string;s:State;persist:Pr
   }
   return <details className="card pad rp-form"><summary><span>完整独立测评</span><small>录入已有结果 · {(s.fullTests||[]).length} 次</small></summary>
     <form onSubmit={submit}><p className="muted">只登记实际做完的整科测评。分数按你提供的成绩单、答案换算表或评阅意见记录。</p>
-      <div className="rp-fields"><label>科目<select value={skill} onChange={e=>{setSkill(e.target.value as Skill);setRaw("");setBand("");setProof(false);setFile(null);setInfo("");}}>{skills.map(k=><option key={k}>{k}</option>)}</select></label><label>实际测评日期<input type="date" value={date} min="2026-10-29" max={dayStamp()} onChange={e=>setDate(e.target.value)} required/></label></div>
+      <div className="rp-fields"><label>科目<select value={skill} onChange={e=>{setSkill(e.target.value as Skill);setRaw("");setBand("");setProof(false);setFile(null);setInfo("");}}>{skills.map(k=><option key={k}>{k}</option>)}</select></label><label>实际测评日期<input type="date" value={date} min={sampleEpoch} max={dayStamp()} onChange={e=>setDate(e.target.value)} required/></label></div>
       {specific&&<p className="rp-aside">{needsType?"请先到训练设置选择 Academic 或 General Training，再登记这一科。":"考试类型 · "+s.exam}</p>}
       <label>材料或试卷名称<input value={source} maxLength={160} onChange={e=>setSource(e.target.value)} placeholder="例如 Cambridge IELTS · 书号与 Test 编号" required/></label>
       <div className="rp-fields">{exact&&<label>正确题数 / 40<input type="number" min="0" max="40" step="1" value={raw} onChange={e=>setRaw(e.target.value)} required/></label>}

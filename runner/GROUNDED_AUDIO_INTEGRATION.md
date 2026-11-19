@@ -256,7 +256,7 @@ environment variables keep their existing convention.
    - ensure `ffmpeg` is on the launchd PATH or set `[grounded] ffmpeg`.
 5. **Pre-flight in the checkout** (production interpreter):
    ```bash
-   cd /Users/henry/Documents/Codex/2026-11-08/referenced-chatgpt-conversation-this-is-an/work/bandroom/.sites-checkout
+   cd <repo-root>  # the bandroom-ielts checkout
    /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -m pytest runner/tests -q
    ```
    Expected: `104 passed`.

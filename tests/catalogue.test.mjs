@@ -8,7 +8,7 @@ import { targets, overallTarget } from '../app/goals.ts';
 test('targets and historical results use separate data', () => {
   assert.deepEqual(targets,{Listening:8.5,Reading:9,Writing:8.5,Speaking:7.5});
   assert.equal(Math.round(Object.values(targets).reduce((n,v)=>n+v,0)/2)/2,overallTarget);
-  assert.deepEqual(oldResults[10].slice(-2).map(r=>r[1]),['5/10','6.5/10']);
+  assert.deepEqual(oldResults[10].slice(-2).map(r=>r[1]),['4/10','5.5/10']);
   assert.notEqual(writings[11][0],writings[11][1]);
 });
 test('every prepared exercise and both budget profiles', () => {

@@ -61,12 +61,16 @@ HOME = pathlib.Path.home()
 # mirrored here whenever it changes. The mirror is preferred; the canonical path
 # is the fallback for in-session runs.
 WINDOW_MIRROR = HOME / ".bandroom-acoustic" / "OBSERVATION_WINDOW.json"
-WINDOW_CANONICAL = (HOME / "Documents/Codex/2026-11-08/referenced-chatgpt-conversation-this-is-an"
-                    / "work/bandroom/acceptance-2026-11-10/iteration-25/OBSERVATION_WINDOW.json")
+# Canonical window path is deployment-specific; supply it via the environment
+# rather than hard-coding any operator's local checkout. Falls back to the mirror.
+WINDOW_CANONICAL = (pathlib.Path(os.environ["BANDROOM_WINDOW_CANONICAL"])
+                    if os.environ.get("BANDROOM_WINDOW_CANONICAL") else WINDOW_MIRROR)
 WINDOW = WINDOW_MIRROR if WINDOW_MIRROR.exists() else WINDOW_CANONICAL
 VERDICT = HOME / ".bandroom-acoustic" / "OBSERVATION_WINDOW_VERDICT.json"
 RUNNER = HOME / ".bandroom-runner-prod"
-SITE = "https://bandroom.sunnywalden0209.workers.dev"
+# The target site is deployment-specific and must be provided via the environment
+# (e.g. from a private credentials file). No personal production URL is committed.
+SITE = os.environ.get("BANDROOM_SITE_URL", "")
 # Use the staged runner copy, not the checkout: launchd cannot read ~/Documents.
 REPO = RUNNER
 
@@ -253,6 +257,10 @@ def main(argv: list[str] | None = None) -> int:
         remaining = (parse(end) - now()).total_seconds() / 3600.0
         print(f"window still running; {remaining:.2f}h remaining — no verdict written")
         return 0
+
+    if not SITE:
+        print("BANDROOM_SITE_URL is not set; refusing to evaluate (fail-closed)")
+        return 2
 
     version_record: list = []
     c4_record: list = []
