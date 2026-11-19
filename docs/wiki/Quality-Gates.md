@@ -13,5 +13,6 @@ Bandroom uses a gate model (G1–G5) to decide what may be asserted or enabled. 
 - Phoneme assertions (T2) globally OFF pending per-category evidence (V3 gates).
 - T1 grounded prosody + T3 self-listen shipped and verified end-to-end.
 - Observation windows: first full 24h window PASSED (7/7) after instrument fixes; subsequent windows open per production change.
-- G1-R (machine panel) implemented and run; current honest verdict **FAIL** (audio coach weaker than the Work baseline, HJK anchor falsified, anchor coverage partial, underpowered) — escalated, not manufactured into a pass. A human-annotated blind claim still requires humans and is out of scope.
+- G1-R (machine panel) implemented and run; honest verdict **FAIL** on the stale over-claiming eval set (audio weaker than Work, HJK falsified, anchor partial, underpowered) — escalated, not manufactured.
+- Remediation B+A (aligned scope): regenerated feedbacks via the shipped grounded coach and judged under a prosody-only rubric. Quality/safety markedly better (mean ≈4.4, zero red-team falsification, zero scope violations, non-inferiority CI near parity), but the gate still **FAIL/ESCALATE** on judge agreement (within-1 ≈0.67 < 0.7) over an underpowered 3-sample set — agreement is necessary, and a tiny sample cannot certify. Phoneme assertions remain OFF; personal calibration (C) is live and accumulates via real use.
 - G5 formal signing remains an independent project requiring owner-provided keys.

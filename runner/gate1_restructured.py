@@ -20,10 +20,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import random
 import re
 import statistics
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +39,85 @@ UNDERPOWERED_N = 8         # n<8 -> underpowered, PASS only [indicative]
 BOOT_B = 2000
 MODEL_IDS = {"text": ag1.J_TEXT, "audio": ag1.J_AUDIO,
              "arbiter": ag1.ARBITER, "redteam": ag1.REDTEAM}
+
+# ---- B/A aligned scope (remediation): evaluate the ACTUAL shipped grounded
+# coach (calibrated prosody + self-listen), not the stale over-claiming path.
+ALIGNED_AUDIO_RUBRIC = """You are an independent judge of a GROUNDED prosody coach. The coach's claim scope is
+calibrated pause/timing coaching + hedged self-listen suggestions ONLY. It must NOT assert phoneme/stress
+errors, IPA, phone pairs, pitch/F0/WPM/filler measurements, or any band/score.
+Listen to the whole clip. Verify each prosody/timing claim against what you hear.
+Score 1-5: prosody_validity (are pause/rhythm observations accurate), localization (timestamps match audio),
+actionability (one concrete practicable drill), restraint (no over-claiming / no false corrections).
+Set critical_error=true ONLY for: a prosody claim contradicting the audio, OR any out-of-scope assertion
+(phoneme/stress error, IPA, phone pair, pitch/WPM/filler as measurement, band/score).
+Return EXACTLY one JSON object: {"scores":{"prosody_validity":N,"localization":N,"actionability":N,"restraint":N},
+"heard_prosody":[{"approx_ms":N,"obs":"..."}],"scope_violations":["..."],"critical_error":bool,"rationale":"<=200 chars"}"""
+
+_STRESS_ASSERT = re.compile(r"重音(?:错误|读错|放错)|失去重音|loses? (?:its )?(?:first[- ]syllable )?stress|stress(?:es)? (?:is )?wrong", re.I)
+
+
+def aligned_scope_violations(feedback: str) -> list:
+    """Out-of-scope assertions for the aligned (prosody-only) claim."""
+    from runner import grounded_audio as ga
+    v = []
+    v += ga._assertive_phoneme_violations(feedback)
+    if ga._IPA_SLASH.search(feedback):
+        v.append("ipa_notation")
+    if _STRESS_ASSERT.search(feedback):
+        v.append("stress_assertion")
+    if ga._OVERALL_BAND_CLAIM.search(feedback):
+        v.append("overall_band_claim")
+    if ga._PRONUNCIATION_SCORE.search(feedback):
+        v.append("pronunciation_score_claim")
+    v += ga._uncalibrated_violations(feedback)
+    return v
+
+
+def regenerate_grounded(sample: dict, audio_dir: Path, model, day: int) -> dict:
+    """A: produce a fresh aligned feedback via the shipped grounded pipeline."""
+    from runner.grounded_audio import GroundedConfig, review_speaking_grounded
+    import tempfile
+
+    class _Cfg:
+        grounded = GroundedConfig(self_listen_enabled=False)
+        max_duration_seconds = 0
+        grounded_text_timeout = 240.0
+        state_dir = None
+
+    raw = (audio_dir / sample["audio_file"]).read_bytes()
+    attempt = {"id": sample["id"], "recordingId": sample["audio_file"],
+               "response": sample.get("response_text", ""), "day": day, "stage": "speak"}
+    with tempfile.TemporaryDirectory() as wd:
+        fb = review_speaking_grounded(raw, attempt, day, config=_Cfg(), model=model, workdir=wd)
+    return {"feedback": fb.feedback, "evidence": fb.evidence, "pronunciation": None}
+
+
+def run_audio_judge_aligned(samples: list, audio_dir: Path, evidence: list) -> dict:
+    out_scores, criticals, verify = {}, {}, {}
+    for s in samples:
+        if s["stage"] != "speak" or not s.get("audio_file"):
+            continue
+        prepared = ag1.prepare_audio((audio_dir / s["audio_file"]).read_bytes(), workdir=Path(tempfile.mkdtemp()))
+        prompt = (f"{ALIGNED_AUDIO_RUBRIC}\n\nCoach feedback:\n{s['feedback']}\n\n"
+                  f"Evidence:\n{s.get('evidence','')}")
+        messages = [{"role": "user", "content": [
+            {"type": "input_audio", "input_audio": {"data": prepared.data_uri, "format": prepared.format}},
+            {"type": "text", "text": prompt}]}]
+        out = ag1.call_model(ag1.J_AUDIO, messages, timeout=300)
+        evidence.append({"layer": "L1-audio-aligned", "judge": ag1.J_AUDIO, "sample": s["id"],
+                         "prompt": prompt, "output": out})
+        if isinstance(out, list):
+            out = next((x for x in out if isinstance(x, dict)), {})
+        sc = out.get("scores", {}) if isinstance(out, dict) else {}
+        if isinstance(sc, list):
+            sc = next((x for x in sc if isinstance(x, dict)), {})
+        vals = [v for v in sc.values() if isinstance(v, (int, float))]
+        if vals:
+            out_scores[s["id"]] = vals
+        if isinstance(out, dict) and out.get("critical_error"):
+            criticals[s["id"]] = [ag1.J_AUDIO]
+        verify[s["id"]] = out.get("scope_violations", []) if isinstance(out, dict) else []
+    return {"scores": out_scores, "criticals": criticals, "verify": verify}
 
 
 # ------------------------------------------------------------- pure helpers
@@ -183,6 +264,8 @@ def main() -> int:
     ap.add_argument("--evidence-dir", required=True)
     ap.add_argument("--truth", required=True)
     ap.add_argument("--owner-anchor", default=None)
+    ap.add_argument("--aligned", action="store_true",
+                    help="B/A: regenerate speak feedbacks via the shipped grounded pipeline and judge under the aligned prosody-only rubric")
     args = ap.parse_args()
     ev, out = Path(args.eval_dir), Path(args.evidence_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -227,11 +310,38 @@ def main() -> int:
                     "audio_file": "sample-3-hjk.webm", "source": "qwen"})
     samples, dropped_dup = dedup_samples(samples, hashes)
 
-    # ---- L0 (+ quote policy + timed anchor)
+    # ---- B/A aligned: regenerate speak feedbacks via the shipped grounded coach
+    regenerated = []
+    if args.aligned:
+        from runner.models.qwen import QwenAdapter
+        model = QwenAdapter(api_key=os.environ["DASHSCOPE_API_KEY"])
+        for s in samples:
+            if s["stage"] == "speak" and s.get("audio_file"):
+                day = 0 if s["id"] == "hjk" else 12
+                fresh = regenerate_grounded(s, ev / "audio", model, day)
+                s.update(fresh)
+                regenerated.append(s["id"])
+
+    # ---- L0 (+ quote policy + timed anchor + aligned scope)
     l0 = apply_quote_policy(ag1.l0_checks(samples, truth))
+    if args.aligned:
+        for r, s in zip(l0, samples):
+            # The HJK word-timestamp anchor targets the old pronunciation path;
+            # a prosody-only coach makes no word-timestamp claims, so it is
+            # out of scope here (the calibrated prosody evidence is the anchor).
+            r["issues"] = [i for i in r["issues"] if i != "no_truth_anchor_hit"]
+            r["pass"] = not r["issues"]
+            if s["stage"] == "speak":
+                sv = aligned_scope_violations(s["feedback"])
+                if sv:
+                    r["issues"].append("aligned_scope_violation:" + ",".join(sv))
+                    r["pass"] = False
+    # In aligned mode the objective anchor is the calibrated prosody evidence
+    # (DSP), not the HJK word-timestamp anchor (which targets the old
+    # pronunciation-observation path and is out of scope for prosody-only).
     anchor_full = True
     for r, s in zip(l0, samples):
-        if not anchor_timed_ok(s, truth):
+        if not args.aligned and not anchor_timed_ok(s, truth):
             r["issues"].append("anchor_untimed_or_missing")
             r["pass"] = False
             anchor_full = False
@@ -239,7 +349,8 @@ def main() -> int:
 
     # ---- L1 panel + reliability + critical majority
     l1_text = ag1.run_text_judges(samples, evidence, "L1")
-    l1_audio = ag1.run_audio_judge(samples, ev / "audio", evidence)
+    l1_audio = (run_audio_judge_aligned(samples, ev / "audio", evidence) if args.aligned
+                else ag1.run_audio_judge(samples, ev / "audio", evidence))
     for sid, vals in l1_audio["scores"].items():
         l1_text["scores"].setdefault(sid, {})["pronunciation"] = vals
     agree = within1_agreement(l1_text["scores"])
@@ -323,6 +434,7 @@ def main() -> int:
                             l1_pass=l1_pass, l3_pass=l3_pass, escalate=escalate, underpowered=underpowered)
 
     report = {"protocol": "G1-R", "seed": SEED, "evaluatedAt": datetime.now(timezone.utc).isoformat(),
+              "aligned": bool(args.aligned), "regenerated_grounded": regenerated,
               "verdict": verdict, "gate1_label": label,
               "claim_scope": "cross-family machine blind panel + objective anchors; NOT a human-annotated blind gate; owner is final escalation only; audio layer not cross-family",
               "human_annotators": 0, "owner_anchor": owner_anchor,
