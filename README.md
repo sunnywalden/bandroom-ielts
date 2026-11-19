@@ -33,7 +33,7 @@ Local coaching runner (Python) ── DashScope (Qwen text + omni audio)
 - A local runner claims review jobs, calls the model, and writes feedback back through MCP; it never holds a lease across model calls.
 - Authentication is via Cloudflare Access; the adapter maps JWT/service identities to a stable `userId` and scope.
 
-See the [Wiki](../../wiki) for architecture, data model, MCP tools, calibration design, deployment, and testing.
+See the [Wiki](https://github.com/sunnywalden/bandroom-ielts/wiki) (versioned source mirror in [`docs/wiki/`](docs/wiki/Home.md)) for architecture, data model, MCP tools, calibration design, deployment, and testing.
 
 ## Quick start
 
