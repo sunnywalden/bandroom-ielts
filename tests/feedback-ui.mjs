@@ -58,7 +58,7 @@ beforeEach(()=>{
  state={version:1,day:12,stage:'write',finished:false,completed:Array.from({length:11},(_,i)=>i+1),checked:{11:'2026-11-09'},started:{11:'2026-11-02',12:'2026-11-09'},exam:'未选择',practice:{},entries:{11:{speakingReview:'Preserved older feedback'},12:{writeOriginal:'Independent original answer.',writeCondition:'独立 · 未计时'}}};
  globalThis.fetch=async(url,init={})=>{
   calls.push([url,init]);
-  if(url==='/api/mcp'){
+  if(url==='/mcp'){
    const body=JSON.parse(init.body);mcpCalls.push(body);
    return response(200,{jsonrpc:'2.0',id:body.id,result:{content:[{type:'text',text:JSON.stringify({saved:true})}]}});
   }
