@@ -34,6 +34,9 @@
 .sp-wave.sp-live i{animation:sp-pulse .85s ease-in-out infinite alternate}
 @keyframes sp-pulse{from{transform:scaleY(.38)}to{transform:scaleY(1)}}
 @media(prefers-reduced-motion:reduce){.sp-wave.sp-live i{animation:none}}
+.sp-level{margin-left:auto;display:block;width:96px;height:10px;border-radius:6px;background:#274435;overflow:hidden;align-self:center}
+.sp-level i{display:block;height:100%;background:#9cbd8d;border-radius:6px;transition:width .1s linear}
+.sp-level i.sp-level-low{background:#c9a15a}
 .sp-recorder .sp-play a,.sp-recorder .sp-message{color:#e6f3d4}
 .sp-play{display:grid;justify-items:start;gap:5px;margin-top:10px}
 .sp-play audio{width:min(100%,420px);max-width:100%;height:36px}

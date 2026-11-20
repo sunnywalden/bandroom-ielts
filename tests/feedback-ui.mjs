@@ -345,6 +345,44 @@ test('hidden pronunciation hints do not mount a recording player',async()=>{
  assert.equal(puts().length,0);
 });
 
+test('score-first scorecard renders bands, honest statuses, transcript and drills',async()=>{
+ const audioId='44444444-4444-4444-8444-444444444444';
+ state.stage='speak';
+ state.entries[12]={speakingPhase:'review',speakingComplete:'yes',
+  speakingPart2:JSON.stringify([{at:'2026-11-09T01:00:00Z',text:'Fixture Part 2',spoken:true,audio:audioId}]),
+  speakingFollowup:JSON.stringify([{at:'2026-11-09T01:02:00Z',text:'Fixture follow-up',spoken:true}])};
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='speakingPart2');
+ assert.ok(source);
+ const words=[{word:"I've",start:2.8,end:4.2,probability:.62},{word:'seen',start:4.2,end:4.5,probability:.99},{word:'a',start:4.5,end:6.1,probability:.96},{word:'short',start:6.1,end:7.1,probability:.88},{word:'video',start:7.1,end:7.8,probability:.99}];
+ const scorecard={schema:'bandroom-speaking-scorecard-v1',
+  overall:{band:6.0,status:'reference',disclosure_zh:'参考估计：非官方雅思评分。',basis_zh:'四科参考估计均值'},
+  criteria:[
+   {key:'fluency_coherence',label_zh:'流利度与连贯性',band:6.5,status:'reference',disclosure_zh:'参考估计',evidence:{speech_ratio:.57,pause_count:22,pace_wpm:99,metrics_status:'calibrated'}},
+   {key:'lexical_resource',label_zh:'词汇',band:6.0,status:'reference',disclosure_zh:'参考估计',evidence:{word_count:5,issues:[]}},
+   {key:'grammar',label_zh:'语法',band:6.0,status:'reference',disclosure_zh:'参考估计',evidence:{error_count:1,issues:[{quote:"I've seen",fix:'I saw',reason_zh:'过去时',severity:'major'}]}},
+   {key:'pronunciation',label_zh:'发音',band:null,status:'suggestive',disclosure_zh:'建议性反馈，不给发音分数',evidence:{self_listen_candidates:1}}],
+  transcript:{source:'whisper-large-v3-turbo',status:'asr',words},
+  drills:[{quote:"I've seen a short video",improved:'I watched a short clip.',focus_zh:'过去时'}],
+  llm_status:'ok'};
+ feedback=[{id:'fb-scorecard',day:12,stage:'speak',attempt:source.id,evidence:'Scorecard fixture',feedback:'一、评估：整体不错。',createdAt:'2026-11-09T01:00:00Z',analysis:{schema:'bandroom-grounded-analysis-v2',speechSeconds:33.4,items:[{word:'seen',atMs:4570,tier:'T3'}],transcript:words,scorecard}}];
+ await mount();
+ const section=document.querySelector('[aria-label="口语 Part 2 · 首次回答反馈"]');
+ assert.ok(section);
+ const card=section.querySelector('.ss-card');
+ assert.ok(card);
+ assert.match(card.textContent,/参考估计/);
+ assert.match(card.textContent,/不评分/);
+ assert.match(card.textContent,/I saw/);
+ assert.match(card.textContent,/I watched a short clip\./);
+ const wordButtons=card.querySelectorAll('.ss-word');
+ assert.equal(wordButtons.length,5);
+ assert.ok(card.querySelector('.ss-w-suggested'));
+ assert.ok(card.querySelector('audio'));
+ await act(async()=>{wordButtons[1].click();});
+ assert.ok(card.querySelector('.ss-w-active'));
+ assert.equal(puts().length,0);
+});
+
 test('additions are hidden by the precision-first display',async()=>{
  const audioId='33333333-3333-4333-8333-333333333333';
  state.stage='speak';

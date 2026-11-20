@@ -99,6 +99,19 @@ function PrepTimer() {
 }
 
 type MicMode="idle"|"waiting"|"recording"|"stopping";
+// Real microphone level meter (speaking redesign): the decorative wave gave no
+// signal about whether the mic actually captures speech. RMS from an
+// AnalyserNode drives the bar; a near-silent take is flagged at stop so the
+// learner re-records BEFORE submitting (the 2026-11-19 outage showed silent
+// submissions waste a full review cycle).
+function LiveLevel({level,live}:{level:number;live:boolean}) {
+  if(!live)return <Wave/>;
+  const pct=Math.min(100,Math.round(level*100));
+  return <span className="sp-level" role="meter" aria-label="麦克风电平" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+    <i style={{width:`${pct}%`}} className={pct<4?"sp-level-low":""}/>
+  </span>;
+}
+
 function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive,heading}:{
   limit:number;clip:Blob|null;disabled:boolean;stopRequestRef:{current:(()=>void)|null};onClip:(blob:Blob)=>void;onActive:(mode:MicMode)=>void;heading?:string;
 }) {
@@ -106,6 +119,44 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive,heading}:{
   const [duration,setDuration] = useState(0);
   const [notice,setNotice] = useState("");
   const [url,setUrl] = useState("");
+  const [level,setLevel] = useState(0);
+  const meterCtx=useRef<AudioContext|null>(null);
+  const meterRaf=useRef(0);
+  const speechSeen=useRef(false);
+  const stopMeter=()=>{
+    if(typeof cancelAnimationFrame==="function")cancelAnimationFrame(meterRaf.current);
+    void meterCtx.current?.close().catch(()=>{});
+    meterCtx.current=null;
+    setLevel(0);
+  };
+  const startMeter=(stream:MediaStream)=>{
+    speechSeen.current=false;
+    try{
+      const Ctor=window.AudioContext??(window as unknown as {webkitAudioContext?:typeof AudioContext}).webkitAudioContext;
+      if(!Ctor)return;
+      const ctx=new Ctor();
+      const source=ctx.createMediaStreamSource(stream);
+      const analyser=ctx.createAnalyser();
+      analyser.fftSize=1024;
+      source.connect(analyser);
+      meterCtx.current=ctx;
+      const data=new Float32Array(analyser.fftSize);
+      let last=0;
+      const loop=(t:number)=>{
+        if(!meterCtx.current)return;
+        meterRaf.current=requestAnimationFrame(loop);
+        if(t-last<100)return;
+        last=t;
+        analyser.getFloatTimeDomainData(data);
+        let sum=0;
+        for(let i=0;i<data.length;i++)sum+=data[i]*data[i];
+        const rms=Math.sqrt(sum/data.length);
+        if(rms>0.02)speechSeen.current=true;
+        setLevel(Math.min(1,rms*6));
+      };
+      meterRaf.current=requestAnimationFrame(loop);
+    }catch{/* meter is best-effort; recording must never depend on it */}
+  };
   const recorder = useRef<MediaRecorder | null>(null);
   const activeStream = useRef<MediaStream | null>(null);
   const mounted = useRef(true);
@@ -121,6 +172,9 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive,heading}:{
       mounted.current = false;
       clearTimeout(stopTimer.current);
       stopRequestRef.current=null;
+      if(typeof cancelAnimationFrame==="function")cancelAnimationFrame(meterRaf.current);
+      void meterCtx.current?.close().catch(()=>{});
+      meterCtx.current=null;
       if (recorder.current?.state === "recording") recorder.current.stop();
       activeStream.current?.getTracks().forEach(t => t.stop());
     };
@@ -174,6 +228,7 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive,heading}:{
         stream.getTracks().forEach(t => t.stop());setMode("idle");onActive("idle");return;
       }
       activeStream.current = stream;
+      startMeter(stream);
       const preferred = ["audio/webm;codecs=opus","audio/mp4","audio/ogg;codecs=opus"].find(type => MediaRecorder.isTypeSupported(type));
       const rec = new MediaRecorder(stream, preferred ? {mimeType:preferred,audioBitsPerSecond:64000} : {audioBitsPerSecond:64000});
       recorder.current = rec;
@@ -183,7 +238,11 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive,heading}:{
       const finish = (incomplete=false) => {
         if(finalized||recorder.current!==rec)return;finalized=true;clearTimeout(stopTimer.current);
         stopRequestRef.current=null;
+        stopMeter();
         stream?.getTracks().forEach(t => t.stop());
+        if(!speechSeen.current&&parts.length&&mounted.current){
+          setNotice("电平表显示本次录音全程接近静音：可能麦克风未拾音。建议重录后再提交，否则批改无法分析流利度。");
+        }
         // The timeout/error path cancels stop-and-submit before exposing any
         // partial bytes. They remain available for inspection and download.
         if(incomplete&&mounted.current){onActive("idle");setNotice("录音整理超时或中断。已收到的音频可试听和下载；确认完整后再提交。");}
@@ -220,7 +279,7 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive,heading}:{
       onClick={() => mode === "recording" ? stopRequestRef.current?.() : void record()}>
       {mode === "recording" ? <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg> : <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6"><rect x="8.5" y="2.5" width="7" height="13" rx="3.5"/><path d="M5.5 11v1.5a6.5 6.5 0 0 0 13 0V11M12 19v3m-3 0h6"/></svg>}
     </button><div><strong>{mode==="stopping"?"正在整理录音":mode==="recording"?"正在录音":mode==="waiting"?"正在请求麦克风":clip?"重新录制本次草稿":(heading??"录下你的回答")}</strong><small>{mode==="recording" ? `${clock(duration)} / ${clock(limit)} · 点击停止` : `最多 ${clock(limit)} · 手动开始`}</small></div>
-    <Wave live={mode==="recording"}/></div>
+    <LiveLevel level={level} live={mode==="recording"}/></div>
     {url && <div className="sp-play"><audio controls src={url} aria-label="试听本次录音"/><a href={url} download={clip?.type.includes("mp4")?"speaking.m4a":clip?.type.includes("ogg")?"speaking.ogg":clip?.type.includes("wav")?"speaking.wav":"speaking.webm"}>下载本次录音</a></div>}
     {notice && <p role="status" className="sp-message">{notice}</p>}
   </div>;

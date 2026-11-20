@@ -4,6 +4,7 @@ import {feedbackFor,reviewAttempts,reviewRequest,type AutomationStatus,type Coac
 import {displayPronunciationErrors} from './pronunciation-display';
 import RecordingClipPlayer from './recording-clip-player';
 import {PronunciationCoach,TieredFeedbackProse} from './pronunciation-coach';
+import SpeakingScorecard from './speaking-scorecard';
 import './feedback.css';
 
 type Context = {attempts:ReviewAttempt[];feedback:CoachFeedback[];tasks:ReviewTaskStatus[];automation?:AutomationStatus;error:boolean;refresh:()=>void;ready:boolean;identificationFailed:boolean;retry:()=>void};
@@ -121,6 +122,7 @@ export default function AttemptFeedback({field,index=0}:{field:string;index?:num
     {!rows.length&&!task&&linked&&<p className="af-hint" role="status">已保存，正在核对批改队列…</p>}
     {!rows.length&&task&&<TaskState task={task} automation={automation} refresh={refresh}/>}
     <div aria-live="polite" aria-relevant="additions text">{rows.map(row=><article className="af-review" key={row.id}>
+      {row.analysis?.scorecard&&<SpeakingScorecard analysis={row.analysis} recordingId={attempt.recordingId}/>}
       <TieredFeedbackProse feedback={row.feedback}/>
       {row.analysis&&<PronunciationErrors analysis={row.analysis} recordingId={attempt.recordingId}/>}
       {row.analysis&&<PronunciationCoach analysis={row.analysis} recordingId={attempt.recordingId} feedbackText={row.feedback}/>}
