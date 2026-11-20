@@ -1893,6 +1893,51 @@ def build_grounded_analysis(
     }
 
 
+def build_queue_grounded_wire(
+    old_analysis: Mapping[str, Any] | None,
+    prosody_analysis: Mapping[str, Any],
+    reliability: Mapping[str, Any] | None,
+    config: Any,
+) -> dict[str, Any]:
+    """Build the queue-path grounded-prosody wire analysis (iteration-31 rev3).
+
+    Always returns a complete wire object (prosody-only with ``candidates:[]``
+    when there are no self-listen candidates), so a speaking task can complete
+    even without detector candidates. The owner-path ``old_analysis`` shape is
+    preserved separately for add_coach_feedback; this wire is validated
+    server-side by validateGroundedAnalysis. No phoneme assertions / band: T2 is
+    retired, candidates render as T3 suggestions.
+    """
+    calibrated = prosody_analysis.get("calibrated") or {}
+    try:
+        speech = float(calibrated.get("speech_duration_seconds") or 0.0)
+    except (TypeError, ValueError):
+        speech = 0.0
+    if not math.isfinite(speech) or speech < 0:
+        speech = 0.0
+    base = old_analysis or {}
+    wire: dict[str, Any] = {
+        "schema": "bandroom-grounded-analysis-v1",
+        "analysisVersion": str(
+            getattr(config, "grounded_analysis_version", "grounded-prosody-v1")
+        ),
+        "detectorVersion": base.get("detectorVersion") or DETECTOR_RECOGNIZER,
+        "inventoryVersion": base.get("inventoryVersion") or CALIBRATION_INVENTORY_VERSION,
+        "speechSeconds": base.get("speechSeconds", round(speech, 4)),
+        "candidates": list(base.get("candidates") or []),
+    }
+    if reliability:
+        wire["reliability"] = dict(reliability)
+    prosody_keys = (
+        "pause_count", "pause_seconds", "speech_ratio",
+        "total_duration_seconds", "speech_duration_seconds",
+    )
+    calibrated_prosody = {k: calibrated[k] for k in prosody_keys if k in calibrated}
+    if calibrated_prosody:
+        wire["calibrated_prosody"] = calibrated_prosody
+    return wire
+
+
 def _catch_trial_item(catch_trial: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Validate a control item; it must be an identical phone pair."""
     if not isinstance(catch_trial, Mapping):
@@ -2176,13 +2221,17 @@ def review_speaking_grounded(
         )
 
     try:
+        old_analysis = build_grounded_analysis(
+            self_listen, assignment, analysis, catch_trial=catch_trial
+        )
         return Feedback(
             feedback=text,
             evidence=build_evidence_text(recording_id, analysis),
             attempt=attempt_id,
             pronunciation=GROUNDED_PRONUNCIATION,
-            analysis=build_grounded_analysis(
-                self_listen, assignment, analysis, catch_trial=catch_trial
+            analysis=old_analysis,
+            queue_analysis=build_queue_grounded_wire(
+                old_analysis, analysis, reliability, config
             ),
         )
     except ValueError as exc:

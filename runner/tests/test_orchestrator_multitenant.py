@@ -124,6 +124,20 @@ def mt_runner(tmp_path, client, *, model=None, **overrides):
 
 
 def _fake_grounded(monkeypatch, *, analysis=None):
+    old = analysis if analysis is not None else {
+        "detectorVersion": "det-v1", "inventoryVersion": "inv-v1",
+        "speechSeconds": 3.0, "candidates": [],
+    }
+    wire = {
+        "schema": "bandroom-grounded-analysis-v1",
+        "analysisVersion": "grounded-prosody-v1",
+        "detectorVersion": old["detectorVersion"],
+        "inventoryVersion": old["inventoryVersion"],
+        "speechSeconds": old["speechSeconds"],
+        "candidates": old.get("candidates", []),
+        "calibrated_prosody": {"pause_count": 1, "pause_seconds": 0.9},
+    }
+
     def fake_review(raw, attempt, day, *, config, model, workdir, logger=None,
                     tenant_user_id=None):
         fake_review.tenant = tenant_user_id
@@ -132,13 +146,22 @@ def _fake_grounded(monkeypatch, *, analysis=None):
             evidence=f"录音 {RECORDING_ID}；已校准韵律证据：停顿 1 个。",
             attempt=str(attempt["id"]),
             pronunciation=None,
-            analysis=analysis if analysis is not None else {
-                "detectorVersion": "det-v1", "inventoryVersion": "inv-v1",
-                "speechSeconds": 3.0, "candidates": [],
-            },
+            analysis=old,
+            queue_analysis=wire,
         )
     fake_review.tenant = None
     monkeypatch.setattr(grounded_audio, "review_speaking_grounded", fake_review)
+    # Mock the decoded-checkpoint transfer (no real ffmpeg on fake bytes).
+    from runner import review_transfer
+    transfer_calls = []
+
+    def fake_commit(client, task_id, fence, raw, **kwargs):
+        transfer_calls.append({"taskId": task_id, "fence": fence,
+                               "analysisVersion": kwargs.get("analysis_version")})
+        return 16000
+    fake_commit.calls = transfer_calls
+    monkeypatch.setattr(review_transfer, "commit_decoded_checkpoint", fake_commit)
+    fake_review.transfer = fake_commit
     return fake_review
 
 
@@ -163,10 +186,15 @@ def test_grounded_task_completes_with_recording_sha_and_analysis(tmp_path, monke
     assert report.processed == 1 and report.fatal is False
     assert fake.tenant == "u1"  # per-user calibration bound to the claimed tenant
     assert "add_coach_feedback" not in client.names()
+    # decoded-checkpoint transfer committed before completion (rev3 A1)
+    assert fake.transfer.calls == [{"taskId": "s1", "fence": 1,
+                                    "analysisVersion": "grounded-prosody-v1"}]
     args = client.completed[0]
     assert args["taskId"] == "s1" and args["fence"] == 1
     assert args["recordingSha256"] == RECORDING_SHA
+    assert args["analysis"]["schema"] == "bandroom-grounded-analysis-v1"
     assert args["analysis"]["detectorVersion"] == "det-v1"
+    assert args["analysisVersion"] == "grounded-prosody-v1"
     assert "pronunciation" not in args  # grounded emits no pronunciation band
 
 
