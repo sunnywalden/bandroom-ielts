@@ -50,15 +50,19 @@ def _speak_task(task_id, user_id, *, day=12, fence=0, state="queued", analysis_v
 
 
 class FakeQueueClient:
-    def __init__(self, tasks, *, recording=RECORDING_BYTES, complete_error=None, lease=None):
+    def __init__(self, tasks, *, recording=RECORDING_BYTES, complete_error=None, lease=None,
+                 clock=None):
         self.tasks = [dict(t) for t in tasks]
         self.calls = []
         self.recording = recording
         self.complete_error = complete_error
         self.lease = lease
+        self.clock = clock
         self.renewals = 0
         self.completed = []
         self.failed = []
+        # (heartbeat args, runner clock at send time) for F9 assertions.
+        self.heartbeats = []
 
     def _find(self, task_id):
         return next(t for t in self.tasks if t["id"] == task_id)
@@ -111,6 +115,8 @@ class FakeQueueClient:
             self.renewals += 1
             return {}
         if name == "report_scheduler_heartbeat":
+            if self.clock is not None:
+                self.heartbeats.append((dict(args), self.clock()))
             return {"ok": True}
         raise AssertionError(f"unexpected tool in multi_tenant path: {name}")
 
@@ -128,9 +134,10 @@ def mt_config(tmp_path, **overrides):
     return RunnerConfig(**values)
 
 
-def mt_runner(tmp_path, client, *, model=None, **overrides):
+def mt_runner(tmp_path, client, *, model=None, clock=None, **overrides):
     return CoachRunner(mt_config(tmp_path, **overrides), client=client,
-                       model=model or FakeTextModel())
+                       model=model or FakeTextModel(),
+                       clock=clock or time.time)
 
 
 def _fake_grounded(monkeypatch, *, analysis=None):
@@ -149,7 +156,8 @@ def _fake_grounded(monkeypatch, *, analysis=None):
     }
 
     def fake_review(raw, attempt, day, *, config, model, workdir, logger=None,
-                    tenant_user_id=None, reserve_scorecard=None):
+                    tenant_user_id=None, reserve_scorecard=None,
+                    reserve_tts=None, refund_tts=None):
         fake_review.tenant = tenant_user_id
         return Feedback(
             feedback=valid_feedback_text(),
@@ -160,6 +168,9 @@ def _fake_grounded(monkeypatch, *, analysis=None):
             queue_analysis=wire,
         )
     fake_review.tenant = None
+    fake_review.reserve_scorecard = None
+    fake_review.reserve_tts = None
+    fake_review.refund_tts = None
     monkeypatch.setattr(grounded_audio, "review_speaking_grounded", fake_review)
     return fake_review
 
@@ -416,3 +427,118 @@ def test_auth_error_is_fatal_in_queue_run(tmp_path):
     client = AuthClient([_text_task("t1", "u1")])
     report = mt_runner(tmp_path, client).run()
     assert report.fatal is True and report.detail == "auth_failed"
+
+
+# ⑨ F3: grounded path reserves scorecard text + TTS buckets, refunding skips
+def _fake_costed_grounded(monkeypatch, *, reserve_text=True, refund_text=True):
+    wire = {
+        "schema": "bandroom-grounded-analysis-v1",
+        "analysisVersion": "grounded-prosody-v1",
+        "detectorVersion": "det-v1",
+        "inventoryVersion": "inv-v1",
+        "speechSeconds": 3.0,
+        "candidates": [],
+        "calibrated_prosody": {"pause_count": 1, "pause_seconds": 0.9},
+    }
+
+    def fake_review(raw, attempt, day, *, config, model, workdir, logger=None,
+                    tenant_user_id=None, reserve_scorecard=None,
+                    reserve_tts=None, refund_tts=None):
+        fake_review.reserved_scorecard = bool(reserve_scorecard and reserve_scorecard())
+        # Two planned TTS calls; one succeeds (refund the other).
+        fake_review.reserved_tts = bool(reserve_tts and reserve_tts(2))
+        fake_review.refunded_tts = False
+        if fake_review.reserved_tts and refund_tts:
+            refund_tts(1)
+            fake_review.refunded_tts = True
+        return Feedback(
+            feedback=valid_feedback_text(),
+            evidence=f"录音 {RECORDING_ID}；已校准韵律证据：停顿 1 个。",
+            attempt=str(attempt["id"]),
+            pronunciation=None,
+            analysis=None,
+            queue_analysis=wire,
+        )
+
+    fake_review.reserved_scorecard = False
+    fake_review.reserved_tts = False
+    fake_review.refunded_tts = False
+    monkeypatch.setattr(grounded_audio, "review_speaking_grounded", fake_review)
+    return fake_review
+
+
+def test_grounded_task_reserves_scorecard_and_tts_costs(tmp_path, monkeypatch):
+    fake = _fake_costed_grounded(monkeypatch)
+    client = FakeQueueClient([_speak_task("s1", "u1")])
+    runner = mt_runner(tmp_path, client)
+    report = runner.run()
+    assert report.processed == 1 and report.fatal is False
+    assert fake.reserved_scorecard is True   # separate text_cost bucket
+    assert fake.reserved_tts is True         # tts_cost * 2 planned
+    assert fake.refunded_tts is True         # 1 of 2 calls did not succeed
+    # grounded 0.10 + scorecard text 0.05 + one TTS call 0.02
+    assert runner._tenant_budget.spent("u1") == pytest.approx(0.17)
+
+
+def test_retryable_failure_refunds_all_task_reservations(tmp_path, monkeypatch):
+    _fake_costed_grounded(monkeypatch)
+    client = FakeQueueClient(
+        [_speak_task("s1", "u1")],
+        complete_error=ToolError("storage blip", code="transfer_storage_unavailable",
+                                 retryable=True),
+    )
+    runner = mt_runner(tmp_path, client)
+    report = runner.run()
+    assert report.failed == 1 and report.blocked == 0
+    # The attempt reserved grounded + scorecard + TTS before failing retryably;
+    # run_one refunds the whole task so the retry does not double-charge.
+    assert runner._tenant_budget.spent("u1") == pytest.approx(0.0)
+
+
+def test_text_failure_refunds_reserved_text_cost(tmp_path):
+    client = FakeQueueClient(
+        [_text_task("t1", "u1")],
+        complete_error=ToolError("blip", code="transfer_storage_unavailable",
+                                 retryable=True),
+    )
+    runner = mt_runner(tmp_path, client)
+    report = runner.run()
+    assert report.failed == 1
+    assert runner._tenant_budget.spent("u1") == pytest.approx(0.0)
+
+
+def test_successful_text_task_keeps_its_reservation(tmp_path):
+    client = FakeQueueClient([_text_task("t1", "u1")])
+    runner = mt_runner(tmp_path, client)
+    assert runner.run().processed == 1
+    assert runner._tenant_budget.spent("u1") == pytest.approx(runner.config.text_cost_cny)
+
+
+# ⑩ F9: long runs keep nextExpectedAt fresh instead of startedAt+interval
+def test_long_run_progress_heartbeats_are_not_stale(tmp_path):
+    clock = {"t": 1_700_000_000.0}
+    tasks = [_text_task(f"t{i}", f"u{i}") for i in range(4)]
+    client = FakeQueueClient(tasks, clock=lambda: clock["t"])
+    runner = mt_runner(tmp_path, client, clock=lambda: clock["t"])
+
+    original = runner._process_queue_task
+
+    def slow_task(task):
+        # Each task outlives the configured 300 s interval, which is exactly
+        # the case where the old startedAt+interval heartbeat went stale.
+        clock["t"] += 400.0
+        return original(task)
+
+    runner._process_queue_task = slow_task
+    report = runner.run()
+    assert report.processed == 4
+    assert client.heartbeats, "queue runs must report progress heartbeats"
+
+    details = [args.get("detail", "") for args, _ in client.heartbeats]
+    assert any(detail.startswith("running task=") for detail in details)
+    assert any("processed=" in detail for detail in details)
+    # Initial + per-task progress + final all carry a nextExpectedAt measured
+    # from their own send time, so none is stale while the runner is busy.
+    for args, sent_at in client.heartbeats:
+        assert args["status"] in ("started", "finished")
+        assert args["nextExpectedAt"] >= int(sent_at * 1000)

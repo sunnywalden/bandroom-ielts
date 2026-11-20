@@ -128,7 +128,13 @@ class LeaseRenewer:
 
 
 class UserBudget:
-    """Per-user cost ledger (micro-CNY) with an optional global cap."""
+    """Per-user cost ledger (micro-CNY) with an optional global cap.
+
+    Reservations can be tagged with the claimed task id (``task_id=``).  That
+    lets ``run_one`` refund the exact amount a failed attempt reserved without
+    guessing, so a retryable failure does not permanently spend the tenant's
+    daily budget.  The tag map is in-memory: it only needs to survive one run.
+    """
 
     def __init__(self, path: str | Path, per_user_cap_cny: float,
                  global_cap_cny: float | None = None, *, now: Callable[[], float] = time.time):
@@ -136,8 +142,11 @@ class UserBudget:
         self._per = int(round(float(per_user_cap_cny) * MICRO))
         self._global = int(round(float(global_cap_cny) * MICRO)) if global_cap_cny else None
         self._now = now
-        self._lock = threading.Lock()
+        # RLock: refund paths may be called while another budget method holds it.
+        self._lock = threading.RLock()
         self._data = self._load()
+        # task_id -> [user_id, micro_cny] reserved for that claimed task.
+        self._pending: dict[str, list[Any]] = {}
 
     def _day(self) -> str:
         return time.strftime("%Y-%m-%d", time.gmtime(self._now()))
@@ -184,8 +193,13 @@ class UserBudget:
             self._roll()
             return self._global is not None and self._data["global"] >= self._global
 
-    def reserve(self, user_id: str, cost_cny: float) -> bool:
+    def reserve(self, user_id: str, cost_cny: float, *, task_id: str | None = None) -> bool:
         micro = int(round(float(cost_cny) * MICRO))
+        return self.reserve_micro(user_id, micro, task_id=task_id)
+
+    def reserve_micro(self, user_id: str, micro: int, *, task_id: str | None = None) -> bool:
+        """Reserve an exact integer micro-CNY amount (used by per-call buckets)."""
+        micro = max(0, int(micro))
         with self._lock:
             self._roll()
             current = self._data["users"].get(user_id, 0)
@@ -195,8 +209,64 @@ class UserBudget:
                 return False
             self._data["users"][user_id] = current + micro
             self._data["global"] += micro
+            if task_id:
+                pending = self._pending.setdefault(str(task_id), [user_id, 0])
+                if pending[0] != user_id:
+                    # A task id is server-unique per claim; start a fresh bucket
+                    # if it is ever reused across tenants.
+                    pending[:] = [user_id, 0]
+                pending[1] += micro
             self._save()
             return True
+
+    def refund(self, user_id: str, micro: int) -> int:
+        """Refund integer micro-CNY, flooring both the user and global ledgers at 0.
+
+        Returns the amount actually refunded (never more than was spent).
+        """
+        micro = max(0, int(micro))
+        if micro == 0:
+            return 0
+        with self._lock:
+            self._roll()
+            current = self._data["users"].get(user_id, 0)
+            refunded = min(current, micro)
+            if refunded <= 0:
+                return 0
+            self._data["users"][user_id] = current - refunded
+            self._data["global"] = max(0, self._data["global"] - refunded)
+            self._save()
+            return refunded
+
+    def release(self, task_id: str) -> None:
+        """Forget a successful task's pending reservation; the spend stays."""
+        with self._lock:
+            self._pending.pop(str(task_id), None)
+
+    def refund_reserved(self, user_id: str, micro: int, *, task_id: str) -> int:
+        """Refund part of a task's reservation (e.g. unused TTS calls).
+
+        Unlike ``refund`` this also shrinks the task's pending bucket, so a later
+        ``refund_task`` failure path cannot refund the same micro-CNY twice or
+        spill into an earlier task's spend.
+        """
+        micro = max(0, int(micro))
+        with self._lock:
+            pending = self._pending.get(str(task_id))
+            if pending and pending[0] == user_id:
+                pending[1] = max(0, int(pending[1]) - micro)
+                if pending[1] == 0:
+                    self._pending.pop(str(task_id), None)
+            return self.refund(user_id, micro)
+
+    def refund_task(self, task_id: str) -> int:
+        """Refund everything reserved under ``task_id`` (retryable failure)."""
+        with self._lock:
+            pending = self._pending.pop(str(task_id), None)
+            if not pending:
+                return 0
+            user_id, micro = pending
+            return self.refund(str(user_id), int(micro))
 
 
 def _fail(client: Any, task_id: str, fence: Any, code: str, logger: Any,
@@ -270,6 +340,8 @@ def run_one(
                           interval=lease_interval, extend_ms=extend_ms, logger=logger):
             ok = process(task)
         if ok:
+            # The attempt succeeded: the reservation becomes real spend.
+            budget.release(task_id)
             return "processed"
     except fatal_errors:
         raise
@@ -279,10 +351,16 @@ def run_one(
         _fail(client, task_id, fence, exc.code, logger, retryable=False, lease=lease)
         return "blocked"
     except TaskYielded as exc:
+        # Yielded before inference; a reservation should not exist, but refund
+        # defensively so a future ordering change cannot leak budget.
+        budget.refund_task(task_id)
         _fail(client, task_id, fence, exc.code, logger, retryable=True, lease=lease)
         return "yielded"
     except Exception as exc:  # noqa: BLE001 - classify as a retryable failure
         if logger:
             logger.warning("tenant_task_failed task=%s error=%s", task_id, str(exc)[:160])
+    # Retryable failure: the attempt spends again when it is retried, so return
+    # this attempt's reservation to the tenant's daily budget.
+    budget.refund_task(task_id)
     _fail(client, task_id, fence, "runner_error", logger, retryable=True, lease=lease)
     return "failed"

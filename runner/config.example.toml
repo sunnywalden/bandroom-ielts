@@ -24,6 +24,12 @@ text_timeout_seconds = 120
 # p95 must be measured before the lead enables the grounded mode.
 grounded_text_timeout_seconds = 240
 audio_timeout_seconds = 240
+# F14: transient provider failures (429/5xx/transport) retry at the model layer.
+model_max_retries = 3
+model_backoff_base_seconds = 1.0
+# Consecutive provider failures before the breaker fails fast for a cooldown.
+circuit_breaker_threshold = 5
+circuit_breaker_cooldown_seconds = 60.0
 
 [runner]
 # Audio dispatch: "off" (skip speaking) | "legacy" (omni _review_audio) |
@@ -49,6 +55,10 @@ text_cost_cny = 0.05
 audio_cost_cny = 0.20
 # The grounded path is a text-model call; this bucket reserves its cost.
 grounded_cost_cny = 0.10
+# F3: canonical contrast TTS (qwen3-tts-flash) per call — conservative ESTIMATE;
+# reconcile with the provider console. Reserved up to self_listen_max_n*2 per
+# speaking review; skipped/failed calls are refunded.
+tts_cost_cny = 0.02
 
 [audio]
 # read_speaking_recording bytes mode: at most 24576 bytes per range.

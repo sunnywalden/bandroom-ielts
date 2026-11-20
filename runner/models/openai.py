@@ -33,6 +33,11 @@ class OpenAIAdapter(QwenAdapter):
         text_timeout: float = 120.0,
         audio_timeout: float = 240.0,
         transport=None,
+        model_max_retries: int = 3,
+        model_backoff_base_seconds: float = 1.0,
+        circuit_breaker_threshold: int = 5,
+        circuit_breaker_cooldown_seconds: float = 60.0,
+        **options,
     ):
         super().__init__(
             api_key,
@@ -42,20 +47,29 @@ class OpenAIAdapter(QwenAdapter):
             text_timeout=text_timeout,
             audio_timeout=audio_timeout,
             transport=transport,
+            model_max_retries=model_max_retries,
+            model_backoff_base_seconds=model_backoff_base_seconds,
+            circuit_breaker_threshold=circuit_breaker_threshold,
+            circuit_breaker_cooldown_seconds=circuit_breaker_cooldown_seconds,
+            **options,
         )
         self._models_verified = not (
             self.text_model.startswith("TBD-") or self.audio_model.startswith("TBD-")
         )
 
-    def _request_body(self, model: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    def _request_body(
+        self, model: str, messages: list[dict[str, Any]], *, json_object: bool = True
+    ) -> dict[str, Any]:
         # OpenAI-compatible providers differ on ``reasoning_effort``; do not
         # send provider-specific knobs until the S2 contract is verified.
-        return {
+        body: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": 0.2,
-            "response_format": {"type": "json_object"},
         }
+        if json_object:
+            body["response_format"] = {"type": "json_object"}
+        return body
 
     def complete_text(self, snapshot):
         if not self._models_verified:

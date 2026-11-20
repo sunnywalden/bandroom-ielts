@@ -136,3 +136,89 @@ def test_run_one_missing_tenant_fields_is_failed(tmp_path):
     budget = tq.UserBudget(tmp_path / "b.json", per_user_cap_cny=5.0)
     client = FakeClient({"task": {"id": "t", "fence": 1}})  # no userId
     assert tq.run_one(client, lambda t: True, budget) == "failed"
+
+def test_user_budget_refund_floors_at_zero(tmp_path):
+    b = tq.UserBudget(tmp_path / "b.json", per_user_cap_cny=1.0, global_cap_cny=1.0)
+    assert b.reserve("a", 0.5) is True
+    assert b.refund("a", 300_000) == 300_000
+    assert abs(b.spent("a") - 0.2) < 1e-9
+    # Over-refund floors at zero, including the global counter.
+    assert b.refund("a", 999_999) == 200_000
+    assert b.spent("a") == 0.0
+    assert b.global_paused() is False
+    # Refunding an unseen user is a no-op.
+    assert b.refund("nobody", 100) == 0
+
+
+def test_user_budget_refund_task_tracks_tagged_reservations(tmp_path):
+    b = tq.UserBudget(tmp_path / "b.json", per_user_cap_cny=1.0)
+    assert b.reserve("a", 0.10, task_id="t1") is True
+    assert b.reserve_micro("a", 20_000, task_id="t1") is True
+    assert b.reserve("a", 0.05, task_id="t2") is True
+    assert b.refund_task("t1") == 120_000
+    assert abs(b.spent("a") - 0.05) < 1e-9
+    # Unknown/already-refunded task is a no-op.
+    assert b.refund_task("t1") == 0
+    # Success releases the tag without refunding.
+    b.release("t2")
+    assert abs(b.spent("a") - 0.05) < 1e-9
+    assert b.refund_task("t2") == 0
+
+
+def test_user_budget_refund_enables_retry_after_failure(tmp_path):
+    b = tq.UserBudget(tmp_path / "b.json", per_user_cap_cny=0.10)
+    assert b.reserve("a", 0.10, task_id="t1") is True
+    assert b.paused("a") is True
+    assert b.refund_task("t1") == 100_000
+    assert b.paused("a") is False
+    assert b.reserve("a", 0.10, task_id="t1") is True
+
+
+def test_run_one_refunds_retryable_failure(tmp_path):
+    budget = tq.UserBudget(tmp_path / "b.json", per_user_cap_cny=1.0)
+    client = FakeClient({"task": {"id": "t1", "userId": "u1", "fence": 1}})
+
+    def boom(task):
+        assert budget.reserve("u1", 0.10, task_id=task["id"]) is True
+        assert budget.reserve("u1", 0.05, task_id=task["id"]) is True
+        raise RuntimeError("model blew up")
+
+    assert tq.run_one(client, boom, budget) == "failed"
+    assert budget.spent("u1") == 0.0  # retryable failure refunded the attempt
+    # The task was still requeued retryably.
+    fail = next(c for c in client.calls if c[0] == "fail_review_task")[1]
+    assert fail["retryable"] is True
+
+
+def test_run_one_keeps_reservation_on_success_and_permanent_block(tmp_path):
+    budget = tq.UserBudget(tmp_path / "b.json", per_user_cap_cny=1.0)
+    client = FakeClient({"task": {"id": "t1", "userId": "u1", "fence": 1}})
+
+    def ok(task):
+        assert budget.reserve("u1", 0.10, task_id=task["id"]) is True
+        return True
+
+    assert tq.run_one(client, ok, budget) == "processed"
+    assert abs(budget.spent("u1") - 0.10) < 1e-9
+
+    blocked_budget = tq.UserBudget(tmp_path / "c.json", per_user_cap_cny=1.0)
+    blocked_client = FakeClient({"task": {"id": "t2", "userId": "u2", "fence": 1}})
+
+    def blocked(task):
+        assert blocked_budget.reserve("u2", 0.10, task_id=task["id"]) is True
+        raise tq.PermanentTaskError("snapshot_invalid", "deterministic rejection")
+
+    assert tq.run_one(blocked_client, blocked, blocked_budget) == "blocked"
+    # A permanent rejection consumed the model call and is not refunded.
+    assert abs(blocked_budget.spent("u2") - 0.10) < 1e-9
+
+
+def test_partial_refund_shrinks_pending_so_failure_refund_is_exact(tmp_path):
+    b = tq.UserBudget(tmp_path / "b.json", per_user_cap_cny=1.0)
+    assert b.reserve("a", 0.10, task_id="t1") is True
+    assert b.reserve_micro("a", 40_000, task_id="t1") is True
+    # One TTS call did not succeed; refund it without double-refunding later.
+    assert b.refund_reserved("a", 20_000, task_id="t1") == 20_000
+    assert abs(b.spent("a") - 0.12) < 1e-9
+    assert b.refund_task("t1") == 120_000
+    assert b.spent("a") == 0.0

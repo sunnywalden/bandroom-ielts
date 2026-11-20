@@ -2140,6 +2140,8 @@ def review_speaking_grounded(
     pause_calibration: PauseCalibrationState | None = None,
     tenant_user_id: str | None = None,
     reserve_scorecard: Callable[[], bool] | None = None,
+    reserve_tts: Callable[[int], bool] | None = None,
+    refund_tts: Callable[[int], None] | None = None,
 ) -> Feedback:
     """Produce a validated grounded speaking review.
 
@@ -2230,13 +2232,35 @@ def review_speaking_grounded(
     )
     t3_documents = [item.as_document() for item in assignment.t3_items]
     contrast_enabled = bool(getattr(grounded, "contrast_audio_enabled", False))
+    tts_limit = int(getattr(grounded, "self_listen_max_n", DEFAULT_SELF_LISTEN_MAX_N))
+    # F3: TTS is billed per call. Reserve the planned candidate batch up front
+    # (fail-closed: no budget => no TTS, but the review continues), then refund
+    # the calls that were skipped or failed, using the summary's actual count.
+    planned_candidate_tts = (
+        min(len(t3_documents), max(0, tts_limit)) if contrast_enabled else 0
+    )
+    if planned_candidate_tts and callable(reserve_tts) and not reserve_tts(
+        planned_candidate_tts
+    ):
+        log.info(json.dumps({
+            "event": "contrast_audio_skipped",
+            "reason": "budget_paused",
+            "planned": planned_candidate_tts,
+        }, ensure_ascii=False))
+        contrast_enabled = False
+        planned_candidate_tts = 0
     contrast_summary = enrich_candidates(
         t3_documents,
         enabled=contrast_enabled,
         transport=getattr(config, "contrast_transport", None),
         api_key=str(getattr(config, "api_key", "") or ""),
-        limit=int(getattr(grounded, "self_listen_max_n", DEFAULT_SELF_LISTEN_MAX_N)),
+        limit=tts_limit,
     )
+    if planned_candidate_tts and callable(refund_tts):
+        succeeded = int(contrast_summary.get("succeeded") or 0)
+        unused = max(0, planned_candidate_tts - min(planned_candidate_tts, succeeded))
+        if unused:
+            refund_tts(unused)
 
     # Score-first feedback (speaking redesign): structured scorecard over the
     # calibrated prosody + Whisper transcript. Separate text call from the
@@ -2287,15 +2311,41 @@ def review_speaking_grounded(
         scorecard_doc = card
         # Speak-style say-it-better loop: canonical model audio for each drill
         # sentence. Fail-closed — unavailable TTS never blocks the review.
-        if contrast_enabled and card.get("drills"):
-            drill_summary = enrich_drills(
-                card["drills"],
-                enabled=True,
-                transport=getattr(config, "contrast_transport", None),
-                api_key=str(getattr(config, "api_key", "") or ""),
-                limit=int(getattr(grounded, "self_listen_max_n", DEFAULT_SELF_LISTEN_MAX_N)),
-            )
-            log.info(json.dumps({"event": "drill_contrast_summary", **drill_summary}, ensure_ascii=False))
+        drills = card.get("drills") or []
+        planned_drill_tts = 0
+        if contrast_enabled and drills:
+            drill_items = [
+                item for item in drills if isinstance(item, dict)
+            ][: max(0, tts_limit)]
+            planned_drill_tts = len(drill_items)
+            if planned_drill_tts and callable(reserve_tts) and not reserve_tts(
+                planned_drill_tts
+            ):
+                log.info(json.dumps({
+                    "event": "drill_contrast_skipped",
+                    "reason": "budget_paused",
+                    "planned": planned_drill_tts,
+                }, ensure_ascii=False))
+                planned_drill_tts = 0
+            else:
+                drill_summary = enrich_drills(
+                    drills,
+                    enabled=True,
+                    transport=getattr(config, "contrast_transport", None),
+                    api_key=str(getattr(config, "api_key", "") or ""),
+                    limit=tts_limit,
+                )
+                log.info(json.dumps(
+                    {"event": "drill_contrast_summary", **drill_summary},
+                    ensure_ascii=False,
+                ))
+                if planned_drill_tts and callable(refund_tts):
+                    succeeded = int(drill_summary.get("succeeded") or 0)
+                    unused = max(
+                        0, planned_drill_tts - min(planned_drill_tts, succeeded)
+                    )
+                    if unused:
+                        refund_tts(unused)
 
     system, user = build_prompt(
         attempt,

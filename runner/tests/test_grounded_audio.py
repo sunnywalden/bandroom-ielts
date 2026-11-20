@@ -609,6 +609,139 @@ def test_scorecard_does_not_reserve_budget_without_a_call(tmp_path):
     assert [c["key"] for c in card["criteria"]] == ["fluency_coherence", "pronunciation"]
 
 
+class FakeScorecardModel(FakeGroundedModel):
+    def complete_scorecard(self, system, user, *, timeout=None):
+        return json.dumps({
+            "grammar_issues": [],
+            "lexical_issues": [],
+            "drills": [{
+                "quote": "hello",
+                "improved": "Hello there.",
+                "focus_zh": "练一个问候句。",
+            }],
+        })
+
+
+def test_contrast_tts_reserves_planned_calls_and_refunds_unmade(tmp_path, monkeypatch):
+    """F3: TTS calls are billed per synthesis; reserve planned groups, refund
+    the calls that did not succeed, and never fail the review."""
+    candidates = [
+        candidate("his", 1.25),
+        candidate("office", 3.5),
+        candidate("third", 4.5),
+    ]
+    monkeypatch.setattr(
+        grounded_audio, "collect_self_listen_candidates",
+        lambda *args, **kwargs: candidates,
+    )
+    monkeypatch.setattr(
+        grounded_audio, "read_detector_transcript",
+        lambda *args, **kwargs: [{"word": "hello", "start": 0.1, "end": 0.4, "probability": 0.9}],
+    )
+
+    def fake_enrich_candidates(items, *, enabled, **kwargs):
+        return {
+            "enabled": enabled,
+            "attempted": len(items),
+            "succeeded": 1,  # one of the two planned calls worked
+            "unavailable": max(0, len(items) - 1),
+        }
+
+    def fake_enrich_drills(items, *, enabled, **kwargs):
+        return {"enabled": enabled, "attempted": 1, "succeeded": 0, "unavailable": 1}
+
+    monkeypatch.setattr(grounded_audio, "enrich_candidates", fake_enrich_candidates)
+    monkeypatch.setattr(grounded_audio, "enrich_drills", fake_enrich_drills)
+
+    attempt = {
+        "id": "v2:speak:0:abc",
+        "stage": "speak",
+        "recordingId": RECORDING_ID,
+        "response": "I think this is fine.",
+    }
+    config = grounded_config_obj(
+        tmp_path,
+        self_listen_enabled=True,
+        contrast_audio_enabled=True,
+        self_listen_max_n=2,
+    )
+    model = FakeScorecardModel(
+        valid_feedback_text(
+            candidate_lines=_candidate_section(("his", 1.25), ("office", 3.5))
+        )
+    )
+    reserved: list[int] = []
+    refunded: list[int] = []
+    produced = review_speaking_grounded(
+        b"raw",
+        attempt,
+        12,
+        config=config,
+        model=model,
+        workdir=tmp_path / "work",
+        decode_wav=fake_decode,
+        reserve_scorecard=lambda: True,
+        reserve_tts=lambda count: reserved.append(count) or True,
+        refund_tts=refunded.append,
+    )
+    # Two T3 candidates + one drill sentence were planned; failed calls refunded.
+    assert reserved == [2, 1]
+    assert refunded == [1, 1]
+    assert produced.analysis is not None
+
+
+def test_contrast_tts_skipped_when_reservation_fails(tmp_path, monkeypatch):
+    """Fail-closed: no TTS budget => no TTS calls, review still completes."""
+    candidates = [candidate("his", 1.25), candidate("office", 3.5)]
+    monkeypatch.setattr(
+        grounded_audio, "collect_self_listen_candidates",
+        lambda *args, **kwargs: candidates,
+    )
+    monkeypatch.setattr(
+        grounded_audio, "read_detector_transcript", lambda *args, **kwargs: None
+    )
+    calls: list[bool] = []
+
+    def fake_enrich_candidates(items, *, enabled, **kwargs):
+        calls.append(bool(enabled))
+        return {"enabled": enabled, "attempted": 0, "succeeded": 0, "unavailable": 0}
+
+    monkeypatch.setattr(grounded_audio, "enrich_candidates", fake_enrich_candidates)
+    attempt = {
+        "id": "v2:speak:0:abc",
+        "stage": "speak",
+        "recordingId": RECORDING_ID,
+        "response": "I think this is fine.",
+    }
+    config = grounded_config_obj(
+        tmp_path,
+        self_listen_enabled=True,
+        contrast_audio_enabled=True,
+        self_listen_max_n=2,
+        scorecard_enabled=False,
+    )
+    model = FakeGroundedModel(
+        valid_feedback_text(
+            candidate_lines=_candidate_section(("his", 1.25), ("office", 3.5))
+        )
+    )
+    produced = review_speaking_grounded(
+        b"raw",
+        attempt,
+        12,
+        config=config,
+        model=model,
+        workdir=tmp_path / "work",
+        decode_wav=fake_decode,
+        reserve_tts=lambda count: False,  # budget exhausted
+    )
+    assert calls == [False], "TTS must not run when the reservation fails"
+    # The review still completes (no analysis payload here because scorecard
+    # and transcript are off in this fixture; the prose is what matters).
+    assert produced.feedback.startswith("一、评估")
+    assert produced.pronunciation is None
+
+
 def test_stage_b_candidates_reach_the_self_listen_section(tmp_path, monkeypatch):
     attempt = {
         "id": "v2:speak:0:abc",
