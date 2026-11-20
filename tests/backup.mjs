@@ -181,7 +181,7 @@ try{
      build.onLoad({filter:/.*/,namespace:'fixture'},args=>({contents:args.path==='cloudflare:workers'
        ?'export const env=globalThis.__backupEnv;':'export async function getChatGPTUser(){return globalThis.__backupUser ? {userId:globalThis.__backupUser}:null}'}));
    }}]});
- globalThis.__backupEnv={DB:db,BUCKET:bucket,BANDROOM_BACKUP_KEY:secret};const {GET}=await import(routePath);
+ globalThis.__backupEnv={DB:db,BUCKET:bucket,BANDROOM_BACKUP_KEY:secret,BANDROOM_CONSENT_GATE:'off',BANDROOM_QUOTA_GATE:'off'};const {GET}=await import(routePath);
  ok(!('downloadReceipt' in await prepareBackup(db,bucket,uid,secret))); // device-only copy must be assembled on its originating device
  const cloudOnly=structuredClone(data);cloudOnly.entries[11].speakingFollowup=JSON.stringify(JSON.parse(data.entries[11].speakingFollowup).slice(0,1));
  await run('UPDATE learner_states SET state=? WHERE user_id=?',JSON.stringify(cloudOnly),uid);

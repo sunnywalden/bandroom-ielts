@@ -7,6 +7,11 @@ export function json(value: unknown, status = 200) {
 // Dynamic imports keep this module free of a top-level DB dependency so lightweight
 // tests that only use json/crossOrigin do not need to mock the database binding.
 export async function consentGate(userId: string): Promise<Response | null> {
+  const { env } = await import("cloudflare:workers");
+  // No DB binding (e.g. isolated fixtures / binding outage): the route's own DB
+  // operations will fail closed elsewhere; do not turn a missing binding into a
+  // consent error here.
+  if (!(env as { DB?: unknown }).DB) return null;
   const { getDb } = await import("@/db");
   const { assertConsent, ConsentError } = await import("@/lib/consent");
   try {

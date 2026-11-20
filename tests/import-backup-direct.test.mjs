@@ -120,7 +120,10 @@ async function applyMigrations(db){
   const files=(await readdir(join(root,'drizzle'))).filter(file=>file.endsWith('.sql')).sort();
   for(const file of files){
     const body=await readFile(join(root,'drizzle',file),'utf8');
-    for(const query of body.split(';').map(part=>part.replaceAll('--> statement-breakpoint','').trim()).filter(Boolean)){
+    // Strip line comments before splitting on ';': migration prose contains
+    // semicolons, and a comment-only fragment is not a runnable statement.
+    const sqlText=body.split('\n').map(line=>{const at=line.indexOf('--');return at<0?line:line.slice(0,at);}).join('\n');
+    for(const query of sqlText.split(';').map(part=>part.trim()).filter(Boolean)){
       await db.prepare(query).run();
     }
   }
@@ -240,7 +243,7 @@ try{
 
   const target=await createRuntime();
   const migrationFiles=await applyMigrations(target.db);
-  equal(migrationFiles.length,11);
+  equal(migrationFiles.length,16);
   for(const statement of plan.statements)await target.db.prepare(statement).run();
   for(const item of plan.audio){
     await target.bucket.put(item.key,item.bytes,{httpMetadata:{contentType:item.type}});
