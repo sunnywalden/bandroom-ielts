@@ -27,7 +27,6 @@ import fcntl
 import json
 import logging
 import os
-import re
 import tempfile
 import time
 import tomllib
@@ -117,20 +116,8 @@ TRANSIENT_TOOL_MESSAGES = (
 
 # Provider/transport exceptions can embed request headers or key fragments.
 # Error details are persisted (state) and written to logs, so redact common
-# secret shapes before either sink.
-_SECRET_PATTERN = re.compile(
-    r"(?i)(authorization|bearer|api[_-]?key|access[_-]?token|refresh[_-]?token"
-    r"|token|secret|password|passphrase)\s*[:=]?\s*\S+"
-)
-
-
-def redact_error_detail(text: str, limit: int = 300) -> str:
-    """Redact secret-looking substrings and bound the detail length."""
-    # "Bearer <token>" first: the generic pattern only consumes one token and
-    # would leave the credential behind.
-    cleaned = re.sub(r"(?i)\bbearer\s+\S+", "Bearer [REDACTED]", str(text))
-    cleaned = _SECRET_PATTERN.sub(r"\1: [REDACTED]", cleaned)
-    return cleaned[-limit:]
+# secret shapes before either sink. Shared with grounded_audio (no import cycle).
+from .redaction import redact_error_detail
 
 
 # Queue-path speaking completion contract gap (iteration-30, owner decision A).
