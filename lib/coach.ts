@@ -152,12 +152,16 @@ async function reviews(userId:string, day?:number) {
   const verdicts=await verdictsForCandidates(reviewTaskDb(),userId,candidateIds);
   return rows.map(({analysisJson,...row})=>{
     const raw=analysisJson as {items?:Array<Record<string,unknown>>}|null;
+    // Only touch analyses that actually carry candidate items; legacy shapes
+    // (errors/coverage) must pass through untouched.
     const analysis=raw
-      ?{...raw,items:(raw.items??[]).map(item=>({
-        ...item,
-        ...(typeof item.candidateId==='string'&&verdicts[item.candidateId]&&item.isCatchTrial!==true
-          ?{priorVerdict:verdicts[item.candidateId]}:{}),
-      }))}
+      ?(Array.isArray(raw.items)
+        ?{...raw,items:raw.items.map(item=>({
+          ...item,
+          ...(typeof item.candidateId==='string'&&verdicts[item.candidateId]&&item.isCatchTrial!==true
+            ?{priorVerdict:verdicts[item.candidateId]}:{}),
+        }))}
+        :raw)
       :undefined;
     return {
       ...row,
