@@ -3,8 +3,9 @@
 // mock. Unknown or missing scopes are anonymous, never owner (fail-closed).
 import { env as cloudflareEnv } from "cloudflare:workers";
 import { headers } from "next/headers";
+import { resolveTenant, splitList, type TenantDb } from "./tenant-identity";
 
-export type AuthScope = "owner" | "coach" | "coach-runner";
+export type AuthScope = "owner" | "learner" | "coach" | "coach-runner";
 export type AuthUser = { userId: string; displayName: string; email: string; fullName: string | null };
 export type AuthContext = {
   user: AuthUser | null;
@@ -18,6 +19,12 @@ export type AuthEnv = {
   BANDROOM_OWNER_USER_ID?: string;
   BANDROOM_RUNNER_CLIENT_ID?: string;
   BANDROOM_COACH_CLIENT_ID?: string;
+  // Multi-tenant (rev2 §3.1). DB is the D1 binding; domains gate provisioning;
+  // admin emails resolve to active admin tenants. Absent DB → non-owner
+  // identities fail closed (anonymous), preserving single-owner behaviour.
+  DB?: unknown;
+  BANDROOM_ALLOWED_EMAIL_DOMAINS?: string;
+  BANDROOM_ADMIN_EMAILS?: string;
 };
 export type ResolveAuthOptions = {
   now?: number;
@@ -148,34 +155,47 @@ function audienceMatches(value: unknown, configured: string): boolean {
   return false;
 }
 
-function scopeForClaims(claims: AccessClaims, authEnv: AuthEnv): AuthScope | null {
-  const email = typeof claims.email === "string" ? claims.email.trim() : "";
-  const ownerEmail = authEnv.BANDROOM_OWNER_EMAIL?.trim();
-  if (ownerEmail && email && email.toLowerCase() === ownerEmail.toLowerCase()) return "owner";
-  // A CF Access service token has no email and an empty sub. common_name is the
-  // service token Client ID, not its display name.
-  const commonName = typeof claims.common_name === "string" ? claims.common_name.trim() : "";
-  const runner = authEnv.BANDROOM_RUNNER_CLIENT_ID?.trim();
-  if (runner && commonName === runner) return "coach-runner";
-  const coach = authEnv.BANDROOM_COACH_CLIENT_ID?.trim();
-  if (coach && commonName === coach) return "coach";
-  return null;
+function serviceUser(userId: string, name: string): AuthUser {
+  return { userId, displayName: name, email: "", fullName: null };
 }
 
-function userForScope(scope: AuthScope, claims: AccessClaims, authEnv: AuthEnv): AuthUser | null {
+// Identity resolution (rev2 §3.1). Service tokens and the env owner keep the
+// existing single-owner behaviour during expansion; any other verified human
+// identity is resolved/provisioned from the `users` table. Only an `active`
+// tenant yields the learner scope; pending/suspended/revoked → null. DB failures
+// propagate to null (anonymous) — fail-closed, and the env owner path does not
+// depend on D1.
+async function resolveIdentity(
+  claims: AccessClaims,
+  authEnv: AuthEnv,
+): Promise<{ scope: AuthScope; user: AuthUser } | null> {
   const userId = authEnv.BANDROOM_OWNER_USER_ID?.trim();
-  if (!userId) return null;
-  if (scope === "owner") {
-    const email = typeof claims.email === "string" ? claims.email.trim() : "";
-    if (!email) return null;
-    return { userId, displayName: email, email, fullName: null };
+  const commonName = typeof claims.common_name === "string" ? claims.common_name.trim() : "";
+  const runner = authEnv.BANDROOM_RUNNER_CLIENT_ID?.trim();
+  const coach = authEnv.BANDROOM_COACH_CLIENT_ID?.trim();
+  if (runner && commonName === runner) {
+    return userId ? { scope: "coach-runner", user: serviceUser(userId, commonName) } : null;
   }
-  return {
-    userId,
-    displayName: typeof claims.common_name === "string" ? claims.common_name : scope,
-    email: "",
-    fullName: null,
-  };
+  if (coach && commonName === coach) {
+    return userId ? { scope: "coach", user: serviceUser(userId, commonName) } : null;
+  }
+  const email = typeof claims.email === "string" ? claims.email.trim() : "";
+  if (!email) return null;
+  const ownerEmail = authEnv.BANDROOM_OWNER_EMAIL?.trim();
+  if (ownerEmail && email.toLowerCase() === ownerEmail.toLowerCase()) {
+    return userId ? { scope: "owner", user: { userId, displayName: email, email, fullName: null } } : null;
+  }
+  const tenant = await resolveTenant(
+    (authEnv.DB ?? null) as TenantDb | null,
+    { idpIss: String(claims.iss ?? ""), idpSub: String(claims.sub ?? ""), email },
+    {
+      allowedDomains: splitList(authEnv.BANDROOM_ALLOWED_EMAIL_DOMAINS),
+      adminEmails: splitList(authEnv.BANDROOM_ADMIN_EMAILS),
+    },
+    Date.now(),
+  );
+  if (!tenant || tenant.status !== "active") return null;
+  return { scope: "learner", user: { userId: tenant.userId, displayName: email, email, fullName: null } };
 }
 
 async function accessJwtContext(
@@ -251,11 +271,9 @@ async function accessJwtContext(
   if (claims.nbf !== undefined
     && (typeof claims.nbf !== "number" || !Number.isFinite(claims.nbf) || claims.nbf > nowSeconds)) return null;
 
-  const scope = scopeForClaims(claims, authEnv);
-  if (!scope) return null;
-  const user = userForScope(scope, claims, authEnv);
-  if (!user) return null;
-  return { user, scope, identityType: "access-jwt" };
+  const resolved = await resolveIdentity(claims, authEnv);
+  if (!resolved) return null;
+  return { user: resolved.user, scope: resolved.scope, identityType: "access-jwt" };
 }
 
 export async function resolveAuthContext(

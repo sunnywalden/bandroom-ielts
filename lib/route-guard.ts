@@ -33,7 +33,11 @@ export function evaluateOwnerScope(
   options: { write?: boolean } = {},
 ): OwnerScopeResult {
   if (!context.user) return json({ error: "sign_in_required" }, 401);
-  if (context.scope !== "owner") return json({ error: "owner_scope_required" }, 403);
+  // Multi-tenant (rev2 §3.1): "owner" is the admin/owner-of-self scope and
+  // "learner" is any other active tenant acting on its own userId. Both are
+  // scoped to context.user.userId (= the authenticated tenant); neither grants
+  // cross-tenant access. Service scopes are confined to /mcp.
+  if (context.scope !== "owner" && context.scope !== "learner") return json({ error: "owner_scope_required" }, 403);
   if (options.write && readOnlyMode()) return json({ error: "read_only" }, 403);
   return { user: context.user };
 }
