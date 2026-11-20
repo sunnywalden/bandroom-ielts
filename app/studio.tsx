@@ -118,7 +118,11 @@ export default function Studio(){
     // recordings are not left readable on a shared browser after a switch.
     // Security review: await the wipe and retry on failure rather than
     // fire-and-forget; a failed clear must not silently leave clips behind.
-    for(let attempt=0;attempt<3;attempt++){if(await clearLocalClips())break;}
+    // Only wipe on a genuine switch from a *known* previous account. On first
+    // load / same-account remount activeAccount.current is still '' — wiping
+    // there would erase the current learner's retained clips and (with a
+    // blocked IndexedDB) stall the first render behind the retry timeouts.
+    if(activeAccount.current){for(let attempt=0;attempt<3;attempt++){if(await clearLocalClips())break;}}
    }
    const previous=live.current
    const differentLesson=next.day!==previous.day||next.stage!==previous.stage||
