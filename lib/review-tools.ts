@@ -181,6 +181,14 @@ export async function callReviewTool(userId: string, name: string, args: unknown
         }
         return { content: [{ type: "text", text: JSON.stringify({ serverNow: Date.now(), tasks: hydrated }) }] };
       }
+      // INTENTIONALLY CROSS-TENANT (rev2 §7): this is the runner's system-wide
+      // queue worker. Trust boundary is the coach-runner SERVICE identity —
+      // app/mcp/route.ts enforces mcpToolAllowed(scope,name) BEFORE dispatch and
+      // the matrix grants this tool to ["coach-runner"] only (never owner/learner/
+      // coach). The snapshot is read with the CLAIMED task's own tenant
+      // (task.userId), never the caller's. P2b narrows blast radius with
+      // per-tenant service tokens; until then a leaked runner token can claim any
+      // tenant's due task — accepted for the single trusted runner (F13/F15).
       case "claim_next_review_task": {
         const input = claimNextSpec.parse(args ?? {});
         const task = await claimNextReviewTask(db, { clientRunId: input.clientRunId ?? "unknown" });
