@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
 from pathlib import Path
@@ -33,9 +34,21 @@ import run_eval as re_  # noqa: E402
 from runner import grounded_audio as ga  # noqa: E402
 from runner import prosody  # noqa: E402
 
+# Portable cache location: override with BANDROOM_G2_TUNE_CACHE, else default
+# to the acceptance tune-log under the project root (the parent of this repo).
+# No operator-specific absolute path is baked into tracked source.
 CACHE = Path(
-    "/Users/henry/Documents/Codex/2026-11-08/referenced-chatgpt-conversation-this-is-an/"
-    "work/bandroom/acceptance-2026-11-10/iteration-29/g2-robustness/tune-log/audio-cache"
+    os.environ.get(
+        "BANDROOM_G2_TUNE_CACHE",
+        str(
+            REPO.parent
+            / "acceptance-2026-11-10"
+            / "iteration-29"
+            / "g2-robustness"
+            / "tune-log"
+            / "audio-cache"
+        ),
+    )
 )
 CONDITIONS = re_.G2_CONDITIONS
 PRIMARY = re_.G2_PRIMARY_CONDITIONS
