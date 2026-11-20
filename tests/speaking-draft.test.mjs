@@ -8,7 +8,7 @@ registerHooks({resolve(specifier,ctx,next){
   }
   return next(specifier,ctx);
 }});
-const {answers,changeDraft,currentPhase,discardIfMatch,draftKey,submitted,uploadDraft,newRecordingId}=await import('../app/speaking-draft.ts');
+const {answers,changeDraft,currentPhase,discardIfMatch,draftKey,submitted,uploadDraft,newRecordingId,clearLocalClips}=await import('../app/speaking-draft.ts');
 
 // Small transactional storage boundary. Browser acceptance separately exercises native IndexedDB.
 function memoryIDB() {
@@ -69,4 +69,19 @@ test('recording stop works when only getRandomValues is available',()=>{
     assert.match(id,/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
     assert.notEqual(id,newRecordingId());
   }finally{delete crypto.randomUUID}
+});
+
+test('clearLocalClips wipes the local clip store on account switch (G11)',async t=>{
+  const map=new Map([['legacy-uuid-1',{id:'legacy-uuid-1'}],['legacy-uuid-2',{id:'legacy-uuid-2'}]]);
+  let cleared=false;
+  const idb={open(){const open={result:{close(){},transaction(){const tx={objectStore(){return {
+    clear(){cleared=true;map.clear();const r={};queueMicrotask(()=>{r.onsuccess?.();queueMicrotask(()=>tx.oncomplete?.())});return r},
+    get(k){const r={result:map.get(k)};queueMicrotask(()=>r.onsuccess?.());return r},
+  }}};return tx}}};queueMicrotask(()=>open.onsuccess());return open}};
+  Object.defineProperty(globalThis,'indexedDB',{configurable:true,value:idb});
+  t.after(()=>delete globalThis.indexedDB);
+  assert.equal(map.size,2);
+  await clearLocalClips();
+  assert.equal(cleared,true);
+  assert.equal(map.size,0);
 });

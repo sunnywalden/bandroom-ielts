@@ -389,6 +389,18 @@ export const tenantMetricsDaily = sqliteTable("tenant_metrics_daily", {
   index("tenant_metrics_day").on(table.utcDay),
 ]);
 
+// MT-5 (G4 / license gate): per-tenant model feature entitlements. Default deny:
+// a missing/revoked row means the feature is OFF for that tenant.
+export const userEntitlements = sqliteTable("user_entitlements", {
+  userId: text("user_id").notNull(),
+  feature: text("feature").notNull(), // 'detector_self_listen' | 'contrast_tts'
+  grantedBy: text("granted_by").notNull(),
+  grantedAt: integer("granted_at").notNull(),
+  revokedAt: integer("revoked_at"),
+}, table => [
+  primaryKey({ columns: [table.userId, table.feature] }),
+]);
+
 // MT-4 (S19): service-level runner heartbeat (not attributed to one tenant).
 export const serviceHeartbeats = sqliteTable("service_heartbeats", {
   serviceId: text("service_id").primaryKey(),

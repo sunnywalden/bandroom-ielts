@@ -224,7 +224,7 @@ test("key rotation refetches JWKS when a new kid appears", async () => {
   assert.equal(fetcher.state.calls, 2);
 });
 
-test("portable loopback mock works only on loopback and outside production", async () => {
+test("portable loopback mock works only with flag, on loopback, outside production", async () => {
   const headers = new Headers({
     host: "localhost:5173",
     "oai-authenticated-user-id": "local_seedy",
@@ -232,19 +232,34 @@ test("portable loopback mock works only on loopback and outside production", asy
     "oai-authenticated-user-full-name": "Seedy",
     "oai-authenticated-user-full-name-encoding": "percent-encoded-utf-8",
   });
-  const context = await resolveAuthContext(headers, {}, {production: false});
+  const mockEnv = {BANDROOM_MOCK_AUTH: "1"};
+  const context = await resolveAuthContext(headers, mockEnv, {production: false});
   assert.deepEqual(context, {
     user: {userId: "local_seedy", displayName: "Seedy", email: "seedy@sites.test", fullName: "Seedy"},
     scope: "owner",
     identityType: "mock",
   });
 
-  const production = await resolveAuthContext(headers, {}, {production: true});
+  const production = await resolveAuthContext(headers, mockEnv, {production: true});
   assert.equal(production.user, null);
 
   const remote = new Headers({...Object.fromEntries(headers), host: "study.example"});
-  const remoteContext = await resolveAuthContext(remote, {}, {production: false});
+  const remoteContext = await resolveAuthContext(remote, mockEnv, {production: false});
   assert.equal(remoteContext.user, null);
+});
+
+test("mock identity is disabled without the explicit deploy flag (S2.1 security)", async () => {
+  const headers = new Headers({
+    host: "localhost:5173",
+    "oai-authenticated-user-id": "forged",
+    "oai-authenticated-user-email": "forged@sites.test",
+  });
+  // No BANDROOM_MOCK_AUTH flag (production config): even loopback + non-production
+  // must NOT mint a mock owner identity.
+  const noFlag = await resolveAuthContext(headers, {}, {production: false});
+  assert.deepEqual(noFlag, {user: null, scope: null, identityType: null});
+  const wrongFlag = await resolveAuthContext(headers, {BANDROOM_MOCK_AUTH: "0"}, {production: false});
+  assert.deepEqual(wrongFlag, {user: null, scope: null, identityType: null});
 });
 
 test("oai-authenticated headers are not trusted for a hosted non-loopback request", async () => {

@@ -16,6 +16,7 @@ import {
 } from "./review-tasks";
 import { signLease, leaseEnabled, verifyLease, type LeasePayload } from "./lease";
 import { assertConsent, ConsentError } from "./consent";
+import { hasEntitlement } from "./entitlement";
 import { drizzle } from "drizzle-orm/d1";
 import * as schema from "@/db/schema";
 
@@ -288,7 +289,14 @@ export async function callReviewTool(
           taskId: task.id, fence: task.fence, event: "claim_next_review_task", stage: task.stage,
           outcome: "ok", clientRunId: input.clientRunId ?? null,
         });
-        return { content: [{ type: "text", text: JSON.stringify({ serverNow: Date.now(), task: { ...task, snapshot }, otherTenantsDue, lease }) }] };
+        // MT-5 (G4): carry the task tenant's model entitlements so the runner
+        // gates the NC detector / commercial TTS per tenant (fail-closed default).
+        const entDb = drizzle(db as never, { schema });
+        const entitlements = {
+          detector_self_listen: await hasEntitlement(entDb, task.userId, "detector_self_listen"),
+          contrast_tts: await hasEntitlement(entDb, task.userId, "contrast_tts"),
+        };
+        return { content: [{ type: "text", text: JSON.stringify({ serverNow: Date.now(), task: { ...task, snapshot }, otherTenantsDue, lease, entitlements }) }] };
       }
       case "renew_review_lease": {
         const input = renewSpec.parse(args);

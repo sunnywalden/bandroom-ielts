@@ -79,6 +79,11 @@ export function sites({ mockAuth = true } = {}): Plugin {
     },
     configureServer(server) {
       if (!mockAuth) return;
+      // MT-5 (S2.1): the loopback mock identity now requires an explicit
+      // deploy-time flag. Enable it ONLY in the dev server (configureServer is
+      // serve-only; production builds never run this), so the mock path is
+      // excluded by configuration in production rather than by NODE_ENV/Host.
+      process.env.BANDROOM_MOCK_AUTH = "1";
       const secure = Boolean(server.config.server.https);
 
       server.config.logger.info(`Sites local sign-in: ${localEmail}`);

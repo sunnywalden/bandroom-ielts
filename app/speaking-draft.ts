@@ -62,6 +62,32 @@ export function changeDraft(key:string,change?:(current:RecordingDraft|undefined
 }
 export function discardIfMatch(id:string){return (current:RecordingDraft|undefined)=>current?.id===id?undefined:current;}
 
+// MT-5 (G11): clear ALL locally cached recording clips. Called on sign-out /
+// account switch so a shared browser never leaves one account's voice clips
+// readable by the next account. Legacy clips were stored under bare UUIDs with
+// no account scope; wiping the store on account change is the safe remediation.
+// New draft keys are already account-scoped via draftKey().
+export function clearLocalClips():Promise<void> {
+  return new Promise((resolve)=>{
+    let settled=false,db:IDBDatabase|undefined;
+    const finish=()=>{if(settled)return;settled=true;clearTimeout(timer);db?.close();resolve();};
+    const timer=setTimeout(finish,2500);
+    try {
+      const open=indexedDB.open('ielts-speaking-audio',1);
+      open.onupgradeneeded=()=>open.result.createObjectStore('clips');
+      open.onerror=finish;open.onblocked=finish;
+      open.onsuccess=()=>{
+        db=open.result;if(settled){db.close();return;}
+        try {
+          const tx=db.transaction('clips','readwrite');
+          tx.objectStore('clips').clear();
+          tx.oncomplete=finish;tx.onabort=tx.onerror=finish;
+        }catch{finish();}
+      };
+    }catch{finish();}
+  });
+}
+
 export async function uploadDraft(draft:RecordingDraft,account:string,day:number,phase:QuestionPhase):Promise<string> {
   if(draft.audio)return draft.audio;
   if(!draft.blob)throw Error('找不到可提交的录音，请重新打开本题草稿。');

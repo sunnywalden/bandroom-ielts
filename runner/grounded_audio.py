@@ -2141,7 +2141,7 @@ def review_speaking_grounded(
     tenant_user_id: str | None = None,
     reserve_scorecard: Callable[[], bool] | None = None,
     reserve_tts: Callable[[int], bool] | None = None,
-    refund_tts: Callable[[int], None] | None = None,
+    refund_tts: Callable[[int], object] | None = None,
 ) -> Feedback:
     """Produce a validated grounded speaking review.
 

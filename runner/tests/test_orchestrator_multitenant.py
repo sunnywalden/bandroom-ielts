@@ -542,3 +542,24 @@ def test_long_run_progress_heartbeats_are_not_stale(tmp_path):
     for args, sent_at in client.heartbeats:
         assert args["status"] in ("started", "finished")
         assert args["nextExpectedAt"] >= int(sent_at * 1000)
+
+
+# MT-5 (G4 / license gate): per-tenant detector/TTS entitlement ----------------
+def test_tenant_entitlements_fail_closed_and_owner_exempt(tmp_path):
+    client = FakeQueueClient([])
+    runner = mt_runner(tmp_path, client, owner_user_id="owner-1")
+    # Owner is entitled by deployment posture.
+    assert runner._tenant_entitlements("owner-1", {}) == (True, True)
+    # Non-owner without an explicit grant: detector/TTS OFF (fail closed).
+    assert runner._tenant_entitlements("learner-x", {}) == (False, False)
+    # Claim-response entitlements are the source of truth when present.
+    task = {"entitlements": {"detector_self_listen": True, "contrast_tts": False}}
+    assert runner._tenant_entitlements("learner-x", task) == (True, False)
+    task_both = {"entitlements": {"detector_self_listen": True, "contrast_tts": True}}
+    assert runner._tenant_entitlements("learner-x", task_both) == (True, True)
+
+
+def test_tenant_entitlements_no_owner_configured_denies_all(tmp_path):
+    client = FakeQueueClient([])
+    runner = mt_runner(tmp_path, client)  # owner_user_id defaults to ""
+    assert runner._tenant_entitlements("anyone", {}) == (False, False)

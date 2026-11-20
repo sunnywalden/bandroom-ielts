@@ -243,7 +243,7 @@ try{
 
   const target=await createRuntime();
   const migrationFiles=await applyMigrations(target.db);
-  equal(migrationFiles.length,16);
+  equal(migrationFiles.length,17);
   for(const statement of plan.statements)await target.db.prepare(statement).run();
   for(const item of plan.audio){
     await target.bucket.put(item.key,item.bytes,{httpMetadata:{contentType:item.type}});

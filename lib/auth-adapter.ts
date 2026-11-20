@@ -26,6 +26,11 @@ export type AuthEnv = {
   DB?: unknown;
   BANDROOM_ALLOWED_EMAIL_DOMAINS?: string;
   BANDROOM_ADMIN_EMAILS?: string;
+  // MT-5 (S2.1): the loopback mock identity is DISABLED unless this deploy-time
+  // flag is explicitly "1". Production configs never set it, so the mock path is
+  // excluded by configuration rather than relying solely on NODE_ENV/Host (which
+  // are not reliable in Workers). Defense-in-depth on top of the loopback check.
+  BANDROOM_MOCK_AUTH?: string;
 };
 export type ResolveAuthOptions = {
   now?: number;
@@ -86,7 +91,11 @@ function safeDecodeURIComponent(value: string): string | null {
 
 // Portable sites mock: the vite plugin injects oai-authenticated-* headers on
 // loopback only. They are never trusted for a hosted/production request.
-function mockContext(requestHeaders: HeadersLike, production: boolean): AuthContext | null {
+// MT-5 (S2.1): additionally requires the explicit deploy-time BANDROOM_MOCK_AUTH=1
+// flag. Production omits the flag, so even a spoofed Host: localhost cannot mint
+// a mock owner identity. The flag is a configuration exclusion, not a runtime guess.
+function mockContext(requestHeaders: HeadersLike, production: boolean, mockAuthFlag?: string): AuthContext | null {
+  if (mockAuthFlag !== "1") return null;
   if (production || !loopbackHost(requestHeaders.get("host"))) return null;
   const userId = requestHeaders.get(USER_ID_HEADER);
   const email = requestHeaders.get(USER_EMAIL_HEADER);
@@ -308,7 +317,7 @@ export async function resolveAuthContext(
   options: ResolveAuthOptions = {},
 ): Promise<AuthContext> {
   const production = options.production ?? productionBuild();
-  const mock = mockContext(requestHeaders, production);
+  const mock = mockContext(requestHeaders, production, authEnv.BANDROOM_MOCK_AUTH);
   if (mock) return mock;
 
   // MT-2: a PAT request carries `Authorization: Bearer brpat_...` and never a

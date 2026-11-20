@@ -248,6 +248,12 @@ class RunnerConfig:
     # the next claim for that user is yielded retryably so other tenants' due
     # tasks are served first. MVP batch cap (server LRU cursor is a later step).
     tenant_batch_cap: int = 3
+    # MT-5 (G4 / license gate): the deployment owner userId. The NC-licensed
+    # detector (Stage B) and commercial TTS run ONLY for entitled tenants. The
+    # owner is entitled by the single-owner personal-use posture; other tenants
+    # need an explicit entitlement (carried in the claim response, or granted via
+    # /api/admin/entitlements). Default empty → detector/TTS fail closed for all.
+    owner_user_id: str = ""
 
     def resolved_state_dir(self) -> Path:
         return Path(os.path.expanduser(str(self.state_dir)))
@@ -352,6 +358,7 @@ def load_config(path: str | Path) -> RunnerConfig:
         ),
         tenant_client_run_id=str(runner.get("tenant_client_run_id", "runner")),
         tenant_batch_cap=int(runner.get("tenant_batch_cap", 3)),
+        owner_user_id=str(runner.get("owner_user_id", "")),
         state_dir=Path(
             os.path.expanduser(runner.get("state_dir", "~/.bandroom-runner"))
         ),
@@ -984,6 +991,22 @@ class CoachRunner:
         self._save_feedback(arguments, run_id)
         return "processed"
 
+    def _tenant_entitlements(self, user_id: str, task: Mapping[str, Any]) -> tuple[bool, bool]:
+        """MT-5 (G4 / license gate): (allow_detector, allow_tts) for a task tenant.
+
+        The claim response may carry an ``entitlements`` map (source of truth =
+        Worker user_entitlements table). Absent that, fail closed: only the
+        deployment owner (config owner_user_id) is entitled by the single-owner
+        personal-use posture; every other tenant gets detector/TTS OFF until an
+        explicit grant + license② re-evaluation. This keeps NC-licensed weights
+        from running for unentitled tenants by default.
+        """
+        ent = task.get("entitlements")
+        if isinstance(ent, Mapping):
+            return (bool(ent.get("detector_self_listen", False)), bool(ent.get("contrast_tts", False)))
+        is_owner = bool(self.config.owner_user_id) and user_id == self.config.owner_user_id
+        return (is_owner, is_owner)
+
     def _produce_grounded(
         self,
         attempt: Mapping[str, Any],
@@ -993,7 +1016,9 @@ class CoachRunner:
         tenant_user_id: str | None = None,
         reserve_scorecard: Callable[[], bool] | None = None,
         reserve_tts: Callable[[int], bool] | None = None,
-        refund_tts: Callable[[int], None] | None = None,
+        refund_tts: Callable[[int], object] | None = None,
+        allow_detector: bool = True,
+        allow_tts: bool = True,
     ) -> Produced:
         """Pure grounded production over already-read recording bytes.
 
@@ -1009,12 +1034,25 @@ class CoachRunner:
         """
         recording_id = str(attempt["recordingId"])
         started = time.time()
+        # MT-5 (G4): the NC detector / commercial TTS run only for entitled
+        # tenants. Override the grounded flags for this task without mutating the
+        # shared config (the owner path passes allow_*=True and is unchanged).
+        task_config = self.config
+        if not allow_detector or not allow_tts:
+            task_config = replace(
+                self.config,
+                grounded=replace(
+                    self.config.grounded,
+                    self_listen_enabled=self.config.grounded.self_listen_enabled and allow_detector,
+                    contrast_audio_enabled=self.config.grounded.contrast_audio_enabled and allow_tts,
+                ),
+            )
         with tempfile.TemporaryDirectory(prefix="bandroom-grounded-") as directory:
             produced = grounded_audio.review_speaking_grounded(
                 raw,
                 attempt,
                 day,
-                config=self.config,
+                config=task_config,
                 model=self.model,
                 workdir=Path(directory),
                 logger=self._logger,
@@ -1277,11 +1315,14 @@ class CoachRunner:
             # and up to self_listen_max_n*2 TTS calls. Reserve each bucket under
             # the SAME task id so a retryable failure refunds the whole attempt.
             tts_micro_per_call = int(round(self.config.tts_cost_cny * MICRO))
+            allow_detector, allow_tts = self._tenant_entitlements(user_id, task)
             produced = self._produce_grounded(
                 attempt,
                 day,
                 raw,
                 tenant_user_id=user_id,
+                allow_detector=allow_detector,
+                allow_tts=allow_tts,
                 reserve_scorecard=lambda: budget.reserve(
                     user_id, self.config.text_cost_cny, task_id=task_id
                 ),

@@ -15,6 +15,7 @@ import AttemptFeedback,{FeedbackProvider,UnmatchedFeedback,FeedbackIdentificatio
 import {PronunciationProfilePanel} from './pronunciation-coach'
 import {requestJSON} from './request-json'
 import {newClientId} from './client-id'
+import {clearLocalClips} from './speaking-draft'
 import type {AutomationStatus,CoachFeedback,ReviewLink,ReviewTaskStatus} from './feedback-model'
 import {useDraft} from './use-draft'
 
@@ -113,6 +114,9 @@ export default function Studio(){
    const switched=activeAccount.current!==data.account, changed=rev.current!==data.revision
    if(switched){
     registerExtraLessons({});setFeedback([]);setReviewLinks([]);setHistoryDay(next.day);navigate('home');setReply('');setResult(null)
+    // MT-5 (G11): wipe locally cached voice clips so the previous account's
+    // recordings are not left readable on a shared browser after a switch.
+    void clearLocalClips()
    }
    const previous=live.current
    const differentLesson=next.day!==previous.day||next.stage!==previous.stage||

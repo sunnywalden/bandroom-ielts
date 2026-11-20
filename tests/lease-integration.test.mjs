@@ -21,6 +21,7 @@ function statement(query, args = []) {
     bind: (...values) => statement(query, [...args, ...values]),
     async first() { const s = sql.prepare(query); const row = s.all(...args)[0]; return row ? { ...row } : null; },
     async all() { const s = sql.prepare(query); return { results: s.all(...args).map(row => ({ ...row })) }; },
+    async raw() { const s = sql.prepare(query); return s.all(...args).map(row => Object.values(row)); },
     async run() {
       const s = sql.prepare(query); const rows = s.all(...args);
       return { results: rows, meta: { changes: Number(sql.prepare("SELECT changes() AS n").get().n) } };

@@ -109,8 +109,8 @@ try{
 
   const db=await createRuntime();
   const migrationFiles=await applyMigrations(db);
-  equal(migrationFiles.length,16,"sixteen migrations");
-  equal(migrationFiles.at(-1),"0015_mt4_tenant_metrics.sql");
+  equal(migrationFiles.length,17,"seventeen migrations");
+  equal(migrationFiles.at(-1),"0016_mt5_model_entitlements.sql");
   // The new objects are present and the migration is additive.
   for(const table of ["personal_calibration","calibration_candidates","calibration_events"]){
     const row=await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").bind(table).first();
