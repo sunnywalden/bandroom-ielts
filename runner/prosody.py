@@ -1347,19 +1347,33 @@ def vad_pauses(
 ) -> PauseDetection:
     """Speech/nonspeech timeline from Silero VAD; pauses = inter-speech gaps.
 
-    Robust to mild additive noise and lossy codecs (validated by cross-codec /
-    noise retest). Requires 16 kHz mono; the ONNX model is loaded lazily.
+    Speech detection verified on real-speech fixtures; cross-codec robustness
+    is partial (ogg stable, mp3/aac borderline, noise stress not met — see
+    _calibration_status_for_pause_mode). Requires 16 kHz mono; the ONNX model
+    is loaded lazily.
+
+    Calling convention follows the official silero-vad wrapper: each call
+    prepends the previous chunk's last 64 samples as context, so the model
+    input is 64 + 512 = 576 samples at 16 kHz. The ONNX input shape is dynamic
+    ([None, None]); feeding bare 512-sample chunks does NOT raise — it silently
+    collapses every probability to ~0 and yields an empty speech timeline
+    (the 2026-11-19 production outage). Locked down by
+    runner/tests/test_vad_speech_detection.py.
     """
     if sample_rate != 16000:
         raise ValueError("vad_pauses requires 16 kHz mono audio")
     sess = _vad_session()
     chunk = 512
+    context_size = 64
+    context = np.zeros((1, context_size), dtype=np.float32)
     state = np.zeros((2, 1, 128), dtype=np.float32)
     sr = np.array(16000, dtype=np.int64)
     probs: list[float] = []
     for first in range(0, len(samples) - chunk + 1, chunk):
         block = samples[first:first + chunk].astype(np.float32)[None, :]
-        out, state = sess.run(None, {"input": block, "state": state, "sr": sr})
+        model_input = np.concatenate([context, block], axis=1)
+        out, state = sess.run(None, {"input": model_input, "state": state, "sr": sr})
+        context = model_input[:, -context_size:]
         probs.append(float(out[0][0]))
     frame_s = chunk / sample_rate
     # Hysteresis segmentation into speech runs.
@@ -1398,10 +1412,18 @@ def _calibration_status_for_pause_mode(
     word_source: str, word_gated: bool, vad: bool = False
 ) -> tuple[str, str]:
     if vad:
-        return STATUS_CALIBRATED, (
-            "Learned-VAD (Silero) pause timeline; robustness validated by "
-            "cross-codec/additive-noise retest (held-out). Pauses are inter-speech "
-            "gaps; mild-degradation scope disclosed."
+        # 2026-11-19: the earlier "calibrated / retest=1.0" claim was vacuous
+        # (empty timelines compared 0==0 while the call convention was broken).
+        # Non-vacuous retest on 3 held-out speakers: ogg 3/3, mp3 1/3, aac 1/3,
+        # noise 0/3 under the frozen 2% pause-duration gate (consistency 0.4167
+        # < 0.9). Speech detection itself is verified on real-speech fixtures,
+        # but accuracy vs human pause annotation is NOT established, so these
+        # metrics are consistency_checked, never presentable as measurements.
+        return STATUS_CONSISTENCY, (
+            "Learned-VAD (Silero) pause timeline; speech detection verified on "
+            "real-speech fixtures. Cross-codec robustness retest (held-out, "
+            "non-vacuous): ogg 3/3, mp3 1/3, aac 1/3, noise 0/3 — frozen G2 gate "
+            "NOT met. Accuracy vs human pause annotation unestablished."
         )
     if word_gated:
         if word_source == "human_annotation":
