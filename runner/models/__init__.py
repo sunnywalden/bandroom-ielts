@@ -28,6 +28,12 @@ def build_model(config: Any) -> CoachModel:
         "audio_model": getattr(config, "audio_model"),
         "text_timeout": getattr(config, "text_timeout"),
         "audio_timeout": getattr(config, "audio_timeout"),
+        "model_max_retries": getattr(config, "model_max_retries", 3),
+        "model_backoff_base_seconds": getattr(config, "model_backoff_base_seconds", 1.0),
+        "circuit_breaker_threshold": getattr(config, "circuit_breaker_threshold", 5),
+        "circuit_breaker_cooldown_seconds": getattr(
+            config, "circuit_breaker_cooldown_seconds", 60.0
+        ),
     }
     if provider == "qwen":
         return QwenAdapter(getattr(config, "api_key"), **common)

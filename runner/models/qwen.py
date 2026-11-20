@@ -16,6 +16,9 @@ No network in tests: ``transport`` is injectable.
 from __future__ import annotations
 
 import json
+import random
+import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable, Mapping
@@ -28,9 +31,77 @@ DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_TEXT_MODEL = "qwen3.8-max"
 DEFAULT_AUDIO_MODEL = "qwen3.8-omni-flash"
 
+# F14: transient provider failures (HTTP 429 / 5xx / transport) are retried at
+# the model layer with exponential backoff + jitter. This keeps one task from
+# burning all of its server claim attempts on a short provider blip.
+DEFAULT_MODEL_MAX_RETRIES = 3
+DEFAULT_MODEL_BACKOFF_BASE_SECONDS = 1.0
+DEFAULT_CIRCUIT_BREAKER_THRESHOLD = 5
+DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 60.0
+
 ModelTransport = Callable[
     [str, Mapping[str, str], bytes, float], tuple[int, Mapping[str, str], bytes]
 ]
+
+
+class CircuitBreaker:
+    """Consecutive-provider-failure breaker with a cooldown window.
+
+    Each failed provider attempt counts. Once ``threshold`` consecutive
+    failures are seen, requests fail fast (retryable ``model_circuit_open``) for
+    ``cooldown_seconds``; the next request after the cooldown is a trial and a
+    failure starts the count again. A successful provider response closes the
+    circuit and resets the counter.
+    """
+
+    def __init__(
+        self,
+        *,
+        threshold: int = DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
+        cooldown_seconds: float = DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self._threshold = max(1, int(threshold))
+        self._cooldown = max(0.0, float(cooldown_seconds))
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._failures = 0
+        self._opened_at: float | None = None
+
+    @property
+    def failures(self) -> int:
+        with self._lock:
+            return self._failures
+
+    @property
+    def is_open(self) -> bool:
+        with self._lock:
+            return self._open_locked()
+
+    def _open_locked(self) -> bool:
+        if self._opened_at is None:
+            return False
+        if self._clock() - self._opened_at >= self._cooldown:
+            # Half-open trial: allow one request; a failure re-opens below.
+            self._opened_at = None
+            self._failures = 0
+            return False
+        return True
+
+    def allow_request(self) -> bool:
+        with self._lock:
+            return not self._open_locked()
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._failures = 0
+            self._opened_at = None
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self._failures += 1
+            if self._failures >= self._threshold:
+                self._opened_at = self._clock()
 
 
 def urllib_model_transport(
@@ -59,6 +130,13 @@ class QwenAdapter:
         text_timeout: float = 120.0,
         audio_timeout: float = 240.0,
         transport: ModelTransport | None = None,
+        model_max_retries: int = DEFAULT_MODEL_MAX_RETRIES,
+        model_backoff_base_seconds: float = DEFAULT_MODEL_BACKOFF_BASE_SECONDS,
+        circuit_breaker_threshold: int = DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
+        circuit_breaker_cooldown_seconds: float = DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
+        jitter: Callable[[], float] = random.random,
+        clock: Callable[[], float] = time.monotonic,
     ):
         if not api_key:
             raise ModelError("missing_api_key", "DashScope API key is not configured", retryable=False)
@@ -69,6 +147,15 @@ class QwenAdapter:
         self.text_timeout = text_timeout
         self.audio_timeout = audio_timeout
         self._transport: ModelTransport = transport or urllib_model_transport
+        self.model_max_retries = max(0, int(model_max_retries))
+        self.model_backoff_base_seconds = max(0.0, float(model_backoff_base_seconds))
+        self._sleep = sleep
+        self._jitter = jitter
+        self.circuit_breaker = CircuitBreaker(
+            threshold=circuit_breaker_threshold,
+            cooldown_seconds=circuit_breaker_cooldown_seconds,
+            clock=clock,
+        )
         # Populated by ``_post``; the grounded audio path logs it in the same
         # cost/usage style as the rest of the runner.  Never contains secrets.
         self.last_usage: dict[str, Any] | None = None
@@ -87,6 +174,66 @@ class QwenAdapter:
             body["response_format"] = {"type": "json_object"}
         return body
 
+    def _backoff_sleep(self, attempt: int) -> None:
+        """Exponential backoff with bounded jitter: base, 2x, 4x, ..."""
+        delay = self.model_backoff_base_seconds * (2 ** max(0, attempt))
+        if delay > 0:
+            jitter = max(0.0, min(1.0, float(self._jitter())))
+            delay += jitter * self.model_backoff_base_seconds
+            self._sleep(delay)
+
+    def _transport_with_retry(
+        self,
+        url: str,
+        headers: Mapping[str, str],
+        body: bytes,
+        timeout: float,
+    ) -> tuple[int, Mapping[str, str], bytes]:
+        """Call the provider, retrying transient failures at the model layer.
+
+        HTTP 429 / 5xx and retryable transport errors are retried with
+        exponential backoff. Once the provider looks down for
+        ``circuit_breaker_threshold`` consecutive failures the breaker opens and
+        further calls fail fast with a retryable ``model_circuit_open`` error,
+        so queued tasks requeue instead of hammering the provider.
+        """
+        attempt = 0
+        retries = self.model_max_retries
+        while True:
+            if not self.circuit_breaker.allow_request():
+                raise ModelError(
+                    "model_circuit_open",
+                    "model provider circuit breaker is open; failing fast",
+                    retryable=True,
+                )
+            try:
+                status, response_headers, response_body = self._transport(
+                    url, headers, body, timeout
+                )
+            except ModelError as exc:
+                if not exc.retryable:
+                    raise
+                self.circuit_breaker.record_failure()
+                if attempt >= retries:
+                    raise
+                self._backoff_sleep(attempt)
+                attempt += 1
+                continue
+            if status == 429 or status >= 500:
+                self.circuit_breaker.record_failure()
+                if attempt >= retries:
+                    raise ModelError(
+                        "model_unavailable",
+                        f"model provider returned HTTP {status} after {attempt + 1} attempt(s)",
+                    )
+                self._backoff_sleep(attempt)
+                attempt += 1
+                continue
+            # Any other status means the provider is reachable. Auth and other
+            # 4xx responses are deterministic, so they close the circuit.
+            self.circuit_breaker.record_success()
+            return status, response_headers, response_body
+
     def _post(
         self,
         model: str,
@@ -104,14 +251,15 @@ class QwenAdapter:
             "accept": "application/json",
             "authorization": f"Bearer {self.api_key}",
         }
-        status, _headers, response_body = self._transport(
+        status, _headers, response_body = self._transport_with_retry(
             f"{self.base_url}/chat/completions", headers, body, timeout
         )
         if status in (401, 403):
+            # The provider answered; this is a credential problem, not an
+            # outage, so it neither retries nor trips the circuit.
             raise ModelError("model_auth_failed", "model provider rejected the API key", retryable=False)
-        if status == 429 or status >= 500:
-            raise ModelError("model_unavailable", f"model provider returned HTTP {status}")
         if status >= 400:
+            # 429/5xx were retried (and raised) by _transport_with_retry.
             raise ModelError(
                 "model_request_rejected",
                 f"model provider rejected the request (HTTP {status})",

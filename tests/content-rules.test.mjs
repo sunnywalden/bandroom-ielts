@@ -42,7 +42,7 @@ const d1 = {
   },
 };
 
-globalThis.__contentEnv = {};
+globalThis.__contentEnv = {BANDROOM_CONSENT_GATE: "off"}; // fixture: consent tested separately
 globalThis.__contentDb = {$client: d1};
 const mock = source => ({url: "data:text/javascript," + encodeURIComponent(source), shortCircuit: true});
 registerHooks({

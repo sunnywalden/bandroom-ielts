@@ -26,6 +26,7 @@ globalThis.testCloud={
 }
 globalThis.user=null
 globalThis.testCloud.BANDROOM_CONSENT_GATE='off'; // fixture: consent tested separately
+globalThis.testCloud.BANDROOM_QUOTA_GATE='off'; // fixture: quota tested separately
 registerHooks({resolve(spec,ctx,next){
   const mock=src=>({url:'data:text/javascript,'+encodeURIComponent(src),shortCircuit:true})
   if(spec==='cloudflare:workers')return mock('export const env=globalThis.testCloud')

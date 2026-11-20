@@ -178,3 +178,107 @@ def test_openai_stub_refuses_unverified_model_names():
         adapter.complete_text({"id": "x", "response": "I go."})
     assert caught.value.code == "s2_model_unverified"
     assert caught.value.retryable is False
+
+class SequenceTransport:
+    """Return statuses in order; 200 yields a valid plain-text completion."""
+
+    def __init__(self, statuses):
+        self.statuses = list(statuses)
+        self.calls = 0
+
+    def __call__(self, url, headers, body, timeout):
+        status = self.statuses[min(self.calls, len(self.statuses) - 1)]
+        self.calls += 1
+        if status == 200:
+            return _chat_response("一、重试成功")
+        return status, {"content-type": "application/json"}, b'{"error":"transient"}'
+
+
+def test_429_backs_off_exponentially_then_succeeds():
+    transport = SequenceTransport([429, 429, 200])
+    sleeps = []
+    adapter = QwenAdapter(
+        "sk-test", transport=transport, sleep=sleeps.append, jitter=lambda: 0.0,
+        model_max_retries=3,
+    )
+    assert adapter.complete_grounded("系统规则", "证据") == "一、重试成功"
+    assert transport.calls == 3
+    assert sleeps == [1.0, 2.0]  # base, then 2x; success stops the backoff
+
+
+def test_5xx_exhausts_retries_and_raises_retryable_model_error():
+    transport = SequenceTransport([503])
+    sleeps = []
+    adapter = QwenAdapter(
+        "sk-test", transport=transport, sleep=sleeps.append, jitter=lambda: 0.0,
+        model_max_retries=2,
+    )
+    with pytest.raises(ModelError) as caught:
+        adapter.complete_grounded("系统规则", "证据")
+    assert caught.value.code == "model_unavailable"
+    assert caught.value.retryable is True
+    assert transport.calls == 3  # initial + 2 retries
+    assert sleeps == [1.0, 2.0]
+
+
+def test_circuit_breaker_opens_after_threshold_and_fails_fast():
+    transport = SequenceTransport([503])
+    sleeps = []
+    adapter = QwenAdapter(
+        "sk-test", transport=transport, sleep=sleeps.append, jitter=lambda: 0.0,
+        model_max_retries=0, circuit_breaker_threshold=2,
+        circuit_breaker_cooldown_seconds=60.0,
+    )
+    for _ in range(2):
+        with pytest.raises(ModelError) as caught:
+            adapter.complete_grounded("系统规则", "证据")
+        assert caught.value.code == "model_unavailable"
+    assert transport.calls == 2
+
+    # Open: fail fast without touching the provider (queued tasks requeue).
+    with pytest.raises(ModelError) as caught:
+        adapter.complete_grounded("系统规则", "证据")
+    assert caught.value.code == "model_circuit_open"
+    assert caught.value.retryable is True
+    assert transport.calls == 2
+
+
+def test_circuit_breaker_recovers_after_cooldown():
+    clock = {"t": 100.0}
+    transport = SequenceTransport([503, 200])
+    adapter = QwenAdapter(
+        "sk-test", transport=transport, sleep=lambda _delay: None,
+        jitter=lambda: 0.0, model_max_retries=0,
+        circuit_breaker_threshold=1, circuit_breaker_cooldown_seconds=60.0,
+        clock=lambda: clock["t"],
+    )
+    with pytest.raises(ModelError) as caught:
+        adapter.complete_grounded("系统规则", "证据")
+    assert caught.value.code == "model_unavailable"
+
+    with pytest.raises(ModelError) as caught:
+        adapter.complete_grounded("系统规则", "证据")
+    assert caught.value.code == "model_circuit_open"
+    assert transport.calls == 1
+
+    clock["t"] += 61.0
+    assert adapter.complete_grounded("系统规则", "证据") == "一、重试成功"
+    assert transport.calls == 2
+    assert adapter.circuit_breaker.failures == 0
+
+
+def test_auth_failure_does_not_retry_or_trip_the_breaker():
+    transport = SequenceTransport([401])
+    sleeps = []
+    adapter = QwenAdapter(
+        "sk-test", transport=transport, sleep=sleeps.append, jitter=lambda: 0.0,
+        model_max_retries=3, circuit_breaker_threshold=1,
+    )
+    with pytest.raises(ModelError) as caught:
+        adapter.complete_text(
+            {"id": "v2:write:0:abc", "day": 12, "stage": "write", "response": "I go."}
+        )
+    assert caught.value.code == "model_auth_failed"
+    assert caught.value.retryable is False
+    assert transport.calls == 1 and sleeps == []
+    assert adapter.circuit_breaker.is_open is False

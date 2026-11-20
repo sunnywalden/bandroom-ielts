@@ -24,6 +24,18 @@ function voiceToolNeedsConsent(name: string, args: unknown): boolean {
 }
 export async function POST(request:Request) {
   if (crossOrigin(request)) return json({error:"invalid_origin"},403);
+  // MT-4 (S12): bound anonymous/discovery spam per source IP (generous for normal
+  // connector use; the authenticated runner is well under this). Fail-open if DB
+  // is absent so a binding outage does not take down MCP.
+  const ip=request.headers.get("CF-Connecting-IP")||request.headers.get("X-Forwarded-For")||"unknown";
+  const mcpEnv=env as {DB?:unknown;BANDROOM_QUOTA_GATE?:string};
+  if(mcpEnv.DB){
+    const {rateLimit,quotaEnabled}=await import("@/lib/quota");
+    if(quotaEnabled(mcpEnv)){
+      const ok=await rateLimit(mcpEnv.DB as never,`mcp:ip:${ip}`,240,60_000);
+      if(!ok) return json({error:"rate_limited",retryAfter:60},429);
+    }
+  }
   const body=await limitedBody(request,128*1024);
   if(body instanceof Response) return body;
   let message;

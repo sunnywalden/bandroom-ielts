@@ -33,6 +33,7 @@ globalThis.testCloud={
     catch(e){sql.exec('ROLLBACK');throw e;}
   }},
   BUCKET:{async put(){return null},async head(){return null},async get(){return null}},
+  BANDROOM_CONSENT_GATE:'off',BANDROOM_QUOTA_GATE:'off', // fixture: gates tested separately
 };
 globalThis.user=null;
 registerHooks({resolve(spec,ctx,next){

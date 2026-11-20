@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { requireUserScope } from "@/lib/route-guard";
 import { consentGate, crossOrigin, json, limitedBody } from "../shared";
 import { uuid } from "@/lib/recording-recovery";
+import { checkAudioQuota, QuotaError, quotaEnabled, quotaResponse } from "@/lib/quota";
 
 export const dynamic = "force-dynamic";
 
@@ -37,6 +38,11 @@ export async function POST(request: Request) {
   const bytes = await limitedBody(request, 12 * 1024 * 1024);
   if (bytes instanceof Response) return bytes;
   if (!audioFormat(type, bytes)) return json({ error: "unsupported_audio" }, 415);
+  // MT-4 (B6): bound per-tenant daily audio upload volume.
+  if (env.DB && quotaEnabled(env)) {
+    try { await checkAudioQuota(env.DB, user.userId, bytes.byteLength); }
+    catch (error) { if (error instanceof QuotaError) return quotaResponse(error); throw error; }
+  }
   const day=request.headers.get("X-Bandroom-Day"),phase=request.headers.get("X-Bandroom-Phase"),attempt=request.headers.get("X-Bandroom-Attempt");
   if(day!==null||phase!==null||attempt!==null){
     if(!day||!/^\d{2}$/.test(day)||Number(day)<11||Number(day)>62||(phase!=="part2"&&phase!=="followup")||!attempt||!uuid.test(attempt))

@@ -58,6 +58,7 @@ from .models import Feedback, ModelError, build_model
 from .models.base import CoachModel
 from .models.qwen import DASHSCOPE_BASE_URL
 from .tenant_queue import (
+    MICRO,
     PermanentTaskError,
     TaskYielded,
     UserBudget,
@@ -198,12 +199,23 @@ class RunnerConfig:
     # [240, 300] s.  p95 must still be measured before enabling.
     grounded_text_timeout: float = grounded_audio.GROUNDED_TEXT_TIMEOUT_SECONDS
     audio_timeout: float = 240.0
+    # F14: transient provider failures retry at the model layer (429/5xx /
+    # transport) before raising a retryable ModelError; a consecutive-failure
+    # circuit breaker then fails fast for a cooldown so queued tasks requeue.
+    model_max_retries: int = 3
+    model_backoff_base_seconds: float = 1.0
+    circuit_breaker_threshold: int = 5
+    circuit_breaker_cooldown_seconds: float = 60.0
     automation_id: str = "bandroom-coach-runner"
     generation: int = 1
     interval_seconds: int = 300
     daily_cap_cny: float = 20.0
     text_cost_cny: float = 0.05
     audio_cost_cny: float = 0.20
+    # F3: canonical TTS contrast audio is billed per synthesis call. DashScope
+    # does not publish a per-call price in this contract; this is a conservative
+    # ESTIMATE that must be reconciled with the provider console.
+    tts_cost_cny: float = 0.02
     max_attempts: int = 3
     state_dir: Path = field(default_factory=lambda: Path("~/.bandroom-runner"))
     chunk_bytes: int = 24576
@@ -310,12 +322,19 @@ def load_config(path: str | Path) -> RunnerConfig:
         text_timeout=float(model.get("text_timeout_seconds", 120)),
         grounded_text_timeout=grounded_text_timeout,
         audio_timeout=float(model.get("audio_timeout_seconds", 240)),
+        model_max_retries=int(model.get("model_max_retries", 3)),
+        model_backoff_base_seconds=float(model.get("model_backoff_base_seconds", 1.0)),
+        circuit_breaker_threshold=int(model.get("circuit_breaker_threshold", 5)),
+        circuit_breaker_cooldown_seconds=float(
+            model.get("circuit_breaker_cooldown_seconds", 60.0)
+        ),
         automation_id=runner.get("automation_id", "bandroom-coach-runner"),
         generation=int(runner.get("generation", 1)),
         interval_seconds=int(runner.get("interval_seconds", 300)),
         daily_cap_cny=float(budget.get("daily_cap_cny", 20)),
         text_cost_cny=float(budget.get("text_cost_cny", 0.05)),
         audio_cost_cny=float(budget.get("audio_cost_cny", 0.20)),
+        tts_cost_cny=float(budget.get("tts_cost_cny", 0.02)),
         max_attempts=int(runner.get("max_attempts", 3)),
         coach_audio=bool(runner.get("coach_audio", True)),
         coach_audio_mode=mode,
@@ -645,6 +664,9 @@ class CoachRunner:
         self._tenant_budget: UserBudget | None = None
         self._fair_last_user: str | None = None
         self._fair_run_length = 0
+        # F9 progress heartbeats: keep nextExpectedAt honest during a long run.
+        self._queue_started_at = 0
+        self._queue_processed = 0
 
     # -- helpers ----------------------------------------------------------
     def _now_ms(self) -> int:
@@ -657,6 +679,26 @@ class CoachRunner:
         record = {"event": event, "at": self._now_ms(), **fields}
         self._logger.info(json.dumps(record, ensure_ascii=False, sort_keys=True))
 
+    def _next_expected_ms(self, *, horizon_ms: int | None = None) -> int:
+        """When the scheduler should expect the next heartbeat.
+
+        Always relative to *now* (not startedAt): during a long backlog run the
+        old ``startedAt + interval`` value went stale while the runner was still
+        busy, which the page rendered as "disconnected" (F9).
+        """
+        interval_ms = max(1, int(self.config.interval_seconds)) * 1000
+        return self._now_ms() + max(interval_ms, int(horizon_ms or 0))
+
+    def _long_task_horizon_ms(self) -> int:
+        """Upper bound for one grounded task: text + scorecard + TTS/detector."""
+        return int(
+            max(
+                float(self.config.interval_seconds),
+                float(self.config.grounded_text_timeout) + 120.0,
+            )
+            * 1000
+        )
+
     def _send_heartbeat(
         self,
         run_id: str,
@@ -665,6 +707,7 @@ class CoachRunner:
         started_at: int,
         finished_at: int | None = None,
         detail: str | None = None,
+        next_expected_at: int | None = None,
     ) -> None:
         payload = heartbeat_payload(
             automation_id=self.config.automation_id,
@@ -673,7 +716,11 @@ class CoachRunner:
             status=status,
             started_at=started_at,
             finished_at=finished_at,
-            next_expected_at=started_at + self.config.interval_seconds * 1000,
+            next_expected_at=(
+                next_expected_at
+                if next_expected_at is not None
+                else self._next_expected_ms()
+            ),
             detail=detail[:500] if detail else detail,
         )
         try:
@@ -684,6 +731,30 @@ class CoachRunner:
             raise
         except Exception as exc:  # heartbeat is observability, not the work
             self._log("heartbeat_failed", runId=run_id, code=_error_code(exc))
+
+    def _send_progress_heartbeat(
+        self,
+        run_id: str,
+        started_at: int,
+        *,
+        processed: int,
+        detail: str,
+        horizon_ms: int | None = None,
+    ) -> None:
+        """Re-announce "started" with a fresh nextExpectedAt while still busy.
+
+        The server contract only allows started|finished|failed, so progress
+        uses ``started`` (same startedAt) with a ``running`` detail and a
+        nextExpectedAt measured from now. This does not add an MCP tool.
+        """
+        with contextlib.suppress(Exception):
+            self._send_heartbeat(
+                run_id,
+                "started",
+                started_at=started_at,
+                detail=detail,
+                next_expected_at=self._next_expected_ms(horizon_ms=horizon_ms),
+            )
 
     def _reserve(self, kind: str) -> bool:
         costs = {
@@ -920,15 +991,21 @@ class CoachRunner:
         raw: bytes,
         *,
         tenant_user_id: str | None = None,
+        reserve_scorecard: Callable[[], bool] | None = None,
+        reserve_tts: Callable[[int], bool] | None = None,
+        refund_tts: Callable[[int], None] | None = None,
     ) -> Produced:
         """Pure grounded production over already-read recording bytes.
 
         Stage A/B calibrated prosody coach, no phoneme assertions. The dominant
         cost is the text-model call; the caller reserves the grounded budget
-        bucket before inference. Stage B (detector candidates) is optional and
-        fail-closed inside ``grounded_audio``. ``tenant_user_id`` binds the
-        per-user pause calibration to the claimed task's tenant (queue path);
-        the owner path leaves it None (session-derived).
+        bucket before inference. The scorecard is a SECOND text call and TTS
+        contrast audio is billed per synthesis, so both get their own reserves
+        via the optional callbacks (the owner path keeps its state-ledger
+        reservation and does not track TTS). Stage B (detector candidates) is
+        optional and fail-closed inside ``grounded_audio``. ``tenant_user_id``
+        binds the per-user pause calibration to the claimed task's tenant (queue
+        path); the owner path leaves it None (session-derived).
         """
         recording_id = str(attempt["recordingId"])
         started = time.time()
@@ -941,7 +1018,13 @@ class CoachRunner:
                 model=self.model,
                 workdir=Path(directory),
                 logger=self._logger,
-                reserve_scorecard=lambda: self._reserve("text"),
+                reserve_scorecard=(
+                    reserve_scorecard
+                    if reserve_scorecard is not None
+                    else (lambda: self._reserve("text"))
+                ),
+                reserve_tts=reserve_tts,
+                refund_tts=refund_tts,
                 tenant_user_id=tenant_user_id,
             )
         self._log(
@@ -1168,9 +1251,20 @@ class CoachRunner:
         if self._fairness_should_yield(user_id, bool(task.get("_otherTenantsDue", True))):
             raise TaskYielded("per_user_batch_cap")
 
+        # F9: a grounded task can run 240-900 s. Announce that we are BUSY with
+        # a long horizon before the model call so nextExpectedAt never goes
+        # stale mid-task (the old startedAt+interval value did).
+        self._send_progress_heartbeat(
+            run_id,
+            self._queue_started_at,
+            processed=self._queue_processed,
+            detail=f"running task={task_id}",
+            horizon_ms=self._long_task_horizon_ms(),
+        )
+
         if kind == "speaking":
             cost = self.config.grounded_cost_cny
-            if not budget.reserve(user_id, cost):
+            if not budget.reserve(user_id, cost, task_id=task_id):
                 return False
             raw = self._read_task_recording(task, run_id)
             self._log(
@@ -1179,8 +1273,24 @@ class CoachRunner:
                 bytes=len(raw),
                 sha256=audio_module.sha256_bytes(raw),
             )
+            # F3: the grounded path also makes a separate scorecard text call
+            # and up to self_listen_max_n*2 TTS calls. Reserve each bucket under
+            # the SAME task id so a retryable failure refunds the whole attempt.
+            tts_micro_per_call = int(round(self.config.tts_cost_cny * MICRO))
             produced = self._produce_grounded(
-                attempt, day, raw, tenant_user_id=user_id
+                attempt,
+                day,
+                raw,
+                tenant_user_id=user_id,
+                reserve_scorecard=lambda: budget.reserve(
+                    user_id, self.config.text_cost_cny, task_id=task_id
+                ),
+                reserve_tts=lambda count: budget.reserve_micro(
+                    user_id, tts_micro_per_call * int(count), task_id=task_id
+                ),
+                refund_tts=lambda count: budget.refund_reserved(
+                    user_id, tts_micro_per_call * int(count), task_id=task_id
+                ),
             )
             # A2 integrity: recordingSha256 <-> R2 digest <-> snapshot is enforced
             # server-side; no decoded-PCM checkpoint (the transfer endpoint is
@@ -1196,7 +1306,7 @@ class CoachRunner:
             )
         else:
             cost = self.config.text_cost_cny
-            if not budget.reserve(user_id, cost):
+            if not budget.reserve(user_id, cost, task_id=task_id):
                 return False
             produced = self._produce_text(attempt, day)
             arguments = produced.complete_args(
@@ -1245,6 +1355,8 @@ class CoachRunner:
         self._queue_run_id = run_id
         report = RunReport(run_id=run_id)
         started_at = self._now_ms()
+        self._queue_started_at = started_at
+        self._queue_processed = 0
         budget = UserBudget(
             self.config.resolved_state_dir() / "tenant_budget.json",
             self.config.tenant_per_user_cap_cny,
@@ -1281,6 +1393,15 @@ class CoachRunner:
                     break
                 if outcome == "processed":
                     report.processed += 1
+                    self._queue_processed = report.processed
+                    # F9: refresh nextExpectedAt after each task so a large
+                    # backlog never looks like a missing runner.
+                    self._send_progress_heartbeat(
+                        run_id,
+                        started_at,
+                        processed=report.processed,
+                        detail=f"running processed={report.processed}",
+                    )
                 elif outcome == "capped":
                     report.capped += 1
                 elif outcome == "yielded":
