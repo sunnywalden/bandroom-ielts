@@ -156,6 +156,35 @@ def test_transport_coercion_accepts_transcript_and_scorecard():
     assert out["scorecard"]["schema"] == sc.SCHEMA
 
 
+def test_drill_tts_enrichment_fail_closed():
+    from runner.contrast_audio import enrich_drills
+
+    drills = [{"quote": TEXT, "improved": "I watched a short clip.", "focus_zh": "练"}]
+    # Disabled: no network, no contrast key.
+    summary = enrich_drills(drills, enabled=False)
+    assert summary["attempted"] == 0
+    assert "contrast_audio" not in drills[0]
+    # Enabled without key: fail closed before any call.
+    summary = enrich_drills(drills, enabled=True, api_key="")
+    assert summary["unavailable"] == 1
+    assert drills[0]["contrast_audio"]["status"] == "unavailable"
+
+    def transport(body, headers, timeout):
+        assert body["input"]["text"] == "I watched a short clip."
+        return {"output": {"audio": {"url": "https://tts.example/a.mp3", "id": "a1"}}}
+
+    summary = enrich_drills(drills, enabled=True, transport=transport, api_key="k")
+    assert summary["succeeded"] == 1
+    assert drills[0]["contrast_audio"]["url"] == "https://tts.example/a.mp3"
+
+    def broken(body, headers, timeout):
+        raise RuntimeError("tts down")
+
+    summary = enrich_drills(drills, enabled=True, transport=broken, api_key="k")
+    assert summary["unavailable"] == 1
+    assert drills[0]["contrast_audio"]["status"] == "unavailable"
+
+
 def test_transport_rejects_pronunciation_band_and_bad_shape():
     from runner.content_rules import coerce_grounded_analysis, ContentRuleError
 

@@ -127,6 +127,48 @@ def synthesize_word(
     return result
 
 
+def enrich_drills(
+    drills: Sequence[Mapping[str, Any]] | None,
+    *,
+    enabled: bool = False,
+    transport: ContrastTransport | None = None,
+    api_key: str = "",
+    limit: int = 3,
+) -> dict[str, Any]:
+    """Attach canonical model audio to sentence drills (speaking redesign).
+
+    Same fail-closed contract as enrich_candidates: disabled/missing-key/error
+    leaves ``status`` unavailable and the UI shows the timestamp-only fallback.
+    A TTS call never yields a phoneme claim.
+    """
+    summary: dict[str, Any] = {
+        "enabled": bool(enabled),
+        "model": CONTRAST_TTS_MODEL,
+        "voice": CONTRAST_TTS_VOICE,
+        "attempted": 0,
+        "succeeded": 0,
+        "unavailable": 0,
+    }
+    if not enabled:
+        return summary
+    for item in list(drills or ())[: max(0, int(limit))]:
+        if not isinstance(item, dict):
+            continue
+        summary["attempted"] += 1
+        result = synthesize_word(
+            str(item.get("improved") or ""),
+            enabled=True,
+            transport=transport,
+            api_key=api_key,
+        )
+        item["contrast_audio"] = result
+        if result.get("status") == "ok":
+            summary["succeeded"] += 1
+        else:
+            summary["unavailable"] += 1
+    return summary
+
+
 def enrich_candidates(
     candidates: Sequence[Mapping[str, Any]] | None,
     *,

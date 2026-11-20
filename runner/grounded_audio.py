@@ -53,7 +53,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .audio import AudioError, sha256_bytes
 from .content_rules import ContentRuleError, load_prompt
-from .contrast_audio import enrich_candidates
+from .contrast_audio import enrich_candidates, enrich_drills
 from .models import Feedback, ModelError
 from .pause_calibration import (
     DEFAULT_MULTIPLIER,
@@ -2227,6 +2227,17 @@ def review_speaking_grounded(
             llm=llm_analysis,
             candidate_count=len(t3_documents),
         )
+        # Speak-style say-it-better loop: canonical model audio for each drill
+        # sentence. Fail-closed — unavailable TTS never blocks the review.
+        if contrast_enabled and scorecard_doc.get("drills"):
+            drill_summary = enrich_drills(
+                scorecard_doc["drills"],
+                enabled=True,
+                transport=getattr(config, "contrast_transport", None),
+                api_key=str(getattr(config, "api_key", "") or ""),
+                limit=int(getattr(grounded, "self_listen_max_n", DEFAULT_SELF_LISTEN_MAX_N)),
+            )
+            log.info(json.dumps({"event": "drill_contrast_summary", **drill_summary}, ensure_ascii=False))
 
     system, user = build_prompt(
         attempt,
