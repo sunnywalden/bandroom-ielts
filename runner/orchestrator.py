@@ -852,8 +852,9 @@ class CoachRunner:
                 max_attempts=self.config.max_attempts,
             )
             report.failed += 1
+            detail = str(exc)[-300:]
             report.errors.append(
-                {"attempt": attempt_id, "code": code, "blocked": blocked}
+                {"attempt": attempt_id, "code": code, "blocked": blocked, "detail": detail}
             )
             self._log(
                 "attempt_failed",
@@ -861,6 +862,9 @@ class CoachRunner:
                 code=code,
                 retryable=not permanent,
                 blocked=blocked,
+                # Without the message a failed writeback is undiagnosable; the
+                # 2026-11-19 toolerror had to be reproduced by hand.
+                detail=detail,
             )
             return "failed"
 

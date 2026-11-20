@@ -523,7 +523,9 @@ def test_contrast_audio_uses_native_endpoint_shape(monkeypatch):
         "model": contrast_audio.CONTRAST_TTS_MODEL,
         "input": {"text": "office", "voice": "Cherry"},
     }
-    assert contrast_audio.CONTRAST_TTS_MODEL == "qwen-audio-3.0-tts-plus"
+    # 2026-11-20: qwen-audio-3.0-tts-plus started returning InvalidParameter on
+    # this account; qwen3-tts-flash serves the same native endpoint and voice.
+    assert contrast_audio.CONTRAST_TTS_MODEL == "qwen3-tts-flash"
     assert captured["headers"]["authorization"] == "Bearer sk-test"
     assert contrast_audio.CONTRAST_TTS_URL.endswith(
         "/multimodal-generation/generation"
