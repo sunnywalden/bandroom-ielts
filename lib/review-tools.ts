@@ -6,6 +6,10 @@ import { createAnalysisBundleGrant } from "./analysis-bundle";
 import { decodeCheckpointLimit, issueReviewTransfer, requireDecodedInput } from "./review-transfer";
 import { validateSpeakingAnalysis } from "./speaking-analysis";
 import {
+  isGroundedAnalysis, validateGroundedAnalysis, toIssueInput, enrichCandidateIds, toStoredProsodyOnly,
+} from "./grounded-analysis";
+import { issueCalibrationCandidatesIdempotent, CalibrationError } from "./calibration";
+import {
   claimReviewTasks, claimNextReviewTask, completeReviewTask, failReviewTask, getReviewTask, readReviewCheckpoint, readReviewReceipt,
   recordAnalysisEvent, renewReviewLease, reportSchedulerHeartbeat, reviewTaskDb, saveReviewCheckpoint,
   ReviewTaskError, type ReviewTask, type ReviewTaskDb,
@@ -273,7 +277,57 @@ export async function callReviewTool(userId: string, name: string, args: unknown
             throw new ReviewTaskError("recording_mismatch", "The pronunciation rating refers to a different recording than this task.");
         }
         const analysisVersion = input.analysisVersion ?? task.analysisVersion;
-        if (task.kind === "speaking" && task.state !== "completed") {
+        let effectiveAnalysis: Record<string, unknown> | null = input.analysis ?? null;
+        if (task.kind === "speaking" && isGroundedAnalysis(input.analysis)) {
+          // Grounded-prosody completion class (iteration-31 rev3).
+          if (!analysisVersion) throw new ReviewTaskError("analysis_version_required", "A speaking completion needs an analysis version.");
+          const released = (env.GROUNDED_RELEASED_VERSIONS ?? "").split(",").map(value => value.trim()).filter(Boolean);
+          if (!released.includes(analysisVersion))
+            throw new ReviewTaskError("analysis_not_released", "The grounded-prosody analysis version has not passed the contract gate.");
+          const bucket = env.BUCKET;
+          if (!bucket) throw new ReviewTaskError("recordings_unavailable", "Private recording storage is unavailable.");
+          const metadata = await bucket.head(`speaking/${encodeURIComponent(userId)}/${task.recordingId}`);
+          const digest = metadata?.customMetadata?.digest;
+          if (!metadata || !digest) throw new ReviewTaskError("recording_digest_unavailable", "The original recording digest is unavailable.");
+          if (digest !== input.recordingSha256)
+            throw new ReviewTaskError("recording_mismatch", "The recording digest differs from the original object.");
+          // Replay of an already-completed task: return the stored receipt WITHOUT
+          // re-issuing candidates or re-running the decoded-input proof (the lease
+          // is cleared on completion). This prevents a rejected/altered replay from
+          // mutating calibration state before completeReviewTask could reject it
+          // (security review: fail-open integrity bypass). The committed receipt is
+          // the source of truth; no new write occurs here.
+          if (task.state === "completed") {
+            const receipt = await readReviewReceipt(db, userId, task.id);
+            if (receipt) {
+              return { content: [{ type: "text", text: JSON.stringify({
+                receiptId: receipt.id, feedbackId: receipt.feedbackId,
+                createdAt: receipt.createdAt, duplicate: true,
+              }) }] };
+            }
+          }
+          try {
+            const grounded = validateGroundedAnalysis(input.analysis);
+            // First completion: enforce the decoded-input proof unconditionally
+            // (a live lease is required and present). Candidate issuance is
+            // idempotent + deterministic, so a retry after a partial failure reuses
+            // the same IDs without duplicating rows or inflating n_shown.
+            await requireDecodedInput(db, userId, task.id, input.fence,
+              { sha256: digest, bytes: metadata.size }, analysisVersion);
+            if (grounded.candidates.length) {
+              const issued = await issueCalibrationCandidatesIdempotent(
+                reviewTaskDb(), userId,
+                toIssueInput(grounded, { attemptId: task.attemptId, recordingId: task.recordingId! }));
+              effectiveAnalysis = enrichCandidateIds(grounded, issued);
+            } else {
+              effectiveAnalysis = toStoredProsodyOnly(grounded);
+            }
+          } catch (error) {
+            if (error instanceof CalibrationError) throw new ReviewTaskError(error.code, error.message);
+            throw error;
+          }
+        } else if (task.kind === "speaking" && task.state !== "completed") {
+          // QA acoustic track (phoneme schema) — unchanged.
           if (!analysisVersion) throw new ReviewTaskError("analysis_version_required", "A speaking completion needs an analysis version.");
           const released = (env.ANALYSIS_RELEASED_VERSIONS ?? "").split(",").map(value => value.trim()).filter(Boolean);
           if (!released.includes(analysisVersion))
@@ -296,12 +350,12 @@ export async function callReviewTool(userId: string, name: string, args: unknown
         }
         const completed = await completeReviewTask(db, userId, {
           taskId: input.taskId, fence: input.fence,
-          output: { feedback: input.feedback, evidence: input.evidence, analysis: input.analysis ?? null },
+          output: { feedback: input.feedback, evidence: input.evidence, analysis: effectiveAnalysis },
           feedback: {
             id: `rt:${input.taskId}`, day: task.day, stage: attempt.stage, attempt: task.attemptId,
             evidence: input.evidence, feedback: input.feedback,
             pronunciation: input.pronunciation ? { ...input.pronunciation, scope: "partial" as const } : undefined,
-            analysis: input.analysis,
+            analysis: effectiveAnalysis ?? undefined,
           },
           receipt: {
             recordingSha256: input.recordingSha256 ?? null,
