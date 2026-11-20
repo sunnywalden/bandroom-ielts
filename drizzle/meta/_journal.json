@@ -57,6 +57,20 @@
       "when": 1794795370468,
       "tag": "0007_slimy_boomerang",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1795150646754,
+      "tag": "0008_tenancy_users",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1795151456243,
+      "tag": "0009_analysis_events_user",
+      "breakpoints": true
     }
   ]
 }

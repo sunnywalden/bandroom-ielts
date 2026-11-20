@@ -33,7 +33,7 @@ export async function POST(request:Request) {
         return err(-32004,"Write operations are disabled in read-only mirror mode.",403);
       const result=await callCoach(auth.user.userId,message.params.name,message.params.arguments??{});
       if(auth.scope==="coach"||auth.scope==="coach-runner")
-        auditServiceCall(auth,message.params.name,message.params.arguments,result);
+        void auditServiceCall(auth,message.params.name,message.params.arguments,result);
       return reply(result);
     }
     default: return err(-32601,"Method not found");

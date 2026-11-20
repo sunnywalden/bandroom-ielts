@@ -1,5 +1,5 @@
 import { and, eq } from "drizzle-orm";
-import { requireOwnerScope } from "@/lib/route-guard";
+import { requireUserScope } from "@/lib/route-guard";
 import { getDb } from "@/db";
 import { learnerStates, teacherLessons } from "@/db/schema";
 import { hash, uuid } from "@/lib/backup-format";
@@ -16,7 +16,7 @@ import { validTransition, same } from "./transition";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const auth = await requireOwnerScope();
+  const auth = await requireUserScope();
   if (auth instanceof Response) return auth;
   const user = auth.user;
   const result = await getDb().select({ revision: learnerStates.revision, state: learnerStates.state })
@@ -25,7 +25,7 @@ export async function GET() {
 }
 
 export async function PUT(request: Request) {
-  const auth = await requireOwnerScope({ write: true });
+  const auth = await requireUserScope({ write: true });
   if (auth instanceof Response) return auth;
   const user = auth.user;
   if (crossOrigin(request)) return json({ error: "invalid_origin" }, 403);

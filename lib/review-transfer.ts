@@ -377,11 +377,12 @@ export async function requireDecodedInput(
     return failure("analysis_version_mismatch", "The result and decoded audio use different analysis versions.");
   if (saved.inputSha256 !== input.sha256 || manifest.data.inputSha256 !== input.sha256 || manifest.data.inputBytes !== input.bytes)
     return failure("recording_mismatch", "The result and decoded audio refer to different recordings.");
-  const used = await db.prepare(`SELECT 1 FROM analysis_events
-    WHERE task_id=? AND fence=? AND event IN ('save_review_checkpoint','read_review_checkpoint')
-    AND outcome IN ('ok','duplicate') AND json_extract(metadata_json,'$.transport')='binary-v1'
-    AND json_extract(metadata_json,'$.artifactSha256')=? LIMIT 1`)
-    .bind(taskId, fence, saved.artifactSha256).first();
+  const used = await db.prepare(`SELECT 1 FROM analysis_events e
+    JOIN review_tasks t ON t.id=e.task_id AND t.user_id=?
+    WHERE e.task_id=? AND e.fence=? AND e.event IN ('save_review_checkpoint','read_review_checkpoint')
+    AND e.outcome IN ('ok','duplicate') AND json_extract(e.metadata_json,'$.transport')='binary-v1'
+    AND json_extract(e.metadata_json,'$.artifactSha256')=? LIMIT 1`)
+    .bind(userId, taskId, fence, saved.artifactSha256).first();
   if (!used) return failure("checkpoint_not_read", "Restore the committed decoded audio under the current lease before completing.");
   return manifest.data.pcm.sampleCount;
 }
