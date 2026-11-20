@@ -1,8 +1,8 @@
-// tools/list snapshot. rev2 §9 intentionally adds three calibration tools
-// (record_pronunciation_verdict, read_pronunciation_profile,
-// reset_pronunciation_profile); the original 16 tools keep their order and
-// heartbeat description. Any further change updates these digests and must be
-// treated as a contract version change.
+// tools/list snapshot. rev3.1 MT-2 contract: 21 tools. Adds add_learner_note
+// (S3.1 learner self-note) and claim_next_review_task (rev2 §7 cross-tenant
+// claim) to the rev2 19-tool set; the three calibration tools stay last and the
+// heartbeat description/schema are unchanged. Any further change updates these
+// digests and must be treated as a contract version change.
 import test from "node:test";
 import assert from "node:assert/strict";
 import {registerHooks} from "node:module";
@@ -31,15 +31,15 @@ const {coachTools} = await import("../lib/coach.ts");
 const {MCP_TOOL_SCOPES} = await import("../lib/mcp-scope.ts");
 
 const EXPECTED_NAMES = [
-  "read_study_session", "add_coach_feedback", "publish_lesson",
+  "read_study_session", "add_coach_feedback", "add_learner_note", "publish_lesson",
   "read_recording_bytes", "read_speaking_recording",
-  "claim_review_tasks", "renew_review_lease", "save_review_checkpoint",
+  "claim_review_tasks", "claim_next_review_task", "renew_review_lease", "save_review_checkpoint",
   "read_review_checkpoint", "fail_review_task", "complete_review_task",
   "get_analysis_bundle", "get_review_transfer", "read_review_recording",
   "read_review_receipt", "report_scheduler_heartbeat",
   "record_pronunciation_verdict", "read_pronunciation_profile", "reset_pronunciation_profile",
 ];
-const ALL_SHA256 = "0a9688965d65d6a359a23ece443ca59d08cddaa064ee3491c3e89a2b635bc3a7";
+const ALL_SHA256 = "973c7f997d253a2bc0ce8032b8f68ab1c5039d0e3116d919a3c1d4c17726b18c";
 const HEARTBEAT_SCHEMA_SHA256 = "ec4f5fd56ea44f485b2941a23436eb69a546eadd15f64e459e1792533815a530";
 
 const payload = coachTools.map(tool => ({
@@ -50,7 +50,7 @@ const payload = coachTools.map(tool => ({
 }));
 const sha256 = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-test("tools/list exposes the 19-tool contract in stable order", () => {
+test("tools/list exposes the 21-tool contract in stable order", () => {
   assert.deepEqual(payload.map(tool => tool.name), EXPECTED_NAMES);
   assert.deepEqual(Object.keys(MCP_TOOL_SCOPES), EXPECTED_NAMES);
   for (const tool of payload) {
@@ -62,8 +62,9 @@ test("tools/list exposes the 19-tool contract in stable order", () => {
     assert.equal(typeof tool.annotations.readOnlyHint, "boolean");
     if ("idempotentHint" in tool.annotations) assert.equal(tool.annotations.idempotentHint, true);
   }
-  // The original 16 tools keep their reviewed order before the three additions.
-  assert.deepEqual(payload.slice(0, 16).map(tool => tool.name), EXPECTED_NAMES.slice(0, 16));
+  // The three calibration tools stay last; the learner note follows coach feedback.
+  assert.deepEqual(payload.slice(-3).map(tool => tool.name), EXPECTED_NAMES.slice(-3));
+  assert.equal(payload[2].name, "add_learner_note");
 });
 
 test("the original heartbeat tool keeps its reviewed contract", () => {
