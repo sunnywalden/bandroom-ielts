@@ -45,6 +45,9 @@ test("comment/string/projection-only user_id tokens do not satisfy the predicate
   assert.throws(() => assertTenantPredicate("SELECT * FROM teacher_feedback, learner_states WHERE teacher_feedback.id=?"), /missing_user_id/);
   // comma list with user_id passes
   assert.doesNotThrow(() => assertTenantPredicate("SELECT * FROM review_tasks, analysis_artifacts WHERE review_tasks.user_id=?"));
+  // comment markers inside string literals must NOT swallow the table reference
+  assert.throws(() => assertTenantPredicate("SELECT '--' AS note, id FROM teacher_feedback"), /missing_user_id/);
+  assert.throws(() => assertTenantPredicate("SELECT '/*', id FROM teacher_feedback WHERE note='*/'"), /missing_user_id/);
 });
 
 test("non-tenant statements are untouched", () => {

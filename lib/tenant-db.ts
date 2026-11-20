@@ -31,10 +31,35 @@ const INDIRECT_TABLES = new Set(["analysis_artifacts"]);
 // tripwire. NOT a parser: this remains heuristic (see module header) and is not
 // a security boundary. A SQL AST dependency is the complete fix.
 export function stripSql(sql: string): string {
-  let s = sql.replace(/\/\*[\s\S]*?\*\//g, " ");
-  s = s.replace(/--[^\n]*/g, " ");
-  s = s.replace(/'(?:[^']|'')*'/g, "''");
-  return s;
+  // Single left-to-right pass that respects string-literal boundaries, so a
+  // comment marker inside a quoted string cannot delete following SQL.
+  let out = "";
+  let i = 0;
+  while (i < sql.length) {
+    const c = sql[i];
+    if (c === "'") {
+      out += "''";
+      i++;
+      while (i < sql.length) {
+        if (sql[i] === "'" && sql[i + 1] === "'") i += 2;
+        else if (sql[i] === "'") { i++; break; }
+        else i++;
+      }
+    } else if (c === "/" && sql[i + 1] === "*") {
+      i += 2;
+      while (i < sql.length && !(sql[i] === "*" && sql[i + 1] === "/")) i++;
+      i += 2;
+      out += " ";
+    } else if (c === "-" && sql[i + 1] === "-") {
+      i += 2;
+      while (i < sql.length && sql[i] !== "\n") i++;
+      out += " ";
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
 }
 const IDENT = String.raw`(?:\w+\.)?(?:"[^"]+"|` + "`[^`]+`" + String.raw`|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*)`;
 const TABLE_REF = new RegExp(String.raw`\b(?:from|join|into|update)\s+(${IDENT})`, "gi");
