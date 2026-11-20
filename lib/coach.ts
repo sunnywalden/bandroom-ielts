@@ -91,6 +91,25 @@ const feedbackSpec = z.strictObject({
       tier:z.enum(["T2","T3"]).describe("T2 is history-conditioned SUGGESTION, not assertion; T2 promotion is RETIRED (structurally unreachable, owner 2026-11-19), so items render as T3."),
       catchTrial:z.boolean().optional().describe("Control item; stored as expected===actual and excluded from profile counts."),
     })).max(24).describe("Bounded to keep the payload and the issuance transaction small."),
+    // Speaking redesign (docs/speaking-redesign-2026-11-19.md): ELSA-style
+    // score-first feedback. The transcript is ASR (status=asr), never verified
+    // ground truth; the scorecard carries mandatory evidence statuses and a
+    // NULL pronunciation band while phoneme assertion gates are unmet.
+    transcript:z.array(z.strictObject({
+      word:text(80,"One ASR transcript word."),
+      start:z.number().min(0).max(10800),end:z.number().min(0).max(10800),
+      probability:z.number().min(0).max(1),
+    })).max(2000).optional().describe("Whisper word timings for click-to-relisten; ASR, not verified text."),
+    scorecard:z.object({
+      schema:z.literal("bandroom-speaking-scorecard-v1"),
+      overall:z.object({band:z.number().min(0).max(9).multipleOf(.5).nullable(),status:z.string(),disclosure_zh:z.string(),basis_zh:z.string()}).passthrough(),
+      criteria:z.array(z.object({key:z.string(),label_zh:z.string(),band:z.number().min(0).max(9).nullable(),status:z.string(),disclosure_zh:z.string()}).passthrough()).min(1).max(6),
+      drills:z.array(z.object({quote:z.string(),improved:z.string(),focus_zh:z.string()}).passthrough()).max(3).optional(),
+      llm_status:z.string().optional(),
+    }).passthrough().refine(
+      card=>!card.criteria.some(c=>c.key==="pronunciation"&&c.band!=null),
+      "Pronunciation band is forbidden while phoneme assertion gates are unmet.",
+    ).optional().describe("Score-first feedback; every band is a disclosed reference estimate, pronunciation never scored."),
   }).optional().describe("Grounded speaking evidence only. Requires stage=speak and recordingId. Omit for text reviews."),
 });
 const publishSpec = z.strictObject({ day: z.number().int().min(17).max(62), lesson: lessonSpec });
@@ -320,10 +339,12 @@ export async function callCoach(userId:string, name:string, args:unknown) {
             })),
           });
           storedAnalysis={
-            schema:"bandroom-grounded-analysis-v1",
+            schema:groundedAnalysis.transcript||groundedAnalysis.scorecard?"bandroom-grounded-analysis-v2":"bandroom-grounded-analysis-v1",
             detectorVersion:groundedAnalysis.detectorVersion,
             inventoryVersion:groundedAnalysis.inventoryVersion,
             speechSeconds:groundedAnalysis.speechSeconds,
+            ...(groundedAnalysis.transcript?{transcript:groundedAnalysis.transcript}:{}),
+            ...(groundedAnalysis.scorecard?{scorecard:groundedAnalysis.scorecard}:{}),
             // T2 stays a history-conditioned SUGGESTION; promotion is RETIRED
             // (structurally unreachable, owner 2026-11-19), so every issued item
             // is rendered as T3. The V3 gates remain as versioned tooling only.

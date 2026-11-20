@@ -776,6 +776,7 @@ class CoachRunner:
                 model=self.model,
                 workdir=Path(directory),
                 logger=self._logger,
+                reserve_scorecard=lambda: self._reserve("text"),
             )
         self._log(
             "grounded_model_usage",

@@ -942,7 +942,10 @@ def test_grounded_mode_processes_speak_and_reserves_cost(tmp_path, monkeypatch):
     client = FakeClient(session)
     captured = {}
 
-    def fake_review(raw, attempt, day, *, config, model, workdir, logger=None):
+    def fake_review(raw, attempt, day, *, config, model, workdir, logger=None,
+                    reserve_scorecard=None, **kwargs):
+        # The scorecard's extra text call must be budget-reserved by the runner.
+        assert callable(reserve_scorecard)
         captured.update(raw=raw, attempt=attempt, day=day, config=config)
         return Feedback(
             feedback=valid_feedback_text(),
