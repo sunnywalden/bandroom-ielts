@@ -172,6 +172,31 @@ class QwenAdapter:
             json_object=False,
         )
 
+    def complete_scorecard(
+        self, system: str, user: str, *, timeout: float | None = None
+    ) -> str:
+        """Structured JSON analysis for the speaking scorecard (redesign).
+
+        Separate from complete_grounded: the prose coach forbids JSON/scores,
+        while the scorecard call requests strict JSON (grammar/lexical issues
+        with verbatim transcript quotes + drills). Same text model; the runner
+        validates quotes against the transcript before anything is shown.
+        """
+        if not isinstance(system, str) or not system.strip():
+            raise ModelError("invalid_scorecard_prompt", "system prompt is empty", retryable=False)
+        if not isinstance(user, str) or not user.strip():
+            raise ModelError("invalid_scorecard_prompt", "user prompt is empty", retryable=False)
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        return self._post(
+            self.text_model,
+            messages,
+            timeout if timeout is not None else self.text_timeout,
+            json_object=True,
+        )
+
     def complete_audio(self, snapshot: Mapping[str, Any], audio: PreparedAudio) -> Feedback:
         if not audio.data_uri or not audio.format:
             raise ModelError("invalid_audio_input", "prepared audio is incomplete", retryable=False)

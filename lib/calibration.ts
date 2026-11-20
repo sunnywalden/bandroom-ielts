@@ -203,6 +203,40 @@ async function readEvent(
   return row ? toEvent(row) : null;
 }
 
+/**
+ * Verdicts already recorded for a set of server-issued candidateIds.
+ *
+ * The speaking redesign's transcript colors (red/green = the learner's own
+ * self-listen verdict) must survive a page reload; the stored analysisJson
+ * never contains verdicts, so the coach read path decorates items with these.
+ * Bounded by the caller (<= 24 candidates per review).
+ */
+export async function verdictsForCandidates(
+  db: CalibrationDb, userId: string, candidateIds: string[],
+): Promise<Record<string, CalibrationVerdict>> {
+  const ids = [...new Set(candidateIds.filter((id) => typeof id === "string" && id))];
+  if (!ids.length) return {};
+  const out: Record<string, CalibrationVerdict> = {};
+  // D1 caps bound parameters at 100 per statement; the coach read path can
+  // accumulate candidates across every reviewed day, so chunk with one slot
+  // reserved for userId.
+  const CHUNK = 90;
+  for (let start = 0; start < ids.length; start += CHUNK) {
+    const chunk = ids.slice(start, start + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await db.prepare(
+      `SELECT candidate_id AS candidateId, verdict FROM calibration_events
+       WHERE user_id=? AND candidate_id IN (${placeholders})`,
+    ).bind(userId, ...chunk).all<{ candidateId: string; verdict: string }>();
+    for (const row of rows.results ?? []) {
+      if (calibrationVerdicts.includes(row.verdict as CalibrationVerdict)) {
+        out[row.candidateId] = row.verdict as CalibrationVerdict;
+      }
+    }
+  }
+  return out;
+}
+
 async function readProfileRow(
   db: CalibrationDb, userId: string, expected: string, actual: string,
 ): Promise<CalibrationProfileRow | null> {

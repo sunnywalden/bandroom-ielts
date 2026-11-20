@@ -369,6 +369,42 @@ def test_cost_cap_pauses_text_and_audio(tmp_path):
     )
 
 
+def test_transient_write_conflict_is_retried_not_blocked(tmp_path):
+    """A learner re-submitting mid-review is self-healing, not a hard failure."""
+    session = {"day": 12, "reviewAttempts": [text_attempt()]}
+    client = FakeClient(session)
+    client.feedback_error = ToolError(
+        "Read study_session again and use the new exact attempt ID."
+    )
+    coach, _ = runner(tmp_path, session, client=client)
+    report = coach.run()
+    assert report.failed == 1
+    record = StateStore(tmp_path / "state" / "state.json").data["attempts"]["v2:write:0:abc"]
+    assert record["failures"] == 1
+    assert record["blocked"] is False
+    # The next run re-reads the session and succeeds.
+    report2 = coach.run()
+    assert report2.processed == 1
+
+
+def test_transient_conflict_messages_are_classified_not_permanent(tmp_path):
+    coach, _ = runner(tmp_path, {"day": 12, "reviewAttempts": []})
+    assert coach._is_permanent(ToolError(
+        "Read study_session again and use the new exact attempt ID.")) is False
+    assert coach._is_permanent(ToolError("Another writer kept taking this review.")) is False
+    assert coach._is_permanent(ToolError(
+        "This exact submitted attempt is unavailable for the selected day and stage."
+    )) is True
+
+
+def test_error_details_are_redacted_before_logging_and_state():
+    from runner.orchestrator import redact_error_detail
+    detail = redact_error_detail("HTTPError: Authorization: Bearer sk-abc123 api_key=secret")
+    assert "sk-abc123" not in detail and "secret" not in detail
+    assert "REDACTED" in detail
+    assert len(redact_error_detail("x" * 1000)) <= 300
+
+
 def test_stale_lease_is_retried_next_round(tmp_path):
     session = {"day": 12, "reviewAttempts": [text_attempt()]}
     client = FakeClient(session)

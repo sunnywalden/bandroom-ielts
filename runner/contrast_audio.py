@@ -7,12 +7,15 @@ default: everything is **off by default and fail-closed**, and tests never touch
 the network.
 
 The E3 probe established that the qwen TTS family only works through the native
-DashScope multimodal endpoint. 2026-11-19: default upgraded to
-``qwen-audio-3.0-tts-plus`` (owner-directed) for canonical contrast audio::
+DashScope multimodal endpoint. 2026-11-20: the owner-directed
+``qwen-audio-3.0-tts-plus`` began failing with ``InvalidParameter: url error``
+on this account (model unavailable); ``qwen3-tts-flash`` answers the same
+endpoint with voice ``Cherry`` and returns ``output.audio.url``, so it is the
+current default for canonical contrast audio::
 
     POST https://dashscope.aliyuncs.com/api/v1/services/aigc/
          multimodal-generation/generation
-    {"model": "qwen-audio-3.0-tts-plus",
+    {"model": "qwen3-tts-flash",
      "input": {"text": "...", "voice": "Cherry"}}
     -> output.audio.url
 
@@ -31,7 +34,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable, Mapping, Sequence
 
-CONTRAST_TTS_MODEL = "qwen-audio-3.0-tts-plus"
+CONTRAST_TTS_MODEL = "qwen3-tts-flash"
 CONTRAST_TTS_VOICE = "Cherry"
 CONTRAST_TTS_URL = (
     "https://dashscope.aliyuncs.com/api/v1/services/aigc/"
@@ -125,6 +128,48 @@ def synthesize_word(
         audioId=audio.get("id"),
     )
     return result
+
+
+def enrich_drills(
+    drills: Sequence[Mapping[str, Any]] | None,
+    *,
+    enabled: bool = False,
+    transport: ContrastTransport | None = None,
+    api_key: str = "",
+    limit: int = 3,
+) -> dict[str, Any]:
+    """Attach canonical model audio to sentence drills (speaking redesign).
+
+    Same fail-closed contract as enrich_candidates: disabled/missing-key/error
+    leaves ``status`` unavailable and the UI shows the timestamp-only fallback.
+    A TTS call never yields a phoneme claim.
+    """
+    summary: dict[str, Any] = {
+        "enabled": bool(enabled),
+        "model": CONTRAST_TTS_MODEL,
+        "voice": CONTRAST_TTS_VOICE,
+        "attempted": 0,
+        "succeeded": 0,
+        "unavailable": 0,
+    }
+    if not enabled:
+        return summary
+    for item in list(drills or ())[: max(0, int(limit))]:
+        if not isinstance(item, dict):
+            continue
+        summary["attempted"] += 1
+        result = synthesize_word(
+            str(item.get("improved") or ""),
+            enabled=True,
+            transport=transport,
+            api_key=api_key,
+        )
+        item["contrast_audio"] = result
+        if result.get("status") == "ok":
+            summary["succeeded"] += 1
+        else:
+            summary["unavailable"] += 1
+    return summary
 
 
 def enrich_candidates(

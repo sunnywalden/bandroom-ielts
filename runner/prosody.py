@@ -1481,6 +1481,7 @@ VAD_MODEL_PATH = Path(os.environ.get(
 VAD_THRESHOLD = 0.5
 VAD_NEG_THRESHOLD = 0.35
 VAD_MIN_SPEECH_SECONDS = 0.25
+VAD_FRAME_SAMPLES = 512  # at 16 kHz; model input is 64 context + 512 = 576
 
 
 def _vad_session() -> Any:
@@ -1490,6 +1491,36 @@ def _vad_session() -> Any:
         _VAD_SESSION = ort.InferenceSession(
             str(VAD_MODEL_PATH), providers=["CPUExecutionProvider"])
     return _VAD_SESSION
+
+
+def vad_frame_probabilities(
+    samples: np.ndarray, sample_rate: int = TARGET_SAMPLE_RATE
+) -> np.ndarray:
+    """Per-512-sample speech probabilities, official silero-vad convention.
+
+    Each call prepends the previous chunk's last 64 samples as context, so the
+    model input is 64 + 512 = 576 samples at 16 kHz. The ONNX input shape is
+    dynamic ([None, None]); feeding bare 512-sample chunks does NOT raise — it
+    silently collapses every probability to ~0 and yields an empty speech
+    timeline (the 2026-11-19 production outage). Exposed separately so the
+    regression test can compare probabilities, not just verdicts.
+    """
+    if sample_rate != 16000:
+        raise ValueError("vad_frame_probabilities requires 16 kHz mono audio")
+    sess = _vad_session()
+    chunk = 512
+    context_size = 64
+    context = np.zeros((1, context_size), dtype=np.float32)
+    state = np.zeros((2, 1, 128), dtype=np.float32)
+    sr = np.array(16000, dtype=np.int64)
+    probs: list[float] = []
+    for first in range(0, len(samples) - chunk + 1, chunk):
+        block = samples[first:first + chunk].astype(np.float32)[None, :]
+        model_input = np.concatenate([context, block], axis=1)
+        out, state = sess.run(None, {"input": model_input, "state": state, "sr": sr})
+        context = model_input[:, -context_size:]
+        probs.append(float(out[0][0]))
+    return np.asarray(probs, dtype=np.float64)
 
 
 def vad_pauses(
@@ -1505,32 +1536,12 @@ def vad_pauses(
     Speech detection verified on real-speech fixtures; cross-codec robustness
     is partial (ogg stable, mp3/aac borderline, noise stress not met — see
     _calibration_status_for_pause_mode). Requires 16 kHz mono; the ONNX model
-    is loaded lazily.
-
-    Calling convention follows the official silero-vad wrapper: each call
-    prepends the previous chunk's last 64 samples as context, so the model
-    input is 64 + 512 = 576 samples at 16 kHz. The ONNX input shape is dynamic
-    ([None, None]); feeding bare 512-sample chunks does NOT raise — it silently
-    collapses every probability to ~0 and yields an empty speech timeline
-    (the 2026-11-19 production outage). Locked down by
-    runner/tests/test_vad_speech_detection.py.
+is loaded lazily. Calling convention: see vad_frame_probabilities.
     """
     if sample_rate != 16000:
         raise ValueError("vad_pauses requires 16 kHz mono audio")
-    sess = _vad_session()
-    chunk = 512
-    context_size = 64
-    context = np.zeros((1, context_size), dtype=np.float32)
-    state = np.zeros((2, 1, 128), dtype=np.float32)
-    sr = np.array(16000, dtype=np.int64)
-    probs: list[float] = []
-    for first in range(0, len(samples) - chunk + 1, chunk):
-        block = samples[first:first + chunk].astype(np.float32)[None, :]
-        model_input = np.concatenate([context, block], axis=1)
-        out, state = sess.run(None, {"input": model_input, "state": state, "sr": sr})
-        context = model_input[:, -context_size:]
-        probs.append(float(out[0][0]))
-    frame_s = chunk / sample_rate
+    probs = vad_frame_probabilities(samples, sample_rate).tolist()
+    frame_s = VAD_FRAME_SAMPLES / sample_rate
     # Hysteresis segmentation into speech runs.
     speech: list[list[float]] = []
     in_speech = False
