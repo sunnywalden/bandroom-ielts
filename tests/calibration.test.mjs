@@ -118,6 +118,20 @@ try{
   const eventIndexes=(await db.prepare("PRAGMA index_list(calibration_events)").all()).results.map(r=>r.name);
   ok(eventIndexes.includes("calibration_events_candidate"),"idempotency index");
   ok(eventIndexes.includes("calibration_events_profile"),"profile index");
+  // The coach read path decorates stored candidates with verdicts; D1 caps
+  // bound parameters at 100, so the lookup must chunk instead of failing as
+  // reviews accumulate across days.
+  {
+    let calls=0,maxBind=0;
+    const fake={prepare(){return {bind(...args){calls+=1;maxBind=Math.max(maxBind,args.length);
+      const ids=args.slice(1);
+      return {all:async()=>({results:ids.map(candidateId=>({candidateId,verdict:"confirmed"}))})}}}}};
+    const many=Array.from({length:150},(_,i)=>`cand-${i}`);
+    const map=await calibration.verdictsForCandidates(fake,"owner-a",many);
+    equal(Object.keys(map).length,150,"all verdicts resolved across chunks");
+    ok(maxBind<=100,`every statement stays within D1's 100-parameter cap (max ${maxBind})`);
+    ok(calls>=2,`chunked into ${calls} statements`);
+  }
 
   const userA="owner-a", userB="owner-b";
   const issue=(userId,extra={})=>issueCalibrationCandidates(db,userId,{

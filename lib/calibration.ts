@@ -216,15 +216,22 @@ export async function verdictsForCandidates(
 ): Promise<Record<string, CalibrationVerdict>> {
   const ids = [...new Set(candidateIds.filter((id) => typeof id === "string" && id))];
   if (!ids.length) return {};
-  const placeholders = ids.map(() => "?").join(",");
-  const rows = await db.prepare(
-    `SELECT candidate_id AS candidateId, verdict FROM calibration_events
-     WHERE user_id=? AND candidate_id IN (${placeholders})`,
-  ).bind(userId, ...ids).all<{ candidateId: string; verdict: string }>();
   const out: Record<string, CalibrationVerdict> = {};
-  for (const row of rows.results ?? []) {
-    if (calibrationVerdicts.includes(row.verdict as CalibrationVerdict)) {
-      out[row.candidateId] = row.verdict as CalibrationVerdict;
+  // D1 caps bound parameters at 100 per statement; the coach read path can
+  // accumulate candidates across every reviewed day, so chunk with one slot
+  // reserved for userId.
+  const CHUNK = 90;
+  for (let start = 0; start < ids.length; start += CHUNK) {
+    const chunk = ids.slice(start, start + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await db.prepare(
+      `SELECT candidate_id AS candidateId, verdict FROM calibration_events
+       WHERE user_id=? AND candidate_id IN (${placeholders})`,
+    ).bind(userId, ...chunk).all<{ candidateId: string; verdict: string }>();
+    for (const row of rows.results ?? []) {
+      if (calibrationVerdicts.includes(row.verdict as CalibrationVerdict)) {
+        out[row.candidateId] = row.verdict as CalibrationVerdict;
+      }
     }
   }
   return out;
