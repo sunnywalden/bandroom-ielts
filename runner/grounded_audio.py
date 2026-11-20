@@ -55,6 +55,7 @@ from .audio import AudioError, sha256_bytes
 from .content_rules import ContentRuleError, load_prompt
 from .contrast_audio import enrich_candidates, enrich_drills
 from .models import Feedback, ModelError
+from .redaction import redact_error_detail
 from .pause_calibration import (
     DEFAULT_MULTIPLIER,
     PauseCalibrationState,
@@ -1606,7 +1607,7 @@ def read_detector_transcript(
     except Exception as exc:  # noqa: BLE001 - Stage B is optional, never fatal
         log.info(
             json.dumps(
-                {"event": "transcript_unavailable", "detail": str(exc)[-300:]},
+                {"event": "transcript_unavailable", "detail": redact_error_detail(str(exc))},
                 ensure_ascii=False,
             )
         )
@@ -1641,7 +1642,7 @@ def collect_self_listen_candidates(
                 {
                     "event": "self_listen_unavailable",
                     "code": "invalid_stage_b_input",
-                    "detail": str(exc)[-300:],
+                    "detail": redact_error_detail(str(exc)),
                 },
                 ensure_ascii=False,
             )
@@ -2273,7 +2274,7 @@ def review_speaking_grounded(
             except Exception as exc:  # noqa: BLE001 - degrade, never block
                 log.info(json.dumps({
                     "event": "scorecard_llm_unavailable",
-                    "detail": str(exc)[-300:],
+                    "detail": redact_error_detail(str(exc)),
                 }, ensure_ascii=False))
         elif transcript_words and not budget_ok:
             log.info(json.dumps({"event": "scorecard_skipped", "reason": "budget_paused"}))
