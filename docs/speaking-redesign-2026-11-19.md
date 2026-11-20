@@ -73,7 +73,11 @@ band 描述符区间；LR/GRA 由 LLM 对转写的问题计数与严重度映射
 可审计（runner/scorecard.py）。发音 band 恒为 null，直到 T2 门禁通过。
 
 引文校验：LLM 返回的每条 grammar/lexical issue 的 quote 必须是转写子串
-（归一化后），否则丢弃该条（fail-closed，不展示无法溯源的"纠错"）。
+（忽略大小写/标点、按词边界匹配），否则丢弃该条（fail-closed，不展示无法
+溯源的"纠错"）。已知残余风险（评审记录）：学习者文字草稿会进入提示词，注入
+只能影响其本人的 fix/improved 自由文本（quote 已 fail-closed 校验，improved
+仅回灌给本人的 TTS 示范），无跨用户边界。Stage B 关闭时评分卡退化为仅流利度
++ 发音建议层（无转写），这是有意的降级。
 
 ## 3. 数据流变更
 
@@ -112,6 +116,19 @@ band 描述符区间；LR/GRA 由 LLM 对转写的问题计数与严重度映射
   验证：MCP read_study_session 对新版本正常；部署 bundle 含评分卡 UI。
   历史 attempt 的旧反馈（v1 analysis）向后兼容显示散文；**新提交**产出评分卡。
   UI 视觉确认需 owner 的 Access 登录会话。
+
+## 线上验证与修复轮（2026-11-20）
+
+- 重新部署评审修复：版本 `8fc1859b-018a-42b5-a5eb-8ea2d9016de0`（100% 流量），
+  配置备份 `wrangler.prod-20261119-speaking-review-fixes.json`。
+- 首次真实提交（v2:f5603a46，followup，474 KB）走通新管线：评分卡模型调用成功，
+  但写回 toolerror 使 attempt 被 block；真实模型重放后成功保存（receipt
+  `rt:f496ff0b-c90f-46d2-9b21-177ac5de8dbc`），落库 v2（41 词转写、3 候选、四科卡、
+  P 不评分、2 drills）。原错误无详情 → 已补 `detail` 到 attempt_failed 日志。
+- drill TTS 全失败：`qwen-audio-3.0-tts-plus` 对该账户 `InvalidParameter: url error`；
+  实测 `qwen3-tts-flash` 同端点同音色正常，已切换并验证真实调用返回音频 URL。
+- 评审修复（独立评审 6 项 + 自审 8 项）全部闭环：见提交 1b913d1、632b74a、46e0c06、
+  77afa09、dd800aa。
 
 ## 5. 不做的事
 
