@@ -66,3 +66,7 @@ V3_GATE_RESULT.json
 v3_export_*.json
 /analysis/scripts/calibration-gates/V3_GATE_RESULT.json
 /analysis/scripts/calibration-gates/v3_export_*.json
+
+# Local acceptance evidence packs (NC-corpus eval data + raw model responses;
+# kept private in the workspace, never published to the public repo)
+/acceptance-*/
