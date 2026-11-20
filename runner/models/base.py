@@ -27,6 +27,12 @@ class Feedback:
     attempt: str
     pronunciation: Pronunciation | None = None
     analysis: Mapping[str, Any] | None = None
+    # Queue-path wire analysis (iteration-31 rev3): the grounded-prosody completion
+    # shape {schema, analysisVersion, detectorVersion, inventoryVersion,
+    # speechSeconds, candidates, reliability?, calibrated_prosody?}. Distinct from
+    # `analysis` (the owner-path feedbackSpec.groundedAnalysis shape). Validated
+    # server-side by validateGroundedAnalysis; the owner path ignores this field.
+    queue_analysis: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.analysis is not None:

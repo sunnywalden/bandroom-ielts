@@ -17,6 +17,7 @@
 // (`n_shown = n_shown + 1`). Both run inside one D1 batch, which D1 executes as
 // a single transaction.
 import { z } from "zod/v4";
+import { deterministicCandidateId } from "./grounded-analysis";
 
 type Prepared = {
   bind(...values: unknown[]): Prepared;
@@ -191,6 +192,88 @@ export async function issueCalibrationCandidates(
     }
   }
   await db.batch(statements);
+  return { candidateIds, issuedAt };
+}
+
+/**
+ * Idempotent candidate issuance for the queue completion path (iteration-31
+ * rev3, review U-BL-1). Unlike issueCalibrationCandidates (fresh random UUIDs),
+ * this derives DETERMINISTIC candidateIds (UUIDv5 over tenant|attempt|tuple) so a
+ * replayed complete_review_task re-uses the exact IDs: the enriched output hash
+ * stays stable (duplicate receipt, not receipt_conflict) and no duplicate rows
+ * or n_shown inflation occur. Already-issued candidates for the attempt are
+ * skipped entirely (no INSERT, no n_shown bump). The caller must short-circuit an
+ * existing receipt before calling (completeReviewTask.matchingReceipt does this)
+ * and guard empty candidates (issueInput requires min 1).
+ */
+export async function issueCalibrationCandidatesIdempotent(
+  db: CalibrationDb,
+  userId: string,
+  input: unknown,
+): Promise<{ candidateIds: string[]; issuedAt: number }> {
+  if (typeof userId !== "string" || !userId) return reject("user_required", "Authenticated user is required.");
+  const parsed = issueInput.parse(input);
+  const issuedAt = Date.now();
+  const ruleVersion = parsed.ruleVersion ?? CALIBRATION_RULE_VERSION;
+
+  // Fail closed on a profile built by another detector/inventory (FIX-17).
+  const seen = new Set<string>();
+  for (const candidate of parsed.candidates) {
+    if (candidate.catchTrial) candidate.actual = candidate.expected;
+    if (isCatchTrialCandidate(candidate)) continue;
+    const key = `${candidate.expected}|${candidate.actual}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const existing = await db.prepare(`SELECT detector_version AS detectorVersion,
+      inventory_version AS inventoryVersion FROM personal_calibration
+      WHERE user_id=? AND expected=? AND actual=?`).bind(userId, candidate.expected, candidate.actual).first();
+    if (existing
+      && (String(existing.detectorVersion) !== parsed.detectorVersion
+        || String(existing.inventoryVersion) !== parsed.inventoryVersion)) {
+      reject("detector_version_mismatch",
+        "The existing profile was produced by a different detector or inventory. Migrate or reset it before issuing new candidates.");
+    }
+  }
+
+  // Deterministic IDs (replay-stable). catchTrial forces actual=expected.
+  const candidateIds: string[] = [];
+  for (const candidate of parsed.candidates) {
+    const actual = candidate.catchTrial ? candidate.expected : candidate.actual;
+    candidateIds.push(await deterministicCandidateId(
+      userId, parsed.attemptId, candidate.expected, actual, candidate.atMs));
+  }
+
+  // Skip candidates already issued for this attempt: no INSERT, no n_shown bump.
+  const rows = await db.prepare(
+    `SELECT candidate_id AS candidateId FROM calibration_candidates WHERE user_id=? AND attempt_id=?`)
+    .bind(userId, parsed.attemptId).all<{ candidateId: string }>();
+  const already = new Set((rows.results ?? []).map(r => String(r.candidateId)));
+  const statements: Prepared[] = [];
+  parsed.candidates.forEach((candidate, i) => {
+    const candidateId = candidateIds[i];
+    if (already.has(candidateId)) return;
+    const actual = candidate.catchTrial ? candidate.expected : candidate.actual;
+    statements.push(db.prepare(`INSERT INTO calibration_candidates
+      (candidate_id, user_id, attempt_id, recording_id, word, expected, actual, at_ms,
+       detector_confidence, shown_at, answered_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,NULL)
+      ON CONFLICT(candidate_id) DO NOTHING`).bind(
+      candidateId, userId, parsed.attemptId, parsed.recordingId, candidate.word,
+      candidate.expected, actual, candidate.atMs, candidate.detectorConfidence, issuedAt));
+    if (candidate.expected !== actual) {
+      statements.push(db.prepare(`INSERT INTO personal_calibration
+        (user_id, expected, actual, n_confirmed, n_rejected, n_unsure, n_shown, state,
+         rule_version, detector_version, inventory_version, updated_at)
+        VALUES (?,?,?,0,0,0,1,'CANDIDATE',?,?,?,?)
+        ON CONFLICT(user_id, expected, actual) DO UPDATE SET
+          n_shown = personal_calibration.n_shown + 1,
+          rule_version = excluded.rule_version,
+          updated_at = excluded.updated_at`).bind(
+        userId, candidate.expected, actual, ruleVersion, parsed.detectorVersion,
+        parsed.inventoryVersion, issuedAt));
+    }
+  });
+  if (statements.length) await db.batch(statements);
   return { candidateIds, issuedAt };
 }
 

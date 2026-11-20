@@ -6,6 +6,11 @@ declare namespace Cloudflare {
     ANALYSIS_BUNDLE_VERSION?: string;
     ANALYSIS_RUNTIME_BUNDLE_SHA256?: string;
     ANALYSIS_RELEASED_VERSIONS?: string;
+    // Grounded-prosody queue completion contract (iteration-31 rev3). Distinct
+    // namespace from the QA acoustic-track ANALYSIS_* gate: releasing a grounded
+    // version attests the CONTRACT/integrity gate, not a pronunciation-quality gate.
+    GROUNDED_ANALYSIS_VERSION?: string;
+    GROUNDED_RELEASED_VERSIONS?: string;
     BANDROOM_PUBLIC_ORIGIN?: string;
     // Backup manifest / recording-ticket HMAC key (app/api/backup/handler.ts).
     // Must match the key that signed any backup being restored (design D-11).

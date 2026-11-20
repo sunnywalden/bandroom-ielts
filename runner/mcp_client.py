@@ -310,12 +310,57 @@ class SiteClient:
             return combined
 
     # -- Grant GET/PUT ----------------------------------------------------
-    def get_bytes(self, url: str, *, timeout: float | None = None) -> bytes:
-        """GET a signed grant URL with the service token headers attached."""
-        response = self._send(
-            "GET", url, headers={"accept": "*/*"}, timeout=timeout, expected_json=False
+    def _binary_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        body: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> bytes:
+        """Send a grant-bound binary request; classify 4xx error codes.
+
+        The review-transfer route returns ``{error: code, retryable?}`` JSON on
+        failure. Surface the machine code as a ToolError so the orchestrator can
+        classify permanent transfer failures (artifact_conflict,
+        invalid_decode_checkpoint, transfer_expired, ...) instead of treating
+        every 4xx as a generic retryable transport error (iteration-31 U-MJ-5).
+        """
+        extra = {"accept": "*/*"}
+        if headers:
+            extra.update(headers)
+        response = self._transport(
+            method, url, self._service_headers(extra), body, timeout or self.timeout
         )
+        status = response.status
+        if status in _REDIRECT_STATUSES or status in (401, 403):
+            self._check_response(response, expected_json=False)  # raises AuthError
+        if status == 429 or status >= 500:
+            raise TransportError(f"site returned HTTP {status}")
+        if status >= 400:
+            code = None
+            retryable = False
+            try:
+                parsed = response.json()
+                if isinstance(parsed, dict):
+                    code = parsed.get("error")
+                    retryable = bool(parsed.get("retryable"))
+            except McpError:
+                pass
+            raise ToolError(
+                f"review-transfer HTTP {status}: {code or 'error'}",
+                code=str(code) if code else None,
+                retryable=retryable,
+            )
         return response.body
+
+    def get_bytes(
+        self, url: str, *, headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> bytes:
+        """GET a signed grant URL with the service token headers attached."""
+        return self._binary_request("GET", url, headers=headers, timeout=timeout)
 
     def put_bytes(
         self,
@@ -326,15 +371,7 @@ class SiteClient:
         timeout: float | None = None,
     ) -> bytes:
         """PUT a signed grant URL with the service token headers attached."""
-        extra = {"content-type": "application/octet-stream", "accept": "*/*"}
+        extra = {"content-type": "application/octet-stream"}
         if headers:
-            extra.update(headers)
-        response = self._send(
-            "PUT",
-            url,
-            body=body,
-            headers=extra,
-            timeout=timeout,
-            expected_json=False,
-        )
-        return response.body
+            extra = {**extra, **headers}
+        return self._binary_request("PUT", url, body=body, headers=extra, timeout=timeout)

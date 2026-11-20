@@ -39,6 +39,7 @@ from typing import Any, Callable, Mapping
 
 from . import audio as audio_module
 from . import grounded_audio
+from . import review_transfer
 from .audio import AudioError, PreparedAudio
 from .content_rules import (
     PROMPT_VERSION,
@@ -153,6 +154,15 @@ QUEUE_PERMANENT_CODES = frozenset(
         "analysis_not_allowed",
         "content_rule_violation",
         "snapshot_invalid",
+        # Deterministic decoded-checkpoint transfer failures (rev3 U-MJ-5):
+        # retrying identical bytes cannot fix these.
+        "artifact_conflict",
+        "invalid_decode_checkpoint",
+        "transfer_expired",
+        "checkpoint_advanced",
+        "decoded_too_long",
+        "recording_mismatch",
+        "recording_digest_unavailable",
     }
 )
 
@@ -224,6 +234,10 @@ class RunnerConfig:
     coach_audio_mode: str | None = None
     grounded: GroundedConfig = field(default_factory=GroundedConfig)
     grounded_cost_cny: float = 0.10
+    # Queue-path grounded-prosody analysis version (iteration-31 rev3). Must match
+    # the Worker's GROUNDED_ANALYSIS_VERSION / GROUNDED_RELEASED_VERSIONS so the
+    # decoded-checkpoint manifest and complete_review_task bind the same version.
+    grounded_analysis_version: str = "grounded-prosody-v1"
     # Multi-tenant queue path (P2b, iteration-30 wiring plan). Default OFF: the
     # single-owner run() path is byte-for-byte unchanged until the owner enables
     # it. When True, run() forks to run_multi_tenant() which claims cross-tenant
@@ -321,6 +335,9 @@ def load_config(path: str | Path) -> RunnerConfig:
         coach_audio_mode=mode,
         grounded=grounded,
         grounded_cost_cny=float(budget.get("grounded_cost_cny", 0.10)),
+        grounded_analysis_version=str(
+            runner.get("grounded_analysis_version", "grounded-prosody-v1")
+        ),
         multi_tenant=bool(runner.get("multi_tenant", False)),
         tenant_per_user_cap_cny=float(runner.get("tenant_per_user_cap_cny", 2.0)),
         tenant_global_cap_cny=(
@@ -477,6 +494,10 @@ class Produced:
     recording_id: str | None = None
     recording_sha256: str | None = None
     audio_used: bool = False
+    # Queue-path grounded-prosody wire analysis (rev3). When present, complete_args
+    # sends it (server validates via validateGroundedAnalysis); the owner path
+    # ignores it and uses validated.analysis (feedbackSpec.groundedAnalysis shape).
+    queue_analysis: Mapping[str, Any] | None = None
 
     def owner_args(self) -> dict[str, Any]:
         return feedback_to_tool_args(
@@ -498,11 +519,16 @@ class Produced:
         }
         if self.recording_sha256:
             args["recordingSha256"] = self.recording_sha256
-        if self.validated.analysis is not None:
-            args["analysis"] = dict(self.validated.analysis)
-        if analysis_version:
-            args["analysisVersion"] = analysis_version
-        if self.validated.pronunciation is not None and self.recording_id:
+        analysis = self.queue_analysis if self.queue_analysis is not None else self.validated.analysis
+        if analysis is not None:
+            args["analysis"] = dict(analysis)
+        version = analysis_version
+        if version is None and self.queue_analysis is not None:
+            version = str(self.queue_analysis.get("analysisVersion") or "") or None
+        if version:
+            args["analysisVersion"] = version
+        # The grounded-prosody class emits no pronunciation band (T2 retired).
+        if self.queue_analysis is None and self.validated.pronunciation is not None and self.recording_id:
             args["pronunciation"] = {
                 "band": self.validated.pronunciation.band,
                 "reviewedWholeClip": True,
@@ -963,6 +989,7 @@ class CoachRunner:
             recording_id=recording_id,
             recording_sha256=audio_module.sha256_bytes(raw),
             audio_used=True,
+            queue_analysis=getattr(produced, "queue_analysis", None),
         )
 
     def _review_audio_grounded(
@@ -1159,15 +1186,35 @@ class CoachRunner:
             produced = self._produce_grounded(
                 attempt, day, raw, tenant_user_id=user_id
             )
+            # Bind the analysis to a verified decoded input (rev3 A1): commit the
+            # 16 kHz PCM checkpoint under the current lease before completing. The
+            # manifest version must equal the completion analysisVersion.
+            grounded_version = self.config.grounded_analysis_version
+            if produced.queue_analysis is not None:
+                grounded_version = str(
+                    produced.queue_analysis.get("analysisVersion") or grounded_version
+                )
+            with tempfile.TemporaryDirectory(prefix="bandroom-transfer-") as directory:
+                review_transfer.commit_decoded_checkpoint(
+                    self.client, task_id, fence, raw,
+                    analysis_version=grounded_version,
+                    workdir=Path(directory),
+                    run_id=run_id,
+                    ffmpeg=getattr(self.config.grounded, "ffmpeg", None),
+                    logger=self._logger,
+                )
+            arguments = produced.complete_args(
+                task_id, fence, analysis_version=grounded_version
+            )
         else:
             cost = self.config.text_cost_cny
             if not budget.reserve(user_id, cost):
                 return False
             produced = self._produce_text(attempt, day)
+            arguments = produced.complete_args(
+                task_id, fence, analysis_version=task.get("analysisVersion")
+            )
 
-        arguments = produced.complete_args(
-            task_id, fence, analysis_version=task.get("analysisVersion")
-        )
         try:
             result = self.client.call_tool(
                 "complete_review_task", arguments, client_run_id=run_id
@@ -1177,6 +1224,10 @@ class CoachRunner:
                 # Fail-closed: the speaking completion contract is not released;
                 # block once rather than burn claim attempts (owner decision A).
                 raise PermanentTaskError(exc.code or "complete_rejected", str(exc)) from exc
+            raise
+        except AudioError as exc:
+            if exc.code in QUEUE_PERMANENT_CODES or not exc.retryable:
+                raise PermanentTaskError(exc.code, str(exc)) from exc
             raise
         if not isinstance(result, Mapping) or not result.get("receiptId"):
             raise McpError("complete_review_task did not return a receipt")
