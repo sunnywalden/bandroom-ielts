@@ -188,6 +188,29 @@ measurement is a FAILED criterion, never an inferred pass. The hardened
 transport patterns (browser `PROBE_UA`, no-redirect opener, transport-only
 retries) are inherited as a new versioned profile.
 
+## 8.1 Independent G5 24h launchd window (iteration-27 closure)
+
+`run-g5-observation-eval.sh` opens and drives a genuinely independent 24h
+window without touching the production window (`~/.bandroom-acoustic/`):
+
+- launchd label `com.bandroom.g5-observation-eval`, `StartInterval` 1800,
+  `RunAtLoad` true;
+- state under `~/.bandroom-g5-local/observation/` (`window.json`, `wakes.json`,
+  `verdict.json`, `logs/`);
+- the first scheduled wake opens the window (`start`=wake time,
+  `scheduled_end`=+24h) and records a local-scheduler wake; every subsequent
+  wake appends one wake record, then runs `g5_observation_eval.py`;
+- once a verdict exists for the window the job goes quiescent (no further
+  wakes, no re-evaluation).
+
+macOS TCC: launchd cannot read `~/Documents`. The canonical source lives here;
+the live copies are mirrored byte-identical to
+`~/.bandroom-g5-local/bin/{run-g5-observation-eval.sh,g5_observation_eval.py}`
+and the installed plist is
+`~/Library/LaunchAgents/com.bandroom.g5-observation-eval.plist`. The evaluator
+never reads or writes `~/.bandroom-acoustic/OBSERVATION_WINDOW*.json`.
+`BANDROOM_G5_HEALTH_URL` is deliberately unset (C7 off): no production probe.
+
 ## 9. Local C/D result (this machine)
 
 Run:
