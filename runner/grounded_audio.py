@@ -2196,7 +2196,11 @@ def review_speaking_grounded(
 
         llm_analysis: Mapping[str, Any] | None = None
         complete_scorecard = getattr(model, "complete_scorecard", None)
-        budget_ok = reserve_scorecard() if callable(reserve_scorecard) else True
+        # Reserve ONLY when a call will actually be made: reserving on every
+        # grounded review (even with no transcript/detector) overstates spend
+        # in the daily ledger and can pause the runner early.
+        call_possible = bool(transcript_words) and callable(complete_scorecard)
+        budget_ok = (reserve_scorecard() if callable(reserve_scorecard) else True) if call_possible else False
         if transcript_words and budget_ok and callable(complete_scorecard):
             sc_system, sc_user = scorecard_module.build_scorecard_prompt(
                 transcript_words,
@@ -2221,17 +2225,18 @@ def review_speaking_grounded(
                 }, ensure_ascii=False))
         elif transcript_words and not budget_ok:
             log.info(json.dumps({"event": "scorecard_skipped", "reason": "budget_paused"}))
-        scorecard_doc = scorecard_module.build_scorecard(
+        card = scorecard_module.build_scorecard(
             calibrated=analysis.get("calibrated") or {},
             words=transcript_words,
             llm=llm_analysis,
             candidate_count=len(t3_documents),
         )
+        scorecard_doc = card
         # Speak-style say-it-better loop: canonical model audio for each drill
         # sentence. Fail-closed — unavailable TTS never blocks the review.
-        if contrast_enabled and scorecard_doc.get("drills"):
+        if contrast_enabled and card.get("drills"):
             drill_summary = enrich_drills(
-                scorecard_doc["drills"],
+                card["drills"],
                 enabled=True,
                 transport=getattr(config, "contrast_transport", None),
                 api_key=str(getattr(config, "api_key", "") or ""),

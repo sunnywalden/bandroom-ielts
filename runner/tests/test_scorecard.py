@@ -124,7 +124,26 @@ def test_build_scorecard_full_and_degraded():
     assert [c["key"] for c in degraded["criteria"]] == ["fluency_coherence", "pronunciation"]
     assert degraded["transcript"] is None
     assert degraded["llm_status"] == "unavailable"
-    assert degraded["overall"]["basis_zh"] == "仅流利度可估（无转写）"
+    assert degraded["overall"]["basis_zh"] == "流利度与连贯性参考估计均值"
+
+
+def test_overall_basis_names_the_scored_criteria_not_four():
+    llm = {"grammar_issues": [], "lexical_issues": [], "drills": []}
+    card = sc.build_scorecard(calibrated=CAL, words=WORDS, llm=llm, candidate_count=0)
+    assert card["overall"]["basis_zh"] == "流利度与连贯性、词汇、语法参考估计均值"
+    # FC refused (no measurable speech) while a transcript exists: the label
+    # must say what WAS averaged and that fluency was excluded.
+    refused = sc.build_scorecard(calibrated={}, words=WORDS, llm=llm, candidate_count=0)
+    assert "流利度" not in refused["overall"]["basis_zh"].split("（")[0]
+    assert "本次未测得可用语音，流利度不参与" in refused["overall"]["basis_zh"]
+
+
+def test_long_transcript_card_stays_under_transport_cap():
+    many = [{"word": f"w{i}", "start": i * 0.3, "end": i * 0.3 + 0.2, "probability": 0.9} for i in range(2000)]
+    card = sc.build_scorecard(calibrated=CAL, words=many, llm=None, candidate_count=0)
+    import json
+    assert len(json.dumps(card, ensure_ascii=False)) < 65536, "the card must fit the 64 KiB coercion cap"
+    assert "words" not in (card["transcript"] or {})
 
 
 def test_fabricated_llm_issues_never_reach_scorecard():

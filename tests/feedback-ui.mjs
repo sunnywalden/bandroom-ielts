@@ -389,6 +389,62 @@ test('score-first scorecard renders bands, honest statuses, transcript and drill
  assert.equal(puts().length,0);
 });
 
+test('drill replay locates the FULL quote, not a first-word prefix',async()=>{
+ const audioId='55555555-5555-4555-8555-555555555555';
+ state.stage='speak';
+ state.entries[12]={speakingPhase:'review',speakingComplete:'yes',
+  speakingPart2:JSON.stringify([{at:'2026-11-09T01:00:00Z',text:'Fixture Part 2',spoken:true,audio:audioId}]),
+  speakingFollowup:JSON.stringify([{at:'2026-11-09T01:02:00Z',text:'Fixture follow-up',spoken:true}])};
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='speakingPart2');
+ assert.ok(source);
+ // "is" appears before "I went": a prefix match would play the wrong segment.
+ const words=[{word:'is',start:.5,end:.8,probability:.9},{word:'a',start:.9,end:1.1,probability:.9},
+  {word:'short',start:1.2,end:1.6,probability:.9},{word:'video',start:1.7,end:2.1,probability:.9},
+  {word:'I',start:4.0,end:4.2,probability:.9},{word:'went',start:4.3,end:4.8,probability:.9},
+  {word:'there',start:4.9,end:5.3,probability:.9},{word:'last',start:5.4,end:5.7,probability:.9}];
+ const scorecard={schema:'bandroom-speaking-scorecard-v1',
+  overall:{band:6,status:'reference',disclosure_zh:'参考估计',basis_zh:'流利度与连贯性参考估计均值'},
+  criteria:[{key:'fluency_coherence',label_zh:'流利度与连贯性',band:6,status:'reference',disclosure_zh:'参考估计',evidence:{}}],
+  drills:[{quote:'I went there',improved:'I went there last year.',focus_zh:'过去时'}],llm_status:'ok'};
+ feedback=[{id:'fb-drill',day:12,stage:'speak',attempt:source.id,evidence:'Drill fixture',feedback:'一、评估：继续。',createdAt:'2026-11-09T01:00:00Z',
+  analysis:{schema:'bandroom-grounded-analysis-v2',speechSeconds:10,items:[],transcript:words,scorecard}}];
+ await mount();
+ const section=document.querySelector('[aria-label="口语 Part 2 · 首次回答反馈"]');
+ const drill=section.querySelector('.ss-drill');
+ assert.ok(drill);
+ // Clip player window: start-500ms .. end+500ms of words[4..6] = 3.5–5.8s.
+ assert.match(drill.textContent,/第 3\.5–5\.8 秒/);
+});
+
+test('a superseded word play does not show an error hint',async()=>{
+ const audioId='66666666-6666-4666-8666-666666666666';
+ state.stage='speak';
+ state.entries[12]={speakingPhase:'review',speakingComplete:'yes',
+  speakingPart2:JSON.stringify([{at:'2026-11-09T01:00:00Z',text:'Fixture Part 2',spoken:true,audio:audioId}]),
+  speakingFollowup:JSON.stringify([{at:'2026-11-09T01:02:00Z',text:'Fixture follow-up',spoken:true}])};
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='speakingPart2');
+ assert.ok(source);
+ const words=[{word:'one',start:1,end:1.4,probability:.9},{word:'two',start:1.5,end:1.9,probability:.9}];
+ const scorecard={schema:'bandroom-speaking-scorecard-v1',
+  overall:{band:6,status:'reference',disclosure_zh:'参考估计',basis_zh:'流利度与连贯性参考估计均值'},
+  criteria:[{key:'fluency_coherence',label_zh:'流利度与连贯性',band:6,status:'reference',disclosure_zh:'参考估计',evidence:{}}],
+  drills:[],llm_status:'ok'};
+ feedback=[{id:'fb-play',day:12,stage:'speak',attempt:source.id,evidence:'Play fixture',feedback:'一、评估：继续。',createdAt:'2026-11-09T01:00:00Z',
+  analysis:{schema:'bandroom-grounded-analysis-v2',speechSeconds:5,items:[],transcript:words,scorecard}}];
+ const realPlay=dom.window.HTMLMediaElement.prototype.play;
+ dom.window.HTMLMediaElement.prototype.play=async()=>{const error=new Error('superseded');error.name='AbortError';throw error;};
+ try{
+  await mount();
+  const card=document.querySelector('[aria-label="口语 Part 2 · 首次回答反馈"] .ss-card');
+  assert.ok(card);
+  const buttons=card.querySelectorAll('.ss-word');
+  await act(async()=>{buttons[0].click();});
+  await act(async()=>{buttons[1].click();});
+  await flush();
+  assert.doesNotMatch(card.textContent,/原录音暂时无法播放/);
+ }finally{dom.window.HTMLMediaElement.prototype.play=realPlay;}
+});
+
 test('additions are hidden by the precision-first display',async()=>{
  const audioId='33333333-3333-4333-8333-333333333333';
  state.stage='speak';

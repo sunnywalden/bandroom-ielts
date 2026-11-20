@@ -102,7 +102,23 @@ def transcript_text(words: Sequence[Mapping[str, Any]]) -> str:
 
 
 def _norm_quote(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text).lower()).strip()
+    """Lowercase, drop punctuation (keep apostrophes), collapse whitespace.
+
+    Punctuation-insensitive so a quote spanning a sentence boundary still
+    traces to the transcript; word boundaries are enforced at match time so a
+    mid-word fragment ("choo" inside "school") can never pass as verbatim.
+    """
+    cleaned = re.sub(r"[^a-z0-9'\s]", " ", str(text).lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _quote_in_transcript(quote: str, text: str) -> bool:
+    target = _norm_quote(quote)
+    haystack = _norm_quote(text)
+    if not target:
+        return False
+    pattern = r"(?<![a-z0-9'])" + re.escape(target) + r"(?![a-z0-9'])"
+    return re.search(pattern, haystack) is not None
 
 
 def fluency_card(
@@ -234,7 +250,6 @@ def validate_issues(
     """
     if not isinstance(raw, (list, tuple)):
         return []
-    haystack = _norm_quote(text)
     out: list[dict[str, Any]] = []
     for item in raw:
         if not isinstance(item, Mapping):
@@ -242,7 +257,7 @@ def validate_issues(
         quote = str(item.get("quote") or "").strip()
         if not quote or len(quote) > MAX_QUOTE_CHARS:
             continue
-        if _norm_quote(quote) not in haystack:
+        if not _quote_in_transcript(quote, text):
             continue
         if kind == "grammar":
             fix = str(item.get("fix") or "").strip()
@@ -273,7 +288,6 @@ def validate_issues(
 def validate_drills(raw: Any, text: str) -> list[dict[str, Any]]:
     if not isinstance(raw, (list, tuple)):
         return []
-    haystack = _norm_quote(text)
     out: list[dict[str, Any]] = []
     for item in raw:
         if not isinstance(item, Mapping):
@@ -283,7 +297,7 @@ def validate_drills(raw: Any, text: str) -> list[dict[str, Any]]:
         focus = str(item.get("focus_zh") or "").strip()
         if not quote or not improved or len(quote) > MAX_QUOTE_CHARS or len(improved) > MAX_QUOTE_CHARS:
             continue
-        if _norm_quote(quote) not in haystack:
+        if not _quote_in_transcript(quote, text):
             continue
         out.append({"quote": quote, "improved": improved, "focus_zh": focus[:MAX_QUOTE_CHARS]})
         if len(out) >= MAX_DRILLS:
@@ -326,23 +340,31 @@ def build_scorecard(
         _clamp_band(sum(c["band"] for c in band_cards) / len(band_cards))
         if band_cards else None
     )
+    # Derive the label from what was actually averaged: pronunciation is never
+    # scored, and FC refuses to score without measurable speech, so a fixed
+    # "四科" label would misdescribe the evidence.
+    scored_labels = [str(c.get("label_zh") or c.get("key")) for c in band_cards]
+    if scored_labels:
+        basis = "、".join(scored_labels) + "参考估计均值"
+        if not any(c.get("key") == "fluency_coherence" and c.get("band") is not None for c in cards):
+            basis += "（本次未测得可用语音，流利度不参与）"
+    else:
+        basis = "无可估科目"
     return {
         "schema": SCHEMA,
         "overall": {
             "band": overall,
             "status": STATUS_REFERENCE,
             "disclosure_zh": _REFERENCE_DISCLOSURE_ZH,
-            "basis_zh": (
-                "四科参考估计均值" if len(band_cards) >= 3
-                else "仅流利度可估（无转写）" if band_cards
-                else "无可估科目"
-            ),
+            "basis_zh": basis,
         },
         "criteria": cards,
+        # The full word list travels once in groundedAnalysis.transcript; the
+        # card only marks provenance. Embedding a 2000-word copy here pushed the
+        # card past the transport's 64 KiB cap for long recordings.
         "transcript": {
             "source": "whisper-large-v3-turbo",
             "status": STATUS_ASR,
-            "words": list(words),
         } if words else None,
         "drills": drills,
         "llm_status": "ok" if llm is not None else "unavailable",

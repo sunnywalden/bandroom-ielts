@@ -545,6 +545,33 @@ def test_stage_b_failure_falls_closed_to_stage_a(tmp_path):
     assert "self_listen_suggestions\": []" in model.calls[0][1]
 
 
+def test_scorecard_does_not_reserve_budget_without_a_call(tmp_path):
+    """No transcript => no scorecard LLM call => no text-cost reservation."""
+    attempt = {
+        "id": "v2:speak:0:abc",
+        "stage": "speak",
+        "recordingId": RECORDING_ID,
+        "response": "I think this is fine.",
+    }
+    config = grounded_config_obj(tmp_path)  # self_listen disabled: no transcript
+    reservations: list[int] = []
+    produced = review_speaking_grounded(
+        b"raw",
+        attempt,
+        12,
+        config=config,
+        model=FakeGroundedModel(),
+        workdir=tmp_path / "work",
+        decode_wav=fake_decode,
+        reserve_scorecard=lambda: reservations.append(1) or True,
+    )
+    assert reservations == [], "budget must not be reserved when no call happens"
+    assert produced.analysis is not None
+    card = produced.analysis["scorecard"]
+    assert card["llm_status"] == "unavailable"
+    assert [c["key"] for c in card["criteria"]] == ["fluency_coherence", "pronunciation"]
+
+
 def test_stage_b_candidates_reach_the_self_listen_section(tmp_path, monkeypatch):
     attempt = {
         "id": "v2:speak:0:abc",

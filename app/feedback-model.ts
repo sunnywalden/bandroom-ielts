@@ -21,7 +21,7 @@ export type SpeakingScorecardData = {
   schema:string;
   overall:{band:number|null;status:string;disclosure_zh:string;basis_zh:string};
   criteria:ScorecardCriterion[];
-  transcript?:{source:string;status:string;words:TranscriptWord[]}|null;
+  transcript?:{source:string;status:string;words?:TranscriptWord[]}|null;
   drills?:SpeakingDrill[];
   llm_status?:string;
 };

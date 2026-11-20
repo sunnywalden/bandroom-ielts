@@ -123,6 +123,7 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive,heading}:{
   const meterCtx=useRef<AudioContext|null>(null);
   const meterRaf=useRef(0);
   const speechSeen=useRef(false);
+  const meterRan=useRef(false);
   const stopMeter=()=>{
     if(typeof cancelAnimationFrame==="function")cancelAnimationFrame(meterRaf.current);
     void meterCtx.current?.close().catch(()=>{});
@@ -131,15 +132,21 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive,heading}:{
   };
   const startMeter=(stream:MediaStream)=>{
     speechSeen.current=false;
+    meterRan.current=false;
+    let ctx:AudioContext|undefined;
     try{
       const Ctor=window.AudioContext??(window as unknown as {webkitAudioContext?:typeof AudioContext}).webkitAudioContext;
       if(!Ctor)return;
-      const ctx=new Ctor();
+      ctx=new Ctor();
+      // Safari/iOS commonly leaves a context created outside the live gesture
+      // suspended; a suspended analyser returns all zeros, which must not be
+      // reported as a silent recording.
+      void ctx.resume().catch(()=>{});
+      meterCtx.current=ctx;
       const source=ctx.createMediaStreamSource(stream);
       const analyser=ctx.createAnalyser();
       analyser.fftSize=1024;
       source.connect(analyser);
-      meterCtx.current=ctx;
       const data=new Float32Array(analyser.fftSize);
       let last=0;
       const loop=(t:number)=>{
@@ -147,7 +154,9 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive,heading}:{
         meterRaf.current=requestAnimationFrame(loop);
         if(t-last<100)return;
         last=t;
+        if(ctx?.state!=='running')return;
         analyser.getFloatTimeDomainData(data);
+        meterRan.current=true;
         let sum=0;
         for(let i=0;i<data.length;i++)sum+=data[i]*data[i];
         const rms=Math.sqrt(sum/data.length);
@@ -155,7 +164,12 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive,heading}:{
         setLevel(Math.min(1,rms*6));
       };
       meterRaf.current=requestAnimationFrame(loop);
-    }catch{/* meter is best-effort; recording must never depend on it */}
+    }catch{
+      // Meter is best-effort; recording must never depend on it. Close a
+      // half-constructed context instead of leaking it.
+      void ctx?.close().catch(()=>{});
+      meterCtx.current=null;
+    }
   };
   const recorder = useRef<MediaRecorder | null>(null);
   const activeStream = useRef<MediaStream | null>(null);
@@ -240,7 +254,7 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive,heading}:{
         stopRequestRef.current=null;
         stopMeter();
         stream?.getTracks().forEach(t => t.stop());
-        if(!speechSeen.current&&parts.length&&mounted.current){
+        if(meterRan.current&&!speechSeen.current&&parts.length&&mounted.current){
           setNotice("电平表显示本次录音全程接近静音：可能麦克风未拾音。建议重录后再提交，否则批改无法分析流利度。");
         }
         // The timeout/error path cancels stop-and-submit before exposing any

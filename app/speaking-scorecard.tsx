@@ -70,6 +70,7 @@ function Issues({cards}:{cards:ScorecardCriterion[]}) {
 function Transcript({words,recordingId,candidates,verdicts}:{words:TranscriptWord[];recordingId?:string;candidates:CoachAnalysis['items'];verdicts?:Record<string,string>}) {
   const audio=useRef<HTMLAudioElement>(null);
   const stopTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
+  const playToken=useRef(0);
   const [active,setActive]=useState<number|null>(null);
   const [error,setError]=useState(false);
   useEffect(()=>()=>{if(stopTimer.current)clearTimeout(stopTimer.current);audio.current?.pause();},[]);
@@ -83,6 +84,7 @@ function Transcript({words,recordingId,candidates,verdicts}:{words:TranscriptWor
     marks.set(idx,verdict==='confirmed'?'confirmed':verdict==='rejected'?'rejected':'suggested');
   }
   function stop(){
+    playToken.current+=1;
     if(stopTimer.current)clearTimeout(stopTimer.current);
     stopTimer.current=null;
     audio.current?.pause();
@@ -93,6 +95,7 @@ function Transcript({words,recordingId,candidates,verdicts}:{words:TranscriptWor
     if(!element||!recordingId)return;
     if(active===index){stop();return;}
     if(stopTimer.current)clearTimeout(stopTimer.current);
+    const token=++playToken.current;
     const w=words[index];
     const from=Math.max(0,w.start-0.12),to=w.end+0.18;
     setError(false);
@@ -100,14 +103,24 @@ function Transcript({words,recordingId,candidates,verdicts}:{words:TranscriptWor
     try{
       if(element.error)element.load();
       element.currentTime=from;
-      void element.play().catch(()=>{setError(true);setActive(null);});
+      element.play().catch((reason:unknown)=>{
+        if(playToken.current!==token)return;
+        // AbortError means a newer play() superseded this one — not a failure.
+        if((reason as {name?:string}|null)?.name==='AbortError')return;
+        setError(true);setActive(null);
+      });
       const tick=()=>{
-        if(!audio.current||audio.current.paused)return;
-        const remaining=(to-audio.current.currentTime)*1000;
+        if(playToken.current!==token)return;
+        const current=audio.current;
+        if(!current)return;
+        // preload="none": the clip may still be loading. Keep polling instead
+        // of giving up, or slow networks play the word into the next sentence.
+        if(current.paused){stopTimer.current=setTimeout(tick,100);return;}
+        const remaining=(to-current.currentTime)*1000;
         if(remaining<=0){stop();return;}
         stopTimer.current=setTimeout(tick,Math.max(20,remaining));
       };
-      stopTimer.current=setTimeout(tick,(to-from)*1000+250);
+      stopTimer.current=setTimeout(tick,100);
     }catch{setError(true);setActive(null);}
   }
   if(!words.length)return null;
@@ -127,14 +140,30 @@ function Transcript({words,recordingId,candidates,verdicts}:{words:TranscriptWor
   </div>;
 }
 
+function normToken(value:string):string {
+  return value.toLowerCase().replace(/[^a-z0-9']/g,' ').replace(/\s+/g,' ').trim();
+}
+
+// Locate the quote by matching its FULL normalized token sequence. A prefix
+// match on the first word is not enough: "I went…" would otherwise resolve to
+// an earlier "is"/"it" and the learner would hear the wrong part of the take.
 function drillRange(words:TranscriptWord[],quote:string):{startMs:number;endMs:number}|null {
-  const first=quote.trim().split(/\s+/)[0]?.toLowerCase().replace(/[^a-z']/g,'');
-  if(!first)return null;
-  const idx=words.findIndex(w=>w.word.toLowerCase().replace(/[^a-z']/g,'').startsWith(first.slice(0,4)));
-  if(idx<0)return null;
-  const count=quote.trim().split(/\s+/).length;
-  const end=words[Math.min(words.length-1,idx+count-1)];
-  return {startMs:Math.round(words[idx].start*1000),endMs:Math.round(end.end*1000)};
+  const target=normToken(quote).split(' ').filter(Boolean);
+  if(!target.length)return null;
+  const flat:{token:string;word:number}[]=[];
+  words.forEach((word,index)=>normToken(word.word).split(' ').filter(Boolean).forEach(token=>flat.push({token,word:index})));
+  for(let start=0;start<=flat.length-target.length;start+=1){
+    let matched=true;
+    for(let offset=0;offset<target.length;offset+=1){
+      if(flat[start+offset].token!==target[offset]){matched=false;break;}
+    }
+    if(!matched)continue;
+    const first=words[flat[start].word];
+    const last=words[flat[start+target.length-1].word];
+    if(!first||!last)return null;
+    return {startMs:Math.round(first.start*1000),endMs:Math.round(last.end*1000)};
+  }
+  return null;
 }
 
 function Drills({drills,words,recordingId}:{drills:SpeakingDrill[];words:TranscriptWord[];recordingId?:string}) {
