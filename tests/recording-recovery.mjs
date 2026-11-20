@@ -21,7 +21,7 @@ export default {async fetch(req){
   return new Response(null,{status:404});
 }}`,resolveDir:process.cwd()},bundle:true,format:'esm',write:false,platform:'browser',external:['cloudflare:workers'],
 plugins:[{name:'identity',setup(b){b.onResolve({filter:/^@\/app\/chatgpt-auth$/},()=>({path:'identity',namespace:'test'}));b.onLoad({filter:/.*/,namespace:'test'},()=>({contents:'export async function getChatGPTUser(){return {userId:"fixture-alice"}}'}));}}]});
-const mf=new Miniflare({host:'127.0.0.1',cf:false,modules:true,script:outputFiles[0].text,compatibilityDate:'2025-03-01',r2Buckets:['BUCKET']});
+const mf=new Miniflare({host:'127.0.0.1',cf:false,modules:true,script:outputFiles[0].text,compatibilityDate:'2025-03-01',r2Buckets:['BUCKET'],bindings:{BANDROOM_CONSENT_GATE:'off',BANDROOM_QUOTA_GATE:'off'}});
 try{
  const url=await mf.ready;
  const post=(path,headers,bytes)=>new Promise((resolve,reject)=>{const req=http.request(new URL(path,url),{method:'POST',headers,agent:false},r=>{

@@ -8,12 +8,13 @@ export function json(value: unknown, status = 200) {
 // tests that only use json/crossOrigin do not need to mock the database binding.
 export async function consentGate(userId: string): Promise<Response | null> {
   const { env } = await import("cloudflare:workers");
-  // No DB binding (e.g. isolated fixtures / binding outage): the route's own DB
-  // operations will fail closed elsewhere; do not turn a missing binding into a
-  // consent error here.
-  if (!(env as { DB?: unknown }).DB) return null;
+  const { consentGateEnabled, assertConsent, ConsentError } = await import("@/lib/consent");
+  // Explicit test-only opt-out (fixtures set BANDROOM_CONSENT_GATE=off). This is
+  // the ONLY way to skip the gate; a missing DB binding must NOT silently allow
+  // voice processing (security review: fail closed).
+  if (!consentGateEnabled()) return null;
+  if (!(env as { DB?: unknown }).DB) return json({ error: "consent_unavailable" }, 503);
   const { getDb } = await import("@/db");
-  const { assertConsent, ConsentError } = await import("@/lib/consent");
   try {
     await assertConsent(getDb(), userId);
     return null;

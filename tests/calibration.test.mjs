@@ -89,7 +89,10 @@ async function applyMigrations(db){
   const files=(await readdir(join(root,"drizzle"))).filter(file=>file.endsWith(".sql")).sort();
   for(const file of files){
     const body=await readFile(join(root,"drizzle",file),"utf8");
-    for(const query of body.split(";").map(part=>part.replaceAll("--> statement-breakpoint","").trim()).filter(Boolean)){
+    // Strip line comments before splitting on ';': migration prose contains
+    // semicolons, and a comment-only fragment is not a runnable statement.
+    const sqlText=body.split("\n").map(line=>{const at=line.indexOf("--");return at<0?line:line.slice(0,at);}).join("\n");
+    for(const query of sqlText.split(";").map(part=>part.trim()).filter(Boolean)){
       await db.prepare(query).run();
     }
   }
@@ -106,8 +109,8 @@ try{
 
   const db=await createRuntime();
   const migrationFiles=await applyMigrations(db);
-  equal(migrationFiles.length,11,"eleven migrations");
-  equal(migrationFiles.at(-1),"0010_claim_any_index.sql");
+  equal(migrationFiles.length,16,"sixteen migrations");
+  equal(migrationFiles.at(-1),"0015_mt4_tenant_metrics.sql");
   // The new objects are present and the migration is additive.
   for(const table of ["personal_calibration","calibration_candidates","calibration_events"]){
     const row=await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").bind(table).first();
