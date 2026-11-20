@@ -6,7 +6,7 @@
 // deliberately NOT reachable with a PAT (scope resolves to "learner").
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
-import { userTokens } from "@/db/schema";
+import { userTokens, users } from "@/db/schema";
 import * as schema from "@/db/schema";
 
 const TOKEN_PREFIX = "brpat_";
@@ -49,7 +49,9 @@ export async function createPat(
   return { id, token, createdAt };
 }
 
-/** Resolve a bearer PAT to its tenant. Returns null for invalid/revoked tokens. */
+/** Resolve a bearer PAT to its tenant. Returns null for invalid/revoked tokens
+ *  OR tokens whose tenant is not active (security review: a suspended/revoked
+ *  tenant's PAT must die immediately, not linger until token revocation). */
 export async function resolvePat(db: PatDb, token: string): Promise<{ userId: string } | null> {
   if (typeof token !== "string" || !token.startsWith(TOKEN_PREFIX)) return null;
   const tokenHash = await sha256Hex(token);
@@ -57,12 +59,23 @@ export async function resolvePat(db: PatDb, token: string): Promise<{ userId: st
     id: userTokens.id,
     userId: userTokens.userId,
   }).from(userTokens)
-    .where(and(eq(userTokens.tokenHash, tokenHash), isNull(userTokens.revokedAt)))
+    .innerJoin(users, eq(users.userId, userTokens.userId))
+    .where(and(
+      eq(userTokens.tokenHash, tokenHash),
+      isNull(userTokens.revokedAt),
+      eq(users.status, "active"),
+    ))
     .get();
   if (!row) return null;
   await db.update(userTokens).set({ lastUsedAt: Date.now() })
     .where(eq(userTokens.id, row.id)).run();
   return { userId: row.userId };
+}
+
+/** Revoke ALL of a tenant's tokens (called on suspend/revoke so PATs die at once). */
+export async function revokeAllPats(db: PatDb, userId: string): Promise<void> {
+  await db.update(userTokens).set({ revokedAt: Date.now() })
+    .where(and(eq(userTokens.userId, userId), isNull(userTokens.revokedAt))).run();
 }
 
 /** Revoke one of the caller's own tokens. Another tenant's id never matches. */

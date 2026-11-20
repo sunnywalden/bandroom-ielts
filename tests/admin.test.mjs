@@ -230,6 +230,29 @@ test("redeemInvite refuses expired, email-mismatched and revoked tenants", async
   assert.equal(row("SELECT status FROM users WHERE user_id=?", revokedUser).status, "revoked");
 });
 
+test("redeemInvite refuses a suspended tenant (security review: no resurrection)", async () => {
+  const userId = insertUser({ status: "suspended", email: "susp@example.com" });
+  const { code } = await admin.createInvite(db, "admin-1", { email: "susp@example.com", ttlMs: 60_000 });
+  assert.deepEqual(await admin.redeemInvite(db, code, userId), { redeemed: false });
+  assert.equal(row("SELECT status FROM users WHERE user_id=?", userId).status, "suspended",
+    "suspended tenant is not re-activated by an invite");
+});
+
+test("suspendUser and revokeUser kill the tenant's PATs immediately (security review)", async () => {
+  const { createPat, resolvePat } = await import("../lib/pat.ts");
+  const userId = insertUser({ status: "active", email: "pat@example.com" });
+  const pat = await createPat(db, userId);
+  assert.deepEqual(await resolvePat(db, pat.token), { userId });
+  await admin.suspendUser(db, "admin-1", userId, "policy");
+  assert.equal(await resolvePat(db, pat.token), null, "suspend revokes PATs");
+  assert.ok(row("SELECT revoked_at FROM user_tokens WHERE id=?", pat.id).revoked_at > 0);
+
+  const userId2 = insertUser({ status: "active", email: "pat2@example.com" });
+  const pat2 = await createPat(db, userId2);
+  await admin.revokeUser(db, "admin-1", userId2, "delete");
+  assert.equal(await resolvePat(db, pat2.token), null, "revoke revokes PATs");
+});
+
 test("logAdminAudit appends the documented fields", async () => {
   await admin.logAdminAudit(db, {
     actorUserId: "admin-9",

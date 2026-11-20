@@ -25,7 +25,7 @@ registerHooks({
     return next(specifier, context);
   },
 });
-const {requireOwnerScope, evaluateOwnerScope, evaluateUserScope, requireUserScope, isCanonicalOrigin} = await import("../lib/route-guard.ts");
+const {requireOwnerScope, evaluateOwnerScope, evaluateUserScope, requireUserScope, requireAdminScope, evaluateAdminScope, evaluateBreakglassScope, isCanonicalOrigin} = await import("../lib/route-guard.ts");
 
 const ownerUser = {userId: "owner-1", displayName: "Owner", email: "owner@example.com", fullName: null};
 const owner = {user: ownerUser, scope: "owner", identityType: "access-jwt"};
@@ -98,6 +98,46 @@ test("read-only mirror rejects writes but keeps reads available", async () => {
   assert.equal(write.status, 403);
   assert.deepEqual(await write.json(), {error: "read_only"});
   setEnv();
+});
+
+test("admin scope: owner/admin accepted, learner/service rejected (MT-2)", async () => {
+  setEnv();
+  for (const scope of ["owner", "admin"]) {
+    globalThis.__guardCtx = {user: ownerUser, scope, identityType: "access-jwt"};
+    assert.deepEqual(await requireAdminScope(), {user: ownerUser}, scope);
+  }
+  for (const scope of ["learner", "coach", "coach-runner", "breakglass"]) {
+    globalThis.__guardCtx = {user: ownerUser, scope, identityType: "access-jwt"};
+    const result = await requireAdminScope();
+    assert.ok(result instanceof Response, scope);
+    assert.equal(result.status, 403, scope);
+  }
+});
+
+test("admin writes honour read-only mirror mode (security review)", async () => {
+  globalThis.__guardCtx = {user: ownerUser, scope: "admin", identityType: "access-jwt"};
+  setEnv({BANDROOM_READONLY: "1"});
+  const read = await requireAdminScope();
+  assert.deepEqual(read, {user: ownerUser});
+  const write = await requireAdminScope({write: true});
+  assert.ok(write instanceof Response);
+  assert.equal(write.status, 403);
+  assert.deepEqual(await write.json(), {error: "read_only"});
+  setEnv();
+});
+
+test("breakglass scope is read-only and distinct (S10.1)", async () => {
+  setEnv();
+  globalThis.__guardCtx = {user: ownerUser, scope: "breakglass", identityType: "access-jwt"};
+  assert.deepEqual(evaluateBreakglassScope(globalThis.__guardCtx), {user: ownerUser});
+  const write = evaluateBreakglassScope(globalThis.__guardCtx, {write: true});
+  assert.ok(write instanceof Response);
+  assert.equal(write.status, 403);
+  assert.deepEqual(await write.json(), {error: "breakglass_read_only"});
+  // A non-breakglass scope cannot use the breakglass guard.
+  const wrong = evaluateBreakglassScope({user: ownerUser, scope: "admin", identityType: "access-jwt"});
+  assert.ok(wrong instanceof Response);
+  assert.equal(wrong.status, 403);
 });
 
 test("canonical origin accepts only the configured host", () => {

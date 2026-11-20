@@ -17,6 +17,7 @@ import {
   users,
 } from "@/db/schema";
 import type * as schema from "@/db/schema";
+import { revokeAllPats } from "./pat";
 
 export type AdminDb = DrizzleD1Database<typeof schema>;
 
@@ -152,6 +153,9 @@ export async function suspendUser(
     .returning({ userId: users.userId })
     .get();
   const suspended = Boolean(row);
+  // Security review: kill the tenant's PATs immediately so a suspended tenant
+  // cannot keep acting through a still-valid bearer token.
+  if (suspended) await revokeAllPats(db, targetUserId);
   await logAdminAudit(db, {
     actorUserId,
     action: "suspend",
@@ -187,6 +191,8 @@ export async function revokeUser(
     .returning({ userId: users.userId })
     .get();
   const revoked = Boolean(row);
+  // Security review: kill the tenant's PATs immediately on revocation.
+  if (revoked) await revokeAllPats(db, targetUserId);
   await logAdminAudit(db, {
     actorUserId,
     action: "revoke",
@@ -292,7 +298,9 @@ export async function redeemInvite(
     emailNormalized: users.emailNormalized,
     status: users.status,
   }).from(users).where(eq(users.userId, userId)).get();
-  if (!user || user.status === "revoked") return { redeemed: false };
+  // Security review: redemption may ONLY activate a pending tenant. It must
+  // never resurrect a suspended tenant or re-activate an already-active one.
+  if (!user || user.status !== "pending") return { redeemed: false };
   if (invite.email && invite.email.toLowerCase() !== String(user.emailNormalized ?? "").toLowerCase()) {
     return { redeemed: false };
   }
@@ -304,10 +312,15 @@ export async function redeemInvite(
     .get();
   if (!claimed) return { redeemed: false };
 
-  await db.update(users)
+  // Conditional activation: only pending -> active. If the tenant changed state
+  // concurrently (suspended/revoked), the UPDATE matches nothing and we report
+  // failure rather than resurrecting it.
+  const activated = await db.update(users)
     .set({ status: "active", updatedAt: now })
-    .where(eq(users.userId, userId))
-    .run();
+    .where(and(eq(users.userId, userId), eq(users.status, "pending")))
+    .returning({ userId: users.userId })
+    .get();
+  if (!activated) return { redeemed: false };
   await logAdminAudit(db, {
     actorUserId: userId,
     action: "invite_redeem",

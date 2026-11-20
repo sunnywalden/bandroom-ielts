@@ -76,16 +76,24 @@ export async function requireUserScope(
 // MT-2 (S10.1): admin management gate. Only owner or admin may reach the
 // /api/admin/* aggregate routes. Admin is content-blind by default; cross-tenant
 // content requires an explicit break-glass grant (evaluateBreakglassScope).
-export function evaluateAdminScope(context: AuthContext): OwnerScopeResult {
+export function evaluateAdminScope(
+  context: AuthContext,
+  options: { write?: boolean } = {},
+): OwnerScopeResult {
   if (!context.user) return json({ error: "sign_in_required" }, 401);
   if (context.scope !== "owner" && context.scope !== "admin") {
     return json({ error: "admin_scope_required" }, 403);
   }
+  // Security review: admin writes must honour read-only mirror mode, parity
+  // with evaluateUserScope. Mutating admin routes pass {write:true}.
+  if (options.write && readOnlyMode()) return json({ error: "read_only" }, 403);
   return { user: context.user };
 }
 
-export async function requireAdminScope(): Promise<OwnerScopeResult> {
-  return evaluateAdminScope(await currentAuthContext());
+export async function requireAdminScope(
+  options: { write?: boolean } = {},
+): Promise<OwnerScopeResult> {
+  return evaluateAdminScope(await currentAuthContext(), options);
 }
 
 // MT-2 (S10.1): break-glass is a distinct READ-ONLY, target-bound scope. It is

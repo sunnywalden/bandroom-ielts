@@ -16,7 +16,7 @@ type RouteContext = { params: Promise<{ id: string }> | { id: string } | null };
 /** Tenant lifecycle transitions. The target id comes from the URL, never a body. */
 export async function POST(request: Request, context: RouteContext) {
   if (crossOrigin(request)) return json({ error: "invalid_origin" }, 403);
-  const auth = await requireAdminScope();
+  const auth = await requireAdminScope({ write: true });
   if (auth instanceof Response) return auth;
   const params = await context?.params;
   const targetUserId = params?.id;

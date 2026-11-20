@@ -20,7 +20,7 @@ const bodySpec = z.strictObject({
 
 export async function POST(request: Request) {
   if (crossOrigin(request)) return json({ error: "invalid_origin" }, 403);
-  const auth = await requireAdminScope();
+  const auth = await requireAdminScope({ write: true });
   if (auth instanceof Response) return auth;
   const body = await limitedBody(request, 256 * 1024);
   if (body instanceof Response) return body;

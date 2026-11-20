@@ -69,6 +69,16 @@ const { resolveAuthContext } = await import("../lib/auth-adapter.ts");
 const sha256 = value => createHash("sha256").update(value).digest("hex");
 const tokenRows = () => sql.prepare("SELECT * FROM user_tokens ORDER BY created_at").all().map(row => ({ ...row }));
 
+// resolvePat now requires an ACTIVE users row (security review: suspended/revoked
+// tenants' PATs must die). Seed active tenants for the resolution tests.
+function seedUser(userId, status = "active") {
+  const now = Date.now();
+  sql.prepare(`INSERT INTO users (user_id, idp_iss, idp_sub, email_normalized, role, status, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET status=excluded.status`)
+    .run(userId, "test-iss", "sub-" + userId, userId + "@example.com", "learner", status, now, now);
+}
+for (const t of ["tenant-b", "tenant-c", "tenant-e", "tenant-f", "tenant-pat", "tenant-revoked"]) seedUser(t);
+
 test("createPat returns plaintext once and stores only its SHA-256 hash", async () => {
   const created = await createPat(db, "tenant-a", "MacBook connector");
   assert.match(created.id, /^[0-9a-f-]{36}$/);
@@ -162,4 +172,16 @@ test("a revoked PAT no longer authenticates through the adapter", async () => {
     { production: true },
   );
   assert.deepEqual(context, { user: null, scope: null, identityType: null });
+});
+
+test("a PAT for a suspended or revoked tenant stops resolving (security review)", async () => {
+  seedUser("tenant-susp");
+  const created = await createPat(db, "tenant-susp");
+  assert.deepEqual(await resolvePat(db, created.token), { userId: "tenant-susp" });
+  // Suspend the tenant: the still-unrevoked PAT must now fail.
+  seedUser("tenant-susp", "suspended");
+  assert.equal(await resolvePat(db, created.token), null, "suspended tenant PAT rejected");
+  // Revoked tenant likewise.
+  seedUser("tenant-susp", "revoked");
+  assert.equal(await resolvePat(db, created.token), null, "revoked tenant PAT rejected");
 });
