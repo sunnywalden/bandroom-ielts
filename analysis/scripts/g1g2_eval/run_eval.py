@@ -66,6 +66,51 @@ NOISE_SEED = 20261119
 # Frozen VAD thresholds (runner/prosody.py constants, repeated for the report).
 VAD_THRESHOLDS = {"thr": 0.5, "neg": 0.35, "min_speech": 0.25}
 
+# Detector modes.  ``waveform_hardened`` is the iteration-29 F2 DSP research
+# mode; it is opt-in and never the production default.
+DETECTOR_MODES = ("vad", "waveform_only", "waveform_hardened")
+
+# Iteration-25 human-annotation calibration reference (shipped waveform_only).
+CALIBRATION_REFERENCE = {
+    "precision": 0.8124, "recall": 0.9235, "f1": 0.8644,
+    "speakers": 22, "reference_pauses": 497, "detected": 565,
+}
+CALIBRATION_MATCH_TOLERANCE = 0.10
+CALIBRATION_MIN_PAUSE = 0.32
+
+
+def detector_parameters(pause_mode: str) -> dict:
+    """Frozen detector parameters recorded in the report and raw evidence."""
+    if pause_mode == "vad":
+        return {"model": "silero_vad.onnx", "model_sha256": sha256_file(VAD_MODEL),
+                "thresholds": VAD_THRESHOLDS}
+    if pause_mode == "waveform_hardened":
+        return {
+            "highpass_hz": prosody.HARDENED_HIGHPASS_HZ,
+            "frame_seconds": prosody.HARDENED_FRAME_SECONDS,
+            "hop_seconds": prosody.HARDENED_HOP_SECONDS,
+            "noise_percentile": prosody.HARDENED_NOISE_PERCENTILE,
+            "subtraction_beta": prosody.HARDENED_SUBTRACTION_BETA,
+            "level_percentile": prosody.HARDENED_LEVEL_PERCENTILE,
+            "low_fraction": prosody.HARDENED_LOW_FRACTION,
+            "high_fraction": prosody.HARDENED_HIGH_FRACTION,
+            "smooth_frames": prosody.HARDENED_SMOOTH_FRAMES,
+            "bridge_seconds": prosody.HARDENED_BRIDGE_SECONDS,
+            "bridge_fraction": prosody.HARDENED_BRIDGE_FRACTION,
+            "min_speech_seconds": prosody.HARDENED_MIN_SPEECH_SECONDS,
+            "min_pause_seconds": prosody.PAUSE_MIN_SECONDS,
+        }
+    return {
+        "frame_seconds": prosody.ENERGY_FRAME_SECONDS,
+        "hop_seconds": prosody.ENERGY_HOP_SECONDS,
+        "noise_percentile": prosody.NOISE_PERCENTILE,
+        "low_noise_multiplier": prosody.PAUSE_LOW_NOISE_MULTIPLIER,
+        "high_noise_multiplier": prosody.PAUSE_HIGH_NOISE_MULTIPLIER,
+        "bridge_max_seconds": prosody.PAUSE_BRIDGE_MAX_SECONDS,
+        "bridge_noise_multiplier": prosody.PAUSE_BRIDGE_NOISE_MULTIPLIER,
+        "min_pause_seconds": prosody.PAUSE_MIN_SECONDS,
+    }
+
 # Anchored rubric used for the panel (frozen in the G1 prereg).
 ANCHORED_TEXT_RUBRIC = ag1.RUBRIC + """
 Anchors (reduce judge spread):
@@ -300,7 +345,8 @@ def summarize_g2(rows: list, conditions: tuple, primary_conditions: tuple) -> di
             "stability (fail-closed validity guard, added post-run)"
         ) if invalid else None,
         "pass": bool(not invalid and retest is not None
-                     and retest >= G2_THRESHOLD and all_conditions_ok),
+                     and retest >= G2_THRESHOLD and all_conditions_ok
+                     and zero_pause_rows == 0),
         "by_condition": by_condition,
         "original_excluded_from_primary": True,
         "original_reason": "undegraded identity row is trivially 1.0; excluded "
@@ -362,10 +408,12 @@ def g2_prosody_retest(samples: list, *, pause_mode: str = "vad",
                            if cond == "noise" else None)
                 except (EvalError, subprocess.CalledProcessError, ValueError) as exc:
                     raise EvalError(f"G2 row failed for {s['id']}/{cond}: {exc}") from exc
+                vacuous = int(base.get("pause_count", 0)) == 0
                 ok = bool(pc_match and pde is not None
-                          and pde <= G2_PAUSE_DURATION_MAX_ERROR)
+                          and pde <= G2_PAUSE_DURATION_MAX_ERROR and not vacuous)
                 row = {
                     "speaker": s["id"], "cond": cond, "pause_match": pc_match,
+                    "vacuous_base": vacuous,
                     "pause_count_orig": int(base.get("pause_count", 0)),
                     "pause_count_deg": int(deg_cal.get("pause_count", 0)),
                     "pause_seconds_orig": round(float(base.get("pause_seconds") or 0.0), 4),
@@ -381,7 +429,7 @@ def g2_prosody_retest(samples: list, *, pause_mode: str = "vad",
                     "total_duration_orig": base.get("total_duration_seconds"),
                     "total_duration_deg": deg_cal.get("total_duration_seconds"),
                     "construction": info, "pause_mode": pause_mode,
-                    "vad_model_sha256": model_sha, "vad_thresholds": VAD_THRESHOLDS,
+                    "detector": detector_parameters(pause_mode),
                 })
     summary = summarize_g2(rows, conditions, primary_conditions)
     summary["rows"] = rows
@@ -389,6 +437,192 @@ def g2_prosody_retest(samples: list, *, pause_mode: str = "vad",
 
 
 # --------------------------------------------------------------- G1 anchors
+# --------------------------------------------------------------- calibration
+def annotation_pauses(words: list) -> list[tuple[float, float]]:
+    """Human reference: gaps >= 0.32 s between consecutive annotated words."""
+    return [
+        (previous.end, current.start)
+        for previous, current in zip(words, words[1:])
+        if current.start - previous.end >= CALIBRATION_MIN_PAUSE
+    ]
+
+
+def score_pause_detections(detected: list, reference: list[tuple[float, float]]) -> dict:
+    """Iteration-25 matching rule: >=50% overlap or midpoint within +-0.10 s."""
+    used: set[int] = set()
+    true_positives = 0
+    for pause in detected:
+        begin, finish = float(pause["start"]), float(pause["end"])
+        for index, (ref_start, ref_end) in enumerate(reference):
+            if index in used:
+                continue
+            overlap = min(finish, ref_end) - max(begin, ref_start)
+            midpoint = (begin + finish) / 2.0
+            if overlap >= 0.5 * (ref_end - ref_start) or (
+                ref_start - CALIBRATION_MATCH_TOLERANCE
+                <= midpoint
+                <= ref_end + CALIBRATION_MATCH_TOLERANCE
+            ):
+                used.add(index)
+                true_positives += 1
+                break
+    false_positives = len(detected) - true_positives
+    false_negatives = len(reference) - true_positives
+    precision = true_positives / len(detected) if detected else (
+        1.0 if not reference else 0.0)
+    recall = true_positives / len(reference) if reference else 1.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+    return {
+        "detected": len(detected), "true_positives": true_positives,
+        "false_positives": false_positives, "false_negatives": false_negatives,
+        "precision": _round4(precision), "recall": _round4(recall),
+        "f1": _round4(f1),
+    }
+
+
+def _round4(value: float) -> float:
+    """Round to 4 dp without importing pytest (name avoids shadowing risk)."""
+    return round(float(value), 4)
+
+
+def pause_timeline(samples, sample_rate: int, pause_mode: str) -> list[dict]:
+    if pause_mode == "vad":
+        return prosody.vad_pauses(samples, sample_rate).pauses
+    if pause_mode == "waveform_hardened":
+        return prosody.detect_pauses_hardened(samples, sample_rate).pauses
+    if pause_mode == "waveform_only":
+        return prosody.detect_pauses(samples, sample_rate).pauses
+    raise EvalError(f"unsupported calibration pause_mode: {pause_mode}")
+
+
+def aggregate_pause_scores(rows: list[dict]) -> dict:
+    detected = sum(row["detected"] for row in rows)
+    tp = sum(row["true_positives"] for row in rows)
+    fp = sum(row["false_positives"] for row in rows)
+    fn = sum(row["false_negatives"] for row in rows)
+    precision = tp / detected if detected else (1.0 if not fn else 0.0)
+    recall = tp / (tp + fn) if (tp + fn) else 1.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+    return {"speakers": len(rows), "detected": detected, "true_positives": tp,
+            "false_positives": fp, "false_negatives": fn,
+            "precision": round(precision, 4), "recall": round(recall, 4),
+            "f1": round(f1, 4)}
+
+
+def calibrate_pause_mode(pause_mode: str) -> dict:
+    """Re-measure pause P/R/F1 against the L2-ARCTIC TextGrid words tier.
+
+    Same methodology and threshold as iteration-25 ``calibrate.py``: direct
+    corpus WAVs, reference gaps >= 0.32 s, the 50%-overlap / midpoint +-0.10 s
+    match rule, pooled counts.
+    """
+    if pause_mode == "vad" and not Path(VAD_MODEL).exists():
+        raise EvalError(f"Silero VAD model missing: {VAD_MODEL}")
+    wavs = sorted((CORPUS / "wav").glob("*.wav"))
+    if not wavs:
+        raise EvalError(f"corpus missing: {CORPUS / 'wav'}")
+    rows, per_speaker = [], {}
+    for path in wavs:
+        speaker = path.stem
+        textgrid = CORPUS / "annotation" / f"{speaker}.TextGrid"
+        if not textgrid.exists():
+            raise EvalError(f"annotation missing for {speaker}")
+        words = prosody.parse_textgrid_words(textgrid)
+        reference = annotation_pauses(words)
+        audio = prosody.load_wav(path)
+        detected = pause_timeline(audio.samples, audio.sample_rate, pause_mode)
+        score = score_pause_detections(detected, reference)
+        rows.append(score)
+        per_speaker[speaker] = {
+            "reference_pauses": len(reference),
+            **{k: score[k] for k in ("detected", "true_positives",
+                                     "false_positives", "false_negatives")},
+        }
+    aggregate = aggregate_pause_scores(rows)
+    return {"pause_mode": pause_mode, "aggregate": aggregate,
+            "per_speaker": per_speaker}
+
+
+def calibration_bar(aggregate: dict) -> dict:
+    """Per-metric bar inherited from the shipped waveform_only calibration."""
+    checks = {key: round(float(aggregate[key]), 4) >= CALIBRATION_REFERENCE[key]
+              for key in ("precision", "recall", "f1")}
+    return {
+        "bar": {key: CALIBRATION_REFERENCE[key]
+                for key in ("precision", "recall", "f1")},
+        "reference": dict(CALIBRATION_REFERENCE),
+        "checks": checks,
+        "meets_bar": all(checks.values()),
+        "rule": "each pooled metric must be >= the iteration-25 shipped "
+                "waveform_only level; no threshold lowering",
+    }
+
+
+def run_calibration_command(out: Path, *, prereg_sha: str | None,
+                            pause_mode: str) -> int:
+    if pause_mode not in DETECTOR_MODES:
+        write_error_report(out, protocol="G2-prosody-calibration",
+                           prereg_sha=prereg_sha,
+                           error=f"invalid pause_mode: {pause_mode}")
+        print("CALIBRATION ERROR: invalid pause_mode", pause_mode)
+        return 3
+    try:
+        candidate = calibrate_pause_mode(pause_mode)
+        control = calibrate_pause_mode("waveform_only")
+    except (EvalError, ValueError) as exc:
+        write_error_report(out, protocol="G2-prosody-calibration",
+                           prereg_sha=prereg_sha, error=str(exc))
+        print("CALIBRATION ERROR:", exc)
+        return 3
+    control_parity = all(
+        abs(control["aggregate"][key] - CALIBRATION_REFERENCE[key]) <= 1e-4
+        for key in ("precision", "recall", "f1")
+    )
+    report = {
+        "protocol": "G2-prosody-calibration",
+        "evaluated_at_utc": now_utc(),
+        "prereg": {"doc_sha256": prereg_sha},
+        "corpus": "L2-ARCTIC Suitcase, 22 speakers (CC BY-NC, eval only)",
+        "corpus_license": "CC BY-NC, local evaluation only, not redistributed",
+        "reference_annotation": "Praat TextGrid 'words' tier (human word boundaries)",
+        "reference_definition": "gap >= 0.32 s between consecutive annotated words",
+        "matching_rule": ">=50% overlap OR detection midpoint within reference "
+                         "+-0.10 s; pooled counts",
+        "methodology": "iteration-25/prosody/calibrate.py (direct corpus WAVs)",
+        "baseline_control": {
+            **control,
+            "expected": dict(CALIBRATION_REFERENCE),
+            "parity_with_published": control_parity,
+        },
+        "candidate": {**candidate, **calibration_bar(candidate["aggregate"])},
+        "candidate_mode": pause_mode,
+        "detector": detector_parameters(pause_mode),
+        "caveats": [
+            "The human annotation is the same L2-ARCTIC TextGrid set used by "
+            "iteration-25; it is not an independent pause annotation for the "
+            "cross-codec retest (which remains retest-only).",
+            "Per-user T1 multiplier semantics were measured for waveform_only; "
+            "the hardened mode's multiplier is re-derived and not validated.",
+            "No threshold was lowered; the bar is the published shipped level.",
+        ],
+    }
+    write_json(out / "calibration-report.json", report)
+    write_json(out / "calibration-raw.json", {
+        "protocol": "G2-prosody-calibration",
+        "candidate_mode": pause_mode,
+        "candidate": candidate["per_speaker"],
+        "baseline_control": control["per_speaker"],
+    })
+    seal_dir(out)
+    print("CALIBRATION", pause_mode,
+          "candidate:", {k: candidate["aggregate"][k] for k in ("precision", "recall", "f1")},
+          "bar_met:", report["candidate"]["meets_bar"],
+          "baseline_control:", {k: control["aggregate"][k]
+                                for k in ("precision", "recall", "f1")},
+          "parity:", control_parity)
+    return 0
+
+
 def parse_evidence_backing(evidence: str) -> dict:
     total = EVIDENCE_TOTAL.search(evidence or "")
     speech = EVIDENCE_SPEECH.search(evidence or "")
@@ -814,47 +1048,71 @@ def write_error_report(out: Path, *, protocol: str, prereg_sha: str | None,
     seal_dir(out)
 
 
-def run_g2_command(out: Path, *, prereg_sha: str | None, max_speakers: int) -> int:
+def run_g2_command(out: Path, *, prereg_sha: str | None, max_speakers: int,
+                   pause_mode: str = "vad", split: str = "validate") -> int:
+    if pause_mode not in DETECTOR_MODES:
+        write_error_report(out, protocol="G2-prosody-robustness",
+                           prereg_sha=prereg_sha,
+                           error=f"invalid pause_mode: {pause_mode}")
+        print("G2 ERROR: invalid pause_mode", pause_mode)
+        return 3
     try:
         samples = load_corpus(max_speakers)
     except EvalError as exc:
-        write_error_report(out, protocol="G2-prosody-gapfill",
+        write_error_report(out, protocol="G2-prosody-robustness",
                            prereg_sha=prereg_sha, error=str(exc))
         print("G2 ERROR:", exc)
         return 3
     half = len(samples) // 2
     tune, validate = samples[:half], samples[half:]
+    if split not in {"validate", "tune"}:
+        write_error_report(out, protocol="G2-prosody-robustness",
+                           prereg_sha=prereg_sha,
+                           error=f"invalid split: {split}")
+        print("G2 ERROR: invalid split", split)
+        return 3
+    evaluated = validate if split == "validate" else tune
+    if split == "tune":
+        print("WARNING: tune split evaluation is exploratory, not a gate verdict")
     try:
-        summary, raw_checks = g2_prosody_retest(validate, pause_mode="vad")
+        summary, raw_checks = g2_prosody_retest(evaluated, pause_mode=pause_mode)
     except EvalError as exc:
-        write_error_report(out, protocol="G2-prosody-gapfill",
+        write_error_report(out, protocol="G2-prosody-robustness",
                            prereg_sha=prereg_sha, error=str(exc))
         print("G2 ERROR:", exc)
         return 3
+    params = detector_parameters(pause_mode)
+    exploratory = split == "tune"
     report = {
-        "protocol": "G2-prosody-gapfill",
+        "protocol": "G2-prosody-robustness",
         "seed": SEED,
         "evaluated_at_utc": now_utc(),
         "verdict": ("INVALID" if summary.get("invalid")
+                    else "EXPLORATORY" if exploratory
                     else ("PASS" if summary["pass"] else "FAIL")),
+        "exploratory_split": exploratory,
+        "gate_eligible": not exploratory,
         "invalid": summary.get("invalid", False),
         "invalid_reason": summary.get("invalid_reason"),
         "zero_pause_rows": summary.get("zero_pause_rows"),
         "corpus": "L2-ARCTIC (CC BY-NC, eval only)",
         "corpus_license": "CC BY-NC, local evaluation only, not redistributed",
         "prereg": {"doc_sha256": prereg_sha},
-        "mode": "vad",
+        "mode": pause_mode,
         "conditions": summary["conditions"],
         "primary_conditions": summary["primary_conditions"],
-        "n_speakers": len(validate),
+        "n_speakers": len(evaluated),
         "split": {"rule": "sorted 22 speakers; first 11 tune / last 11 validate",
+                  "evaluated": split,
                   "tune": [s["id"] for s in tune],
-                  "validate": [s["id"] for s in validate]},
-        "vad": {"model": "silero_vad.onnx", "model_sha256": sha256_file(VAD_MODEL),
-                "thresholds": VAD_THRESHOLDS, "pause_mode": "vad"},
+                  "validate": [s["id"] for s in validate],
+                  "evaluated_ids": [s["id"] for s in evaluated]},
+        "detector": params,
         "retest_consistency": summary["retest_consistency"],
         "threshold": summary["threshold"],
-        "pass": summary["pass"],
+        "pass": None if exploratory else summary["pass"],
+        "exploratory_retest_consistency": (
+            summary["retest_consistency"] if exploratory else None),
         "n_rows": summary["n_rows"],
         "n_primary_checks": summary["n_primary_checks"],
         "n_primary_ok": summary["n_primary_ok"],
@@ -872,16 +1130,18 @@ def run_g2_command(out: Path, *, prereg_sha: str | None, max_speakers: int) -> i
     }
     write_json(out / "report.json", report)
     write_json(out / "raw-evidence.json",
-               {"protocol": "G2-prosody-gapfill", "seed": SEED,
-                "generated_at_utc": now_utc(),
-                "vad_model_sha256": report["vad"]["model_sha256"],
-                "vad_thresholds": VAD_THRESHOLDS,
+               {"protocol": "G2-prosody-robustness", "seed": SEED,
+                "generated_at_utc": now_utc(), "mode": pause_mode,
+                "prereg_sha256": prereg_sha,
+                "detector": params,
                 "checks": raw_checks})
     seal_dir(out)
     print("G2 verdict:", report["verdict"], "retest:", summary["retest_consistency"],
           "zero_pause_rows:", summary.get("zero_pause_rows"),
           "by_condition:", {k: v["consistency"] for k, v in summary["by_condition"].items()})
-    return 0 if report["verdict"] == "PASS" else (2 if report["verdict"] == "FAIL" else 3)
+    if report["verdict"] in {"PASS", "EXPLORATORY"}:
+        return 0
+    return 2 if report["verdict"] == "FAIL" else 3
 
 
 def run_g1_command(out: Path, *, prereg_sha: str | None, max_speakers: int,
@@ -1016,8 +1276,13 @@ def main() -> int:
     group = ap.add_mutually_exclusive_group()
     group.add_argument("--g2-only", action="store_true")
     group.add_argument("--g1-only", action="store_true")
+    group.add_argument("--calibration-only", action="store_true")
     ap.add_argument("--vad", action="store_true",
-                    help="G2-prosody via Silero VAD on the held-out split")
+                    help="legacy alias for --pause-mode vad")
+    ap.add_argument("--pause-mode", choices=DETECTOR_MODES, default=None,
+                    help="G2 detector under test (frozen prereg)")
+    ap.add_argument("--split", choices=("validate", "tune"), default="validate",
+                    help="G2 split; validate (held-out) is the gate")
     ap.add_argument("--out", required=True)
     ap.add_argument("--prereg", default=None, help="frozen preregistration doc")
     ap.add_argument("--truth", default=None, help="optional HJK-style truth JSON")
@@ -1027,16 +1292,34 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     prereg_sha = load_prereg_sha(args.prereg)
 
-    if args.g2_only:
-        if not args.vad:
-            write_error_report(out, protocol="G2-prosody-gapfill",
+    if args.vad and args.pause_mode and args.pause_mode != "vad":
+        write_error_report(out, protocol="G2-prosody-robustness",
+                           prereg_sha=prereg_sha,
+                           error="--vad conflicts with --pause-mode")
+        print("G2 ERROR: --vad conflicts with --pause-mode")
+        return 3
+    pause_mode = "vad" if args.vad else args.pause_mode
+
+    if args.calibration_only:
+        if not pause_mode:
+            write_error_report(out, protocol="G2-prosody-calibration",
                                prereg_sha=prereg_sha,
-                               error="--g2-only requires --vad "
-                                     "(waveform-only is the retired baseline)")
-            print("G2 ERROR: --g2-only requires --vad")
+                               error="--calibration-only requires --pause-mode")
+            print("CALIBRATION ERROR: --calibration-only requires --pause-mode")
+            return 3
+        return run_calibration_command(out, prereg_sha=prereg_sha,
+                                       pause_mode=pause_mode)
+    if args.g2_only:
+        if not pause_mode:
+            write_error_report(out, protocol="G2-prosody-robustness",
+                               prereg_sha=prereg_sha,
+                               error="--g2-only requires --pause-mode "
+                                     "(or --vad)")
+            print("G2 ERROR: --g2-only requires --pause-mode (or --vad)")
             return 3
         return run_g2_command(out, prereg_sha=prereg_sha,
-                              max_speakers=args.max_speakers)
+                              max_speakers=args.max_speakers,
+                              pause_mode=pause_mode, split=args.split)
     if args.g1_only:
         return run_g1_command(out, prereg_sha=prereg_sha,
                               max_speakers=args.max_speakers,

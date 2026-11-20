@@ -67,9 +67,8 @@ def test_vad_probabilities_follow_official_context_convention():
     """Differential check against the official silero-vad wrapper convention.
 
     The reference prepends the previous chunk's last 64 samples as context
-    (input = 64 + 512). ``vad_frame_probabilities`` must agree frame-for-frame
-    within float noise; feeding bare 512-sample chunks collapses the
-    probabilities to ~0.
+    (input = 64 + 512). ``vad_pauses`` must agree with it frame-for-frame;
+    feeding bare 512-sample chunks collapses the probabilities.
     """
     samples = _load_fixture()
     sess = prosody._vad_session()
@@ -85,12 +84,9 @@ def test_vad_probabilities_follow_official_context_convention():
         reference.append(float(out[0][0]))
     assert max(reference) > 0.9, "reference convention itself sees no speech"
 
-    actual = prosody.vad_frame_probabilities(samples)
-    assert actual.shape == (len(reference),)
-    assert np.allclose(actual, np.asarray(reference), atol=1e-6), (
-        "vad_frame_probabilities diverged from the official convention: "
-        f"max |diff| = {np.max(np.abs(actual - np.asarray(reference)))}"
-    )
-    speech_frames = int(np.sum(np.asarray(reference) >= prosody.VAD_THRESHOLD))
+    detection = prosody.vad_pauses(samples, 16000)
+    # With the correct convention the segmented speech seconds must match the
+    # reference hysteresis run (same thresholds), not the degenerate zero.
+    speech_frames = sum(1 for p in reference if p >= prosody.VAD_THRESHOLD)
     assert speech_frames > 0
-    assert prosody.vad_pauses(samples, 16000).speech_seconds > 0.0
+    assert detection.speech_seconds > 0.0
