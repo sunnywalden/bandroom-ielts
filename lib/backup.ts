@@ -6,6 +6,11 @@ export class BackupError extends Error {
 }
 const reject=(status:number,message:string):never=>{throw new BackupError(status,message)};
 const utf8=new TextEncoder();
+// H19: D1 caps a row at 2 MB. Reject oversized restore payloads before they
+// reach the INSERT so a malicious/corrupt archive fails closed with a clear
+// 422 instead of a driver error mid-batch.
+const ROW_JSON_LIMIT=1.5*1024*1024;
+const jsonBytes=(value:unknown)=>utf8.encode(JSON.stringify(value)).length;
 function canonical(v:unknown):string {
   if(!v||typeof v!=='object')return JSON.stringify(v);
   if(Array.isArray(v))return '['+v.map(canonical).join(',')+']';
@@ -258,6 +263,12 @@ export async function restoreBackup(db:D1Database,bucket:R2Bucket,uid:string,key
   const result={missing,stateToAdd,lessons:lessons.length,feedback:feedback.length,reviewJobs:reviewJobs.length,
     personalCalibration:profile.length,calibrationCandidates:candidates.length,calibrationEvents:events.length};
   if(!apply)return result;
+  // H19 per-row size guard (D1 row limit ~2 MB). Check every JSON value that is
+  // about to be inserted; an oversized row must not enter the batch.
+  if(stateToAdd&&m.state!=null&&jsonBytes(m.state)>ROW_JSON_LIMIT)
+    return reject(422,'备份记录超出单行大小限制。');
+  for(const job of reviewJobs)
+    if(jsonBytes(job.snapshot)>ROW_JSON_LIMIT)return reject(422,'备份记录超出单行大小限制。');
   if(missing.length)return reject(409,'录音尚未全部通过校验，课程记录尚未恢复。');
   // The read snapshot includes append-only coach tables. Recheck counts/revision in the same transaction as every insert.
   const commands=[db.prepare(`SELECT json(CASE WHEN

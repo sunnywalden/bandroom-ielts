@@ -57,7 +57,13 @@ try{
    }};
  } else{db=sqliteD1();bucket=isolatedBucket();}
  const run=async(q,...params)=>await db.prepare(q).bind(...params).run();
- for(const migration of (await readdir('drizzle')).filter(f=>f.endsWith('.sql')).sort()){const body=await readFile('drizzle/'+migration,'utf8');for(const q of body.split(';').map(s=>s.replaceAll('--> statement-breakpoint','').trim()).filter(Boolean))await run(q);}
+ for(const migration of (await readdir('drizzle')).filter(f=>f.endsWith('.sql')).sort()){
+   const body=await readFile('drizzle/'+migration,'utf8');
+   // Strip line comments before splitting on ';': migration prose contains
+   // semicolons, and a comment-only fragment is not a runnable D1 statement.
+   const sqlText=body.split('\n').map(line=>{const at=line.indexOf('--');return at<0?line:line.slice(0,at);}).join('\n');
+   for(const q of sqlText.split(';').map(s=>s.trim()).filter(Boolean))await run(q);
+ }
  if(mf){
    const {saveReviewCheckpoint}=await bundled('lib/review-tasks.ts',[{name:'isolated-db',setup(build){
      build.onResolve({filter:/^@\/db$/},()=>({path:'db',namespace:'isolated-db'}));
