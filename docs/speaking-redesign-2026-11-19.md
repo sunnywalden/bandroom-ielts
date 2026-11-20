@@ -37,7 +37,8 @@ ELSA 强在发音/口音纠正（自研音素模型），Speak 强在对话与�
 Silero VAD 调用约定错误（512 vs 官方 64-context+512=576）导致全部录音
 `speech_duration=0`，流利度证据恒空，批改退化为"请重新录制"。G2 旧
 "retest=1.0" 为退化验证（0==0）。已修复调用约定、加非退化门禁、生产回退
-`waveform_only`（有人工标注校准）。证据：`G2_RETEST_NONVACUOUS_2026-11-19.json`。
+`waveform_only`（有人工标注校准）。证据（内部保留，NC 语料不进 git）：
+`~/.bandroom-acoustic/G2_RETEST_NONVACUOUS_2026-11-19.json`。
 
 ## 1. 产品形态（重构后）
 
