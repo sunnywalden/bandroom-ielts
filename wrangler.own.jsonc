@@ -32,5 +32,14 @@
   ],
   "observability": {
     "enabled": true
+  },
+  // MT-3 retention sweep: daily at 03:00 UTC. The scheduled handler
+  // (worker/index.ts) seeds retention_policy, purges expired speaking/ and
+  // review-checkpoints/ R2 objects, and anonymizes old analysis_events.
+  // NOTE: the private production config (dist/server/wrangler.prod.json) is
+  // generated independently and must declare the same trigger:
+  //   "triggers": { "crons": ["0 3 * * *"] }
+  "triggers": {
+    "crons": ["0 3 * * *"]
   }
 }

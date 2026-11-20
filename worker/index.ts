@@ -1,6 +1,7 @@
 import handler from "vinext/server/fetch-handler";
 import { runWithConnectorBinding } from "../lib/connector-context";
 import type { ConnectorBinding } from "../lib/connector-contract.mjs";
+import { runRetention } from "../lib/retention";
 
 const worker = {
   fetch(request: Request, env: Cloudflare.Env, ctx: ExecutionContext<{ CONNECTORS?: ConnectorBinding }>) {
@@ -24,6 +25,21 @@ const worker = {
       };
     }
     return runWithConnectorBinding(binding, () => handler.fetch(request, env, ctx));
+  },
+
+  // MT-3 daily retention sweep (wrangler.own.jsonc `triggers.crons`). The
+  // scheduled context has no request scope, so use the env bindings directly
+  // instead of the request-scoped `getDb()`.
+  scheduled(_controller: ScheduledController, env: Cloudflare.Env, ctx: ExecutionContext) {
+    if (!env.DB || !env.BUCKET) {
+      console.error("retention: DB or BUCKET binding unavailable; skipping purge");
+      return;
+    }
+    ctx.waitUntil(
+      runRetention(env.DB, env.BUCKET, Date.now()).catch(error => {
+        console.error("retention: scheduled purge failed", error);
+      }),
+    );
   },
 };
 
