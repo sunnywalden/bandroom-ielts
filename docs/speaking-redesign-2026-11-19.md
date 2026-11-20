@@ -95,6 +95,18 @@ band 描述符区间；LR/GRA 由 LLM 对转写的问题计数与严重度映射
   `app/speaking-drills.tsx`；录音电平表加入 `app/speaking.tsx` Recorder。
 - 发音画像面板（report tab）不变，继续吃 speechSeconds（修复后不再恒 0）。
 
+## 交付状态（2026-11-19）
+
+- b15bde4 修复：VAD 调用约定 + 非退化门禁 + 生产 waveform_only + G2 诚实 FAIL 记录。
+- 3af9950 Slice 1：scorecard.py + 转写上报 + 传输契约（runner 266 过，tsc 干净）。
+- c3f508d Slice 2：评分卡 UI + 逐词交互转写 + 真实电平表（feedback-ui 21/21）。
+- 8dbe624 Slice 3：drills TTS 示范音频 + T3 对比音频启用（runner 267 过）。
+- 端到端验证：原始故障录音（58.74s）经完整管线 → speech 33.385s、33 词转写、
+  四科评分卡（P 不评分）、伪造引文被丢弃、drill 对比音频 ok、传输层完整。
+- 生产 runner 镜像已同步（~/.bandroom-runner-prod），下次真实提交即生效。
+- **Worker/UI 部署待 owner 明确授权**（红线：不擅自 deploy）。未部署前新反馈
+  携带 scorecard 数据，旧 UI 向后兼容忽略；runner 修复（语音不再恒 0）已生效。
+
 ## 5. 不做的事
 
 - 不启用 T2 音素断言（门禁未过）。
