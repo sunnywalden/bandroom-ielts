@@ -1007,10 +1007,11 @@ def test_grounded_mode_processes_speak_and_reserves_cost(tmp_path, monkeypatch):
     captured = {}
 
     def fake_review(raw, attempt, day, *, config, model, workdir, logger=None,
-                    reserve_scorecard=None, **kwargs):
+                    reserve_scorecard=None, tenant_user_id=None, **kwargs):
         # The scorecard's extra text call must be budget-reserved by the runner.
         assert callable(reserve_scorecard)
-        captured.update(raw=raw, attempt=attempt, day=day, config=config)
+        captured.update(raw=raw, attempt=attempt, day=day, config=config,
+                        tenant_user_id=tenant_user_id)
         return Feedback(
             feedback=valid_feedback_text(),
             evidence=f"录音 {RECORDING_ID}；已校准韵律证据：停顿 1 个。",

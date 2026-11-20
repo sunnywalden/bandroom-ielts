@@ -43,6 +43,7 @@ from .audio import AudioError, PreparedAudio
 from .content_rules import (
     PROMPT_VERSION,
     ContentRuleError,
+    ValidatedFeedback,
     feedback_to_tool_args,
     validate_feedback,
 )
@@ -57,6 +58,12 @@ from .mcp_client import (
 from .models import Feedback, ModelError, build_model
 from .models.base import CoachModel
 from .models.qwen import DASHSCOPE_BASE_URL
+from .tenant_queue import (
+    PermanentTaskError,
+    TaskYielded,
+    UserBudget,
+    run_one,
+)
 
 LOG = logging.getLogger("bandroom.runner")
 
@@ -123,6 +130,31 @@ def redact_error_detail(text: str, limit: int = 300) -> str:
     cleaned = re.sub(r"(?i)\bbearer\s+\S+", "Bearer [REDACTED]", str(text))
     cleaned = _SECRET_PATTERN.sub(r"\1: [REDACTED]", cleaned)
     return cleaned[-limit:]
+
+
+# Queue-path speaking completion contract gap (iteration-30, owner decision A).
+# complete_review_task gates speaking completions on a RELEASED analysis version
+# plus a committed decoded-PCM checkpoint (the QA acoustic-track contract,
+# lib/review-tools.ts:246-296). The grounded prosody producer does not emit that
+# contract and prod has no ANALYSIS_RELEASED_VERSIONS, so these rejections are
+# deterministic: retrying cannot fix them. Classify NON-retryable (block once,
+# fail-closed) instead of burning claim attempts. This is a disclosed pre-enable
+# blocker for multi_tenant speaking, NOT a threshold change. See
+# acceptance-2026-11-10/iteration-30/P2B_ORCHESTRATOR_WIRING_PLAN.md.
+QUEUE_PERMANENT_CODES = frozenset(
+    {
+        "analysis_not_released",
+        "analysis_version_required",
+        "analysis_version_mismatch",
+        "checkpoint_missing",
+        "checkpoint_not_read",
+        "invalid_analysis",
+        "analysis_required",
+        "analysis_not_allowed",
+        "content_rule_violation",
+        "snapshot_invalid",
+    }
+)
 
 # Audio dispatch modes.  Precedence (documented in GROUNDED_AUDIO_INTEGRATION.md):
 # 1. an explicit ``[runner] coach_audio_mode`` wins;
@@ -192,6 +224,18 @@ class RunnerConfig:
     coach_audio_mode: str | None = None
     grounded: GroundedConfig = field(default_factory=GroundedConfig)
     grounded_cost_cny: float = 0.10
+    # Multi-tenant queue path (P2b, iteration-30 wiring plan). Default OFF: the
+    # single-owner run() path is byte-for-byte unchanged until the owner enables
+    # it. When True, run() forks to run_multi_tenant() which claims cross-tenant
+    # tasks via claim_next_review_task and completes via complete_review_task.
+    multi_tenant: bool = False
+    tenant_per_user_cap_cny: float = 2.0
+    tenant_global_cap_cny: float | None = None
+    tenant_client_run_id: str = "runner"
+    # Fairness (F11): after this many CONSECUTIVE processed tasks for one user,
+    # the next claim for that user is yielded retryably so other tenants' due
+    # tasks are served first. MVP batch cap (server LRU cursor is a later step).
+    tenant_batch_cap: int = 3
 
     def resolved_state_dir(self) -> Path:
         return Path(os.path.expanduser(str(self.state_dir)))
@@ -277,6 +321,15 @@ def load_config(path: str | Path) -> RunnerConfig:
         coach_audio_mode=mode,
         grounded=grounded,
         grounded_cost_cny=float(budget.get("grounded_cost_cny", 0.10)),
+        multi_tenant=bool(runner.get("multi_tenant", False)),
+        tenant_per_user_cap_cny=float(runner.get("tenant_per_user_cap_cny", 2.0)),
+        tenant_global_cap_cny=(
+            float(runner["tenant_global_cap_cny"])
+            if runner.get("tenant_global_cap_cny") is not None
+            else None
+        ),
+        tenant_client_run_id=str(runner.get("tenant_client_run_id", "runner")),
+        tenant_batch_cap=int(runner.get("tenant_batch_cap", 3)),
         state_dir=Path(
             os.path.expanduser(runner.get("state_dir", "~/.bandroom-runner"))
         ),
@@ -399,9 +452,64 @@ class RunReport:
     fatal: bool = False
     detail: str = ""
     errors: list[dict[str, Any]] = field(default_factory=list)
+    # Multi-tenant queue counters (additive; zero on the single-owner path).
+    capped: int = 0
+    yielded: int = 0
+    blocked: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class Produced:
+    """A validated review ready to be persisted, independent of the save path.
+
+    The single-owner path saves via ``add_coach_feedback`` (``owner_args``); the
+    queue path saves via ``complete_review_task`` (``complete_args``). Extracting
+    production from persistence lets both paths share the exact model + content
+    rule logic without the queue path re-using the owner-only manual-claim save.
+    """
+
+    validated: ValidatedFeedback
+    day: int
+    stage: str
+    recording_id: str | None = None
+    recording_sha256: str | None = None
+    audio_used: bool = False
+
+    def owner_args(self) -> dict[str, Any]:
+        return feedback_to_tool_args(
+            self.validated,
+            day=self.day,
+            stage=self.stage,
+            recording_id=self.recording_id,
+            audio_used=self.audio_used,
+        )
+
+    def complete_args(
+        self, task_id: str, fence: int, *, analysis_version: str | None = None
+    ) -> dict[str, Any]:
+        args: dict[str, Any] = {
+            "taskId": task_id,
+            "fence": int(fence),
+            "feedback": self.validated.feedback,
+            "evidence": self.validated.evidence,
+        }
+        if self.recording_sha256:
+            args["recordingSha256"] = self.recording_sha256
+        if self.validated.analysis is not None:
+            args["analysis"] = dict(self.validated.analysis)
+        if analysis_version:
+            args["analysisVersion"] = analysis_version
+        if self.validated.pronunciation is not None and self.recording_id:
+            args["pronunciation"] = {
+                "band": self.validated.pronunciation.band,
+                "reviewedWholeClip": True,
+                "observation": self.validated.pronunciation.observation,
+                "recordingId": self.recording_id,
+            }
+        return args
 
 
 def heartbeat_payload(
@@ -519,6 +627,12 @@ class CoachRunner:
         self.prepare_audio = prepare_audio
         self._clock = clock
         self._logger = logger or LOG
+        # Multi-tenant queue state (populated by run_multi_tenant; defaults keep
+        # _process_queue_task safe to call directly in tests).
+        self._queue_run_id = "runner"
+        self._tenant_budget: UserBudget | None = None
+        self._fair_last_user: str | None = None
+        self._fair_run_length = 0
 
     # -- helpers ----------------------------------------------------------
     def _now_ms(self) -> int:
@@ -710,11 +824,12 @@ class CoachRunner:
             return
         raise McpError("add_coach_feedback did not confirm the save")
 
-    def _review_text(
-        self, attempt: Mapping[str, Any], day: int, run_id: str
-    ) -> str:
-        if not self._reserve("text"):
-            return "paused"
+    def _produce_text(self, attempt: Mapping[str, Any], day: int) -> Produced:
+        """Pure text production: model call + content-rule validation, no save.
+
+        Budget reservation and persistence are the caller's job so the owner and
+        queue paths can share this exact logic with their own save contracts.
+        """
         snapshot = self._snapshot(attempt, day)
         produced: Feedback = self.model.complete_text(snapshot)
         stage = str(attempt.get("stage"))
@@ -729,8 +844,15 @@ class CoachRunner:
             audio_used=False,
             response=str(attempt.get("response") or ""),
         )
-        arguments = feedback_to_tool_args(validated, day=day, stage=stage)
-        self._save_feedback(arguments, run_id)
+        return Produced(validated=validated, day=day, stage=stage)
+
+    def _review_text(
+        self, attempt: Mapping[str, Any], day: int, run_id: str
+    ) -> str:
+        if not self._reserve("text"):
+            return "paused"
+        produced = self._produce_text(attempt, day)
+        self._save_feedback(produced.owner_args(), run_id)
         return "processed"
 
     def _review_audio(
@@ -779,26 +901,24 @@ class CoachRunner:
         self._save_feedback(arguments, run_id)
         return "processed"
 
-    def _review_audio_grounded(
-        self, attempt: Mapping[str, Any], day: int, run_id: str
-    ) -> str:
-        """Stage A/B: calibrated prosody coach, no phoneme assertions.
+    def _produce_grounded(
+        self,
+        attempt: Mapping[str, Any],
+        day: int,
+        raw: bytes,
+        *,
+        tenant_user_id: str | None = None,
+    ) -> Produced:
+        """Pure grounded production over already-read recording bytes.
 
-        The recording is still read through the same byte-range contract.  The
-        dominant cost is the text-model call, so the grounded budget bucket is
-        reserved before inference.  Stage B (detector candidates) is optional
-        and fail-closed inside ``grounded_audio``.
+        Stage A/B calibrated prosody coach, no phoneme assertions. The dominant
+        cost is the text-model call; the caller reserves the grounded budget
+        bucket before inference. Stage B (detector candidates) is optional and
+        fail-closed inside ``grounded_audio``. ``tenant_user_id`` binds the
+        per-user pause calibration to the claimed task's tenant (queue path);
+        the owner path leaves it None (session-derived).
         """
         recording_id = str(attempt["recordingId"])
-        raw = self._read_recording(attempt, day, run_id)
-        self._log(
-            "recording_reassembled",
-            attempt=str(attempt["id"]),
-            bytes=len(raw),
-            sha256=audio_module.sha256_bytes(raw),
-        )
-        if not self._reserve("grounded"):
-            return "paused"
         started = time.time()
         with tempfile.TemporaryDirectory(prefix="bandroom-grounded-") as directory:
             produced = grounded_audio.review_speaking_grounded(
@@ -810,6 +930,7 @@ class CoachRunner:
                 workdir=Path(directory),
                 logger=self._logger,
                 reserve_scorecard=lambda: self._reserve("text"),
+                tenant_user_id=tenant_user_id,
             )
         self._log(
             "grounded_model_usage",
@@ -835,14 +956,29 @@ class CoachRunner:
         # schema marks it optional and prescribes absence for technical decoding,
         # and lib/coach.ts would render any numeric band to the learner as
         # "发音专项暂定 X/9".  Only the legacy listening path requires it.
-        arguments = feedback_to_tool_args(
-            validated,
+        return Produced(
+            validated=validated,
             day=day,
             stage="speak",
             recording_id=recording_id,
+            recording_sha256=audio_module.sha256_bytes(raw),
             audio_used=True,
         )
-        self._save_feedback(arguments, run_id)
+
+    def _review_audio_grounded(
+        self, attempt: Mapping[str, Any], day: int, run_id: str
+    ) -> str:
+        raw = self._read_recording(attempt, day, run_id)
+        self._log(
+            "recording_reassembled",
+            attempt=str(attempt["id"]),
+            bytes=len(raw),
+            sha256=audio_module.sha256_bytes(raw),
+        )
+        if not self._reserve("grounded"):
+            return "paused"
+        produced = self._produce_grounded(attempt, day, raw)
+        self._save_feedback(produced.owner_args(), run_id)
         return "processed"
 
     def _process_attempt(
@@ -901,8 +1037,265 @@ class CoachRunner:
             )
             return "failed"
 
+    # -- multi-tenant queue path (P2b) ------------------------------------
+    def _read_task_recording(self, task: Mapping[str, Any], run_id: str) -> bytes:
+        """Read a claimed speaking task's recording via the task/fence-bound tool.
+
+        Unlike the owner path's ``read_speaking_recording`` (session-user keyed),
+        ``read_review_recording`` is bound to the claimed task's exact fence and
+        the server derives the tenant from the task row. Response uses ``total``
+        (not ``size``) and a null ``nextOffset`` terminator.
+        """
+        task_id = str(task["id"])
+        fence = int(task["fence"])
+        snapshot = task.get("snapshot") or {}
+        frozen_sha = (snapshot.get("recording") or {}).get("sha256")
+        offset = 0
+        chunks: list[bytes] = []
+        total: int | None = None
+        server_sha: str | None = None
+        while True:
+            response = self.client.call_tool(
+                "read_review_recording",
+                {
+                    "taskId": task_id,
+                    "fence": fence,
+                    "offset": offset,
+                    "length": self.config.chunk_bytes,
+                },
+                client_run_id=run_id,
+            )
+            if not isinstance(response, Mapping):
+                raise McpError("read_review_recording returned an unexpected payload")
+            size = int(response.get("total") or 0)
+            if total is None:
+                total = size
+                server_sha = response.get("sha256")
+            elif size != total:
+                raise AudioError(
+                    "recording_size_mismatch",
+                    "recording size changed while it was being read",
+                )
+            if total > self.config.max_recording_bytes:
+                raise AudioError(
+                    "recording_too_large",
+                    f"recording is {total} bytes, above the upload limit",
+                )
+            encoded = response.get("base64")
+            if not isinstance(encoded, str):
+                raise McpError("read_review_recording returned no base64")
+            try:
+                chunk = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise TransportError("invalid base64 in recording byte range") from exc
+            reported_length = response.get("length")
+            if reported_length is not None and len(chunk) != int(reported_length):
+                raise TransportError("recording byte range was truncated")
+            chunks.append(chunk)
+            next_offset = response.get("nextOffset")
+            if next_offset is None:
+                break
+            if not isinstance(next_offset, int) or next_offset <= offset:
+                raise TransportError("recording byte range did not advance")
+            offset = next_offset
+            if len(chunks) > 1_000_000:
+                raise AudioError("recording_too_large", "recording has too many ranges")
+        expected_sha = frozen_sha or server_sha
+        return audio_module.reassemble(
+            chunks, expected_size=total, expected_sha256=expected_sha
+        )
+
+    def _fairness_should_yield(self, user_id: str) -> bool:
+        return (
+            user_id == self._fair_last_user
+            and self._fair_run_length >= self.config.tenant_batch_cap
+        )
+
+    def _fairness_note_processed(self, user_id: str) -> None:
+        if user_id == self._fair_last_user:
+            self._fair_run_length += 1
+        else:
+            self._fair_last_user = user_id
+            self._fair_run_length = 1
+
+    def _process_queue_task(self, task: Mapping[str, Any]) -> bool:
+        """Produce + complete one claimed cross-tenant task. True on success.
+
+        The tenant comes from the claimed task row (server-derived), never from
+        client input. Budget is reserved per user; a raised exception is
+        classified by ``run_one`` (retryable fail, or NON-retryable for the
+        disclosed speaking release-gate gap via ``PermanentTaskError``).
+        """
+        run_id = self._queue_run_id
+        budget = self._tenant_budget
+        if budget is None:
+            raise McpError("tenant budget is not initialised; call run_multi_tenant")
+        snapshot = task.get("snapshot")
+        if not isinstance(snapshot, Mapping) or not isinstance(
+            snapshot.get("attempt"), Mapping
+        ):
+            raise PermanentTaskError("snapshot_invalid", "claimed task has no attempt snapshot")
+        attempt = snapshot["attempt"]
+        user_id = str(task["userId"])
+        task_id = str(task["id"])
+        fence = int(task["fence"])
+        day = int(task.get("day") or attempt.get("day") or 1)
+        kind = str(task.get("kind") or "")
+
+        if self._fairness_should_yield(user_id):
+            raise TaskYielded("per_user_batch_cap")
+
+        if kind == "speaking":
+            cost = self.config.grounded_cost_cny
+            if not budget.reserve(user_id, cost):
+                return False
+            raw = self._read_task_recording(task, run_id)
+            self._log(
+                "recording_reassembled",
+                attempt=str(attempt.get("id")),
+                bytes=len(raw),
+                sha256=audio_module.sha256_bytes(raw),
+            )
+            produced = self._produce_grounded(
+                attempt, day, raw, tenant_user_id=user_id
+            )
+        else:
+            cost = self.config.text_cost_cny
+            if not budget.reserve(user_id, cost):
+                return False
+            produced = self._produce_text(attempt, day)
+
+        arguments = produced.complete_args(
+            task_id, fence, analysis_version=task.get("analysisVersion")
+        )
+        try:
+            result = self.client.call_tool(
+                "complete_review_task", arguments, client_run_id=run_id
+            )
+        except ToolError as exc:
+            if exc.code in QUEUE_PERMANENT_CODES:
+                # Fail-closed: the speaking completion contract is not released;
+                # block once rather than burn claim attempts (owner decision A).
+                raise PermanentTaskError(exc.code or "complete_rejected", str(exc)) from exc
+            raise
+        if not isinstance(result, Mapping) or not result.get("receiptId"):
+            raise McpError("complete_review_task did not return a receipt")
+        self._fairness_note_processed(user_id)
+        self._log(
+            "queue_task_completed",
+            task=task_id,
+            userId=user_id,
+            kind=kind,
+            receiptId=result.get("receiptId"),
+            duplicate=bool(result.get("duplicate")),
+        )
+        return True
+
+    def run_multi_tenant(self) -> RunReport:
+        """Cross-tenant queue loop: claim -> process -> complete until empty.
+
+        Does NOT read the owner study session, mark local attempt state, or use
+        add_coach_feedback — the server task row is the source of truth. Per-user
+        budget caps skip only that tenant; the global cap pauses the whole run.
+        """
+        run_id = str(uuid.uuid4())
+        self._queue_run_id = run_id
+        report = RunReport(run_id=run_id)
+        started_at = self._now_ms()
+        budget = UserBudget(
+            self.config.resolved_state_dir() / "tenant_budget.json",
+            self.config.tenant_per_user_cap_cny,
+            self.config.tenant_global_cap_cny,
+        )
+        self._tenant_budget = budget
+        self._fair_last_user: str | None = None
+        self._fair_run_length = 0
+        self._log(
+            "run_started",
+            runId=run_id,
+            mode="multi_tenant",
+            perUserCapCny=self.config.tenant_per_user_cap_cny,
+            globalCapCny=self.config.tenant_global_cap_cny,
+            batchCap=self.config.tenant_batch_cap,
+        )
+        try:
+            self._send_heartbeat(run_id, "started", started_at=started_at)
+            # Safety bound: a misbehaving queue must not spin forever in one run.
+            for _ in range(1000):
+                if budget.global_paused():
+                    report.paused = True
+                    report.detail = "tenant_global_cap_paused"
+                    break
+                outcome = run_one(
+                    self.client,
+                    self._process_queue_task,
+                    budget,
+                    client_run_id=self.config.tenant_client_run_id,
+                    logger=self._logger,
+                    fatal_errors=(AuthError,),
+                )
+                if outcome == "empty":
+                    break
+                if outcome == "processed":
+                    report.processed += 1
+                elif outcome == "capped":
+                    report.capped += 1
+                elif outcome == "yielded":
+                    report.yielded += 1
+                elif outcome == "blocked":
+                    report.blocked += 1
+                else:
+                    report.failed += 1
+        except AuthError:
+            report.fatal = True
+            report.detail = "auth_failed"
+            self._log("run_failed", runId=run_id, code="auth_failed")
+        except Exception as exc:
+            report.fatal = True
+            report.detail = _error_code(exc)
+            self._log("run_failed", runId=run_id, code=report.detail)
+        finally:
+            if report.paused:
+                detail = report.detail or "tenant_global_cap_paused"
+            elif report.fatal:
+                detail = report.detail or "run_failed"
+            else:
+                detail = (
+                    f"processed={report.processed} failed={report.failed} "
+                    f"capped={report.capped} yielded={report.yielded} "
+                    f"blocked={report.blocked}"
+                )
+            report.detail = detail
+            status = "failed" if report.fatal else "finished"
+            with contextlib.suppress(Exception):
+                self._send_heartbeat(
+                    run_id,
+                    status,
+                    started_at=started_at,
+                    finished_at=self._now_ms(),
+                    detail=detail,
+                )
+            self.state.set_last_run(
+                {
+                    "runId": run_id,
+                    "at": self._now_ms(),
+                    "mode": "multi_tenant",
+                    "processed": report.processed,
+                    "failed": report.failed,
+                    "capped": report.capped,
+                    "yielded": report.yielded,
+                    "blocked": report.blocked,
+                    "paused": report.paused,
+                    "fatal": report.fatal,
+                    "detail": detail,
+                }
+            )
+        return report
+
     # -- run --------------------------------------------------------------
     def run(self) -> RunReport:
+        if self.config.multi_tenant:
+            return self.run_multi_tenant()
         run_id = str(uuid.uuid4())
         report = RunReport(run_id=run_id)
         started_at = self._now_ms()

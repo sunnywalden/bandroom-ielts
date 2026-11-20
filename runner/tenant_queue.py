@@ -25,6 +25,39 @@ DEFAULT_LEASE_INTERVAL = 60.0
 DEFAULT_EXTEND_MS = 300_000
 
 
+class PermanentTaskError(Exception):
+    """The claimed task cannot succeed on retry.
+
+    Raised by the processor for fail-closed contract gaps (e.g. a speaking
+    completion whose analysis version has not passed the server release gate).
+    ``run_one`` records a NON-retryable failure so the task is blocked once
+    instead of burning its claim attempts on a deterministic rejection.
+    """
+
+    def __init__(self, code: str, message: str = ""):
+        super().__init__(message or code)
+        self.code = code
+
+
+class TaskYielded(Exception):
+    """Voluntarily requeue a claimed task so another tenant can be served.
+
+    Used by the per-user batch cap (fairness, rev2 §7 / F11): after N
+    consecutive tasks for one user the runner yields the next claim retryably
+    instead of monopolising the queue.
+    """
+
+    def __init__(self, code: str = "per_user_batch_cap"):
+        super().__init__(code)
+        self.code = code
+
+
+def _next_utc_midnight_ms(now: float | None = None) -> int:
+    """Start of the next UTC day in ms — the per-user budget reset boundary."""
+    t = time.time() if now is None else now
+    return (int(t // 86_400) + 1) * 86_400 * 1000
+
+
 class LeaseRenewer:
     """Renew one task lease while a slow call runs. ``renew_once`` is exposed for
     deterministic tests; the background thread is best-effort and never raises."""
@@ -55,7 +88,7 @@ class LeaseRenewer:
         except Exception as exc:  # noqa: BLE001 - best-effort renewal
             self.errors += 1
             if self._log:
-                self._log.warning("lease_renew_failed", task=self._task, error=str(exc)[:120])
+                self._log.warning("lease_renew_failed task=%s error=%s", self._task, str(exc)[:120])
             return False
 
     def _run(self) -> None:
@@ -121,6 +154,16 @@ class UserBudget:
             self._roll()
             return self._data["users"].get(user_id, 0) >= self._per
 
+    def global_paused(self) -> bool:
+        """True when the optional global daily cap is exhausted.
+
+        The run loop checks this BEFORE claiming so an exhausted global budget
+        pauses the whole run instead of failing every tenant's task retryably.
+        """
+        with self._lock:
+            self._roll()
+            return self._global is not None and self._data["global"] >= self._global
+
     def reserve(self, user_id: str, cost_cny: float) -> bool:
         micro = int(round(float(cost_cny) * MICRO))
         with self._lock:
@@ -136,14 +179,18 @@ class UserBudget:
             return True
 
 
-def _fail(client: Any, task_id: str, fence: Any, code: str, logger: Any) -> None:
+def _fail(client: Any, task_id: str, fence: Any, code: str, logger: Any,
+          *, retryable: bool = True, next_at: int | None = None) -> None:
+    args: dict[str, Any] = {
+        "taskId": task_id, "fence": int(fence), "code": code, "retryable": retryable,
+    }
+    if next_at is not None:
+        args["nextAt"] = int(next_at)
     try:
-        client.call_tool("fail_review_task", {
-            "taskId": task_id, "fence": int(fence), "code": code, "retryable": True,
-        })
+        client.call_tool("fail_review_task", args)
     except Exception as exc:  # noqa: BLE001 - requeue is best-effort
         if logger:
-            logger.warning("fail_review_task_error", task=task_id, error=str(exc)[:120])
+            logger.warning("fail_review_task_error task=%s error=%s", task_id, str(exc)[:120])
 
 
 def run_one(
@@ -155,12 +202,21 @@ def run_one(
     lease_interval: float = DEFAULT_LEASE_INTERVAL,
     extend_ms: int = DEFAULT_EXTEND_MS,
     logger: Any = None,
+    fatal_errors: tuple[type[BaseException], ...] = (),
 ) -> str:
     """Claim and process one task across tenants.
 
-    Returns "processed" | "empty" | "capped" | "failed". The tenant (userId) and
-    fence come from the claimed task row; a capped tenant is requeued (retryable)
-    so the next claim can serve another tenant instead of pausing the whole run.
+    Returns "processed" | "empty" | "capped" | "yielded" | "blocked" | "failed".
+    The tenant (userId) and fence come from the claimed task row; a capped
+    tenant is requeued (retryable, deferred to the next UTC budget reset) so the
+    next claim can serve another tenant instead of pausing the whole run.
+
+    Failure classification:
+      - ``PermanentTaskError`` from the processor -> NON-retryable fail ("blocked"),
+        for deterministic contract gaps that retrying cannot fix.
+      - ``TaskYielded`` -> retryable fail ("yielded"), the fairness batch cap.
+      - any other exception / ``False`` return -> retryable fail ("failed").
+      - ``fatal_errors`` (e.g. AuthError) propagate to the caller untouched.
     """
     result = client.call_tool("claim_next_review_task", {"clientRunId": client_run_id})
     task = (result or {}).get("task") if isinstance(result, Mapping) else None
@@ -172,7 +228,10 @@ def run_one(
     if not user_id or not task_id or not fence:
         return "failed"
     if budget.paused(user_id):
-        _fail(client, task_id, fence, "per_user_budget_paused", logger)
+        # Defer to the next UTC budget reset so a capped tenant's task is not
+        # re-claimed (and attempt-burned) every run while the cap holds.
+        _fail(client, task_id, fence, "per_user_budget_paused", logger,
+              retryable=True, next_at=_next_utc_midnight_ms())
         return "capped"
     try:
         ok = False
@@ -181,8 +240,18 @@ def run_one(
             ok = process(task)
         if ok:
             return "processed"
+    except fatal_errors:
+        raise
+    except PermanentTaskError as exc:
+        if logger:
+            logger.warning("tenant_task_blocked task=%s code=%s", task_id, exc.code)
+        _fail(client, task_id, fence, exc.code, logger, retryable=False)
+        return "blocked"
+    except TaskYielded as exc:
+        _fail(client, task_id, fence, exc.code, logger, retryable=True)
+        return "yielded"
     except Exception as exc:  # noqa: BLE001 - classify as a retryable failure
         if logger:
-            logger.warning("tenant_task_failed", task=task_id, error=str(exc)[:160])
-    _fail(client, task_id, fence, "runner_error", logger)
+            logger.warning("tenant_task_failed task=%s error=%s", task_id, str(exc)[:160])
+    _fail(client, task_id, fence, "runner_error", logger, retryable=True)
     return "failed"
