@@ -177,7 +177,7 @@ def test_model_set_flattens_panel_lists():
 
 
 def test_no_hardcoded_layer_inputs_in_source():
-    source = Path(run_eval.__file__).read_text()
+    source = Path(str(run_eval.__file__)).read_text()
     for forbidden in ("l0_pass=True", "anchor_full=True",
                       "l3_pass=True", "escalate=False"):
         assert forbidden not in source, f"hard-coded decide input: {forbidden}"
