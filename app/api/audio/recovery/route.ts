@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
-import { requireOwnerScope } from "@/lib/route-guard";
+import { requireUserScope } from "@/lib/route-guard";
 import { initial, type Ledger } from "@/app/ledger";
 import { getDb } from "@/db";
 import { learnerStates } from "@/db/schema";
@@ -9,7 +9,7 @@ import { crossOrigin, json } from "../../shared";
 
 export const dynamic="force-dynamic";
 export async function GET(request:Request){
-  const auth=await requireOwnerScope();
+  const auth=await requireUserScope();
   if(auth instanceof Response)return auth;
   const user=auth.user;
   if(crossOrigin(request))return json({error:"invalid_origin"},403);

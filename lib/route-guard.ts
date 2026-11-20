@@ -33,11 +33,9 @@ export function evaluateOwnerScope(
   options: { write?: boolean } = {},
 ): OwnerScopeResult {
   if (!context.user) return json({ error: "sign_in_required" }, 401);
-  // Multi-tenant (rev2 §3.1): "owner" is the admin/owner-of-self scope and
-  // "learner" is any other active tenant acting on its own userId. Both are
-  // scoped to context.user.userId (= the authenticated tenant); neither grants
-  // cross-tenant access. Service scopes are confined to /mcp.
-  if (context.scope !== "owner" && context.scope !== "learner") return json({ error: "owner_scope_required" }, 403);
+  // Strict owner/admin gate. Cross-tenant and global operations (e.g.
+  // /api/migrate) must keep this gate; do NOT widen it to learners.
+  if (context.scope !== "owner") return json({ error: "owner_scope_required" }, 403);
   if (options.write && readOnlyMode()) return json({ error: "read_only" }, 403);
   return { user: context.user };
 }
@@ -46,6 +44,28 @@ export async function requireOwnerScope(
   options: { write?: boolean } = {},
 ): Promise<OwnerScopeResult> {
   return evaluateOwnerScope(await currentAuthContext(), options);
+}
+
+// Distinct tenant guard (rev2 §3.1): authorises any ACTIVE tenant (owner or
+// learner) to act on its OWN userId. It deliberately does not grant cross-tenant
+// or global access — entity-level ownership is enforced because every caller
+// scopes its queries/objects to context.user.userId (see app/api/state,
+// audio, coach, backup, takeover). Do NOT use this for admin/global operations;
+// those keep requireOwnerScope. Never let a request-supplied userId reach a query.
+export function evaluateUserScope(
+  context: AuthContext,
+  options: { write?: boolean } = {},
+): OwnerScopeResult {
+  if (!context.user) return json({ error: "sign_in_required" }, 401);
+  if (context.scope !== "owner" && context.scope !== "learner") return json({ error: "owner_scope_required" }, 403);
+  if (options.write && readOnlyMode()) return json({ error: "read_only" }, 403);
+  return { user: context.user };
+}
+
+export async function requireUserScope(
+  options: { write?: boolean } = {},
+): Promise<OwnerScopeResult> {
+  return evaluateUserScope(await currentAuthContext(), options);
 }
 
 // Grant routes must be reached on the configured canonical origin. A request

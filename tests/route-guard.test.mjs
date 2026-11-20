@@ -25,10 +25,37 @@ registerHooks({
     return next(specifier, context);
   },
 });
-const {requireOwnerScope, evaluateOwnerScope, isCanonicalOrigin} = await import("../lib/route-guard.ts");
+const {requireOwnerScope, evaluateOwnerScope, evaluateUserScope, requireUserScope, isCanonicalOrigin} = await import("../lib/route-guard.ts");
 
 const ownerUser = {userId: "owner-1", displayName: "Owner", email: "owner@example.com", fullName: null};
 const owner = {user: ownerUser, scope: "owner", identityType: "access-jwt"};
+const learnerUser = {userId: "learner-1", displayName: "Learner", email: "l@example.com", fullName: null};
+const learner = {user: learnerUser, scope: "learner", identityType: "access-jwt"};
+
+test("tenant guard accepts a learner scoped to its own userId", async () => {
+  globalThis.__guardCtx = learner;
+  setEnv();
+  assert.deepEqual(await requireUserScope(), {user: learnerUser});
+  assert.deepEqual(await requireUserScope({write: true}), {user: learnerUser});
+});
+
+test("learner is rejected by the strict owner gate (no privilege escalation)", () => {
+  const denied = evaluateOwnerScope(learner);
+  assert.ok(denied instanceof Response);
+  assert.equal(denied.status, 403);
+  assert.deepEqual(evaluateUserScope(learner), {user: learnerUser});
+});
+
+test("tenant guard rejects service and anonymous identities", () => {
+  for (const scope of ["coach", "coach-runner"]) {
+    const r = evaluateUserScope({user: ownerUser, scope, identityType: "access-jwt"});
+    assert.ok(r instanceof Response, scope);
+    assert.equal(r.status, 403, scope);
+  }
+  const anon = evaluateUserScope({user: null, scope: null, identityType: null});
+  assert.ok(anon instanceof Response);
+  assert.equal(anon.status, 401);
+});
 
 test("owner scope is accepted for reads and writes", async () => {
   globalThis.__guardCtx = owner;

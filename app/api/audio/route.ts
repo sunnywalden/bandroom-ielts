@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { requireOwnerScope } from "@/lib/route-guard";
+import { requireUserScope } from "@/lib/route-guard";
 import { crossOrigin, json, limitedBody } from "../shared";
 import { uuid } from "@/lib/recording-recovery";
 
@@ -24,7 +24,7 @@ function audioKey(userId: string, id: string) {
 }
 
 export async function POST(request: Request) {
-  const auth = await requireOwnerScope({ write: true });
+  const auth = await requireUserScope({ write: true });
   if (auth instanceof Response) return auth;
   const user = auth.user;
   if (crossOrigin(request)) return json({ error: "invalid_origin" }, 403);
@@ -64,7 +64,7 @@ function byteRange(header: string, size: number) {
 }
 
 export async function GET(request: Request) {
-  const auth = await requireOwnerScope();
+  const auth = await requireUserScope();
   if (auth instanceof Response) return auth;
   const user = auth.user;
   const id = new URL(request.url).searchParams.get("id") ?? "";

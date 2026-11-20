@@ -1,9 +1,9 @@
 import { env } from 'cloudflare:workers';
-import { requireOwnerScope } from '@/lib/route-guard';
+import { requireUserScope } from '@/lib/route-guard';
 import { BackupError } from '@/lib/backup';
 import { crossOrigin,json } from '../shared';
 export async function withBackup(request:Request, operation:(db:D1Database,bucket:R2Bucket,uid:string,key:string)=>Promise<unknown>,accountBinding:'header'|'signed-download'='header'){
-  const auth=await requireOwnerScope({write:request.method!=='GET'});
+  const auth=await requireUserScope({write:request.method!=='GET'});
   if(auth instanceof Response)return auth;
   const user=auth.user;
   if(accountBinding==='header'&&request.headers.get('X-Bandroom-Account')!==user.userId)return json({error:'登录账号已变更，请刷新页面后重试。'},428);

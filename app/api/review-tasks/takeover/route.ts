@@ -1,4 +1,4 @@
-import { requireOwnerScope } from "@/lib/route-guard";
+import { requireUserScope } from "@/lib/route-guard";
 import { claimManualReviewTask, findReviewTaskByAttempt, ReviewTaskError, reviewTaskDb } from "@/lib/review-tasks";
 import { crossOrigin, json, limitedBody } from "../../shared";
 
@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 /** Revoke any live automatic claim before the learner asks Work to review manually. */
 export async function POST(request: Request) {
   if (crossOrigin(request)) return json({ error: "invalid_origin" }, 403);
-  const auth = await requireOwnerScope({ write: true });
+  const auth = await requireUserScope({ write: true });
   if (auth instanceof Response) return auth;
   const user = auth.user;
   const body = await limitedBody(request, 8 * 1024);
