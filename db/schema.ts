@@ -146,6 +146,9 @@ export const analysisEvents = sqliteTable("analysis_events", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   at: integer("at").notNull(),
   taskId: text("task_id"),
+  // Tenant attribution (rev2 S10). Nullable for legacy/non-task events; new
+  // task-bound events are attributed server-side from review_tasks.user_id.
+  userId: text("user_id"),
   fence: integer("fence"),
   event: text("event").notNull(),
   stage: text("stage"),

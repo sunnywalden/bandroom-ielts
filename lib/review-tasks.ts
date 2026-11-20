@@ -481,15 +481,16 @@ export async function recordAnalysisEvent(db: D1Like, input: {
   metadata?: Record<string, unknown> | null;
 }) {
   await db.prepare(`INSERT INTO analysis_events
-    (at, task_id, fence, event, stage, outcome, client_run_id, request_id, metadata_json)
+    (at, task_id, fence, event, stage, outcome, client_run_id, request_id, metadata_json, user_id)
     VALUES (?,?,?,?,?,?,COALESCE(?,(
       SELECT client_run_id FROM analysis_events WHERE task_id=? AND fence=? AND event='claim_review_tasks'
       ORDER BY id DESC LIMIT 1
-    )),?,?)`)
+    )),?,?,(SELECT user_id FROM review_tasks WHERE id=?))`)
     .bind(input.at ?? Date.now(), input.taskId ?? null, input.fence ?? null, input.event,
       input.stage ?? null, input.outcome, input.clientRunId ?? null,
       input.taskId ?? null, input.fence ?? null, input.requestId ?? null,
-      input.metadata == null ? null : JSON.stringify(input.metadata)).run();
+      input.metadata == null ? null : JSON.stringify(input.metadata),
+      input.taskId ?? null).run();
 }
 
 export async function reportSchedulerHeartbeat(db: D1Like, input: {

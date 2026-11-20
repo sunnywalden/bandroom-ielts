@@ -66,7 +66,7 @@ const TABLES = [
     name: "analysis_events",
     columns: [
       "id", "at", "task_id", "fence", "event", "stage", "outcome",
-      "client_run_id", "request_id", "metadata_json",
+      "client_run_id", "request_id", "metadata_json", "user_id",
     ],
     orderBy: "id",
   },

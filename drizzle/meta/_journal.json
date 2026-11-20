@@ -64,6 +64,13 @@
       "when": 1795150646754,
       "tag": "0008_tenancy_users",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1795151456243,
+      "tag": "0009_analysis_events_user",
+      "breakpoints": true
     }
   ]
 }
