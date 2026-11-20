@@ -76,8 +76,17 @@ class FakeQueueClient:
                     t["state"] = "running"
                     t["fence"] = t.get("fence", 0) + 1
                     t["lease_until"] = now + 300_000
-                    return {"task": dict(t)}
-            return {"task": None}
+                    # F5: report whether other tenants have due tasks
+                    claimed_user = t.get("userId")
+                    other_due = any(
+                        o.get("userId") != claimed_user and (
+                            (o.get("state", "queued") in ("queued", "retry_wait") and o.get("next_at", 0) <= now)
+                            or (o.get("state") == "running" and o.get("lease_until", 0) <= now)
+                        )
+                        for o in self.tasks if o is not t
+                    )
+                    return {"task": dict(t), "otherTenantsDue": other_due}
+            return {"task": None, "otherTenantsDue": False}
         if name == "read_review_recording":
             return {
                 "total": len(self.recording), "length": len(self.recording),
@@ -279,6 +288,23 @@ def test_fairness_batch_cap_yields_to_other_tenant(tmp_path):
     yielded = [f for f in client.failed if f["code"] == "per_user_batch_cap"]
     assert yielded and all(f["retryable"] for f in yielded)
     assert all(f["taskId"].startswith("a") for f in yielded)
+
+
+# ⑥b F5: single-user backlog must NOT yield (no other tenant to serve) ------
+def test_single_user_backlog_no_yield(tmp_path):
+    """F5 Critical fix: when only one tenant has due tasks, the batch cap must
+    not yield — yielding strands the backlog (burns attempts on re-claim).
+    All 8 tasks should be processed in one run."""
+    tasks = [_text_task(f"s{i}", "SOLO") for i in range(8)]
+    client = FakeQueueClient(tasks)
+    report = mt_runner(tmp_path, client, tenant_batch_cap=3).run()
+    assert report.processed == 8
+    assert report.yielded == 0
+    assert report.failed == 0
+    completed = [c["taskId"] for c in client.completed]
+    assert len(completed) == 8
+    # No per_user_batch_cap failures
+    assert not any(f["code"] == "per_user_batch_cap" for f in client.failed)
 
 
 # ⑦ speaking release-gate gap -> permanent fail-closed (owner decision A) --

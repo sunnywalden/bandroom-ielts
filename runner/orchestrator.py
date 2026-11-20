@@ -1118,7 +1118,14 @@ class CoachRunner:
             chunks, expected_size=total, expected_sha256=expected_sha
         )
 
-    def _fairness_should_yield(self, user_id: str) -> bool:
+    def _fairness_should_yield(self, user_id: str, other_tenants_due: bool = True) -> bool:
+        # F5 fix: only yield when another tenant actually has due tasks.
+        # Yielding when this is the only active tenant strands its backlog
+        # (each yield burns an attempt via re-claim; after MAX_ATTEMPTS the
+        # task is stuck). With markExhaustedGlobal it becomes needs_attention
+        # instead of invisible, but it still never gets processed.
+        if not other_tenants_due:
+            return False
         return (
             user_id == self._fair_last_user
             and self._fair_run_length >= self.config.tenant_batch_cap
@@ -1155,7 +1162,7 @@ class CoachRunner:
         day = int(task.get("day") or attempt.get("day") or 1)
         kind = str(task.get("kind") or "")
 
-        if self._fairness_should_yield(user_id):
+        if self._fairness_should_yield(user_id, bool(task.get("_otherTenantsDue", True))):
             raise TaskYielded("per_user_batch_cap")
 
         if kind == "speaking":

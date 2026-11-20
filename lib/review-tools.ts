@@ -10,10 +10,11 @@ import {
 } from "./grounded-analysis";
 import { issueCalibrationCandidatesIdempotent, CalibrationError } from "./calibration";
 import {
-  claimReviewTasks, claimNextReviewTask, completeReviewTask, failReviewTask, getReviewTask, readReviewCheckpoint, readReviewReceipt,
+  claimReviewTasks, claimNextReviewTask, completeReviewTask, failReviewTask, getReviewTask, hasOtherDueTasks, readReviewCheckpoint, readReviewReceipt,
   recordAnalysisEvent, renewReviewLease, reportSchedulerHeartbeat, reviewTaskDb, saveReviewCheckpoint,
   ReviewTaskError, type ReviewTask, type ReviewTaskDb,
 } from "./review-tasks";
+import { signLease, leaseEnabled } from "./lease";
 
 const taskId = z.string().trim().min(1).max(200).describe("Exact review task ID returned by claim_review_tasks.");
 const fence = z.number().int().min(1).describe("Current task fence; stale fences are rejected.");
@@ -197,14 +198,31 @@ export async function callReviewTool(userId: string, name: string, args: unknown
         const input = claimNextSpec.parse(args ?? {});
         const task = await claimNextReviewTask(db, { clientRunId: input.clientRunId ?? "unknown" });
         if (!task) {
-          return { content: [{ type: "text", text: JSON.stringify({ serverNow: Date.now(), task: null }) }] };
+          return { content: [{ type: "text", text: JSON.stringify({ serverNow: Date.now(), task: null, otherTenantsDue: false }) }] };
         }
         const snapshot = await snapshotFor(db, task.userId, task);
+        // F5: tell the runner whether other tenants have due tasks so it can
+        // skip yielding when this is the only active tenant (prevents stranding).
+        const otherTenantsDue = await hasOtherDueTasks(db, task.userId);
+        // B1: sign a lease when the lease system is configured. The runner
+        // carries this lease in all subsequent task-bound calls.
+        let lease: string | null = null;
+        if (leaseEnabled()) {
+          const now = Date.now();
+          lease = await signLease({
+            tid: task.id, uid: task.userId, fence: task.fence,
+            rid: input.clientRunId ?? "runner",
+            ops: ["renew_review_lease", "save_review_checkpoint", "read_review_checkpoint",
+              "fail_review_task", "complete_review_task", "read_review_recording",
+              "read_review_receipt", "get_analysis_bundle", "get_review_transfer"],
+            iat: now, exp: task.leaseUntil ?? now + 300_000, rev: 0,
+          });
+        }
         await recordAnalysisEvent(db, {
           taskId: task.id, fence: task.fence, event: "claim_next_review_task", stage: task.stage,
           outcome: "ok", clientRunId: input.clientRunId ?? null,
         });
-        return { content: [{ type: "text", text: JSON.stringify({ serverNow: Date.now(), task: { ...task, snapshot } }) }] };
+        return { content: [{ type: "text", text: JSON.stringify({ serverNow: Date.now(), task: { ...task, snapshot }, otherTenantsDue, lease }) }] };
       }
       case "renew_review_lease": {
         const input = renewSpec.parse(args);

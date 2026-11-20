@@ -30,6 +30,11 @@ declare namespace Cloudflare {
     // Read-only mirror mode for the dual-run comparison window (design §4.6):
     // when "1", all write routes reject service and owner writes alike.
     BANDROOM_READONLY?: string;
+    // Task lease HMAC key (design rev3.1 §4.3, B1 fix). 32-byte hex.
+    // When absent, the lease system is disabled and the legacy taskId+fence
+    // path is used (single-owner backward compat).
+    BANDROOM_LEASE_KEY?: string;
+    BANDROOM_LEASE_KID?: string;
     // One-time migration export endpoint gate (design D-11 branch B). Disabled
     // unless explicitly set to "1"; owner-scope only; removed after cutover.
     BANDROOM_MIGRATION_ENABLED?: string;
