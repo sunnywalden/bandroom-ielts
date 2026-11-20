@@ -105,8 +105,13 @@ band 描述符区间；LR/GRA 由 LLM 对转写的问题计数与严重度映射
 - 端到端验证：原始故障录音（58.74s）经完整管线 → speech 33.385s、33 词转写、
   四科评分卡（P 不评分）、伪造引文被丢弃、drill 对比音频 ok、传输层完整。
 - 生产 runner 镜像已同步（~/.bandroom-runner-prod），下次真实提交即生效。
-- **Worker/UI 部署待 owner 明确授权**（红线：不擅自 deploy）。未部署前新反馈
-  携带 scorecard 数据，旧 UI 向后兼容忽略；runner 修复（语音不再恒 0）已生效。
+- **已部署**（owner 授权 2026-11-19）：版本 `9a5f71c7-28fa-4e05-b0fa-afd089bc2652`，
+  100% 流量，https://bandroom.sunnywalden0209.workers.dev（拓扑不变：workers_dev，
+  无自定义域）。D1 11 个迁移全部在位（含 0010）。配置备份：
+  `~/.config/bandroom/wrangler.prod-20261119-speaking-redesign.json`（600）。
+  验证：MCP read_study_session 对新版本正常；部署 bundle 含评分卡 UI。
+  历史 attempt 的旧反馈（v1 analysis）向后兼容显示散文；**新提交**产出评分卡。
+  UI 视觉确认需 owner 的 Access 登录会话。
 
 ## 5. 不做的事
 
