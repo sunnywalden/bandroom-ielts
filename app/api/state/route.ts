@@ -8,6 +8,7 @@ import { reviewContext } from "@/lib/review-context";
 import { reviewAttempts } from "@/app/feedback-model";
 import { linkedRecordings } from "@/lib/recording-recovery";
 import { consentGate, crossOrigin, json, limitedBody } from "../shared";
+import { checkSubmissionQuota, checkQueueDepth, QuotaError, quotaEnabled, quotaResponse } from "@/lib/quota";
 
 import { env } from "cloudflare:workers";
 import { getExercises } from "../../curriculum";
@@ -112,6 +113,11 @@ export async function PUT(request: Request) {
     const submitted = after.filter(a => a.kind === "subjective" && !before.some(b => a.id === b.id));
     if (submitted.length !== 1 || state.finished || state.stage !== submitted[0].stage)
       return json({ error: "invalid_review_submission" }, 422);
+    // MT-4 (B6): bound per-tenant daily submissions and pending queue depth.
+    if (env.DB && quotaEnabled(env)) {
+      try { await checkQueueDepth(env.DB, user.userId); await checkSubmissionQuota(env.DB, user.userId); }
+      catch (error) { if (error instanceof QuotaError) return quotaResponse(error); throw error; }
+    }
     const attempt = submitted[0];
     const recording = attempt.recordingId ? recordingIdentities.get(attempt.recordingId) : undefined;
     const saved = await submitReview(user.userId, submissionKey, requestHash, revision, state, {
