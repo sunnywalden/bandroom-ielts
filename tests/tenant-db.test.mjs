@@ -32,6 +32,21 @@ test("scoped statements pass; unscoped tenant queries trip", () => {
   assert.throws(() => assertTenantPredicate("SELECT * FROM analysis_artifacts WHERE task_id=?"), /unscoped_artifact/);
 });
 
+test("comment/string/projection-only user_id tokens do not satisfy the predicate", () => {
+  // bare token in a comment
+  assert.throws(() => assertTenantPredicate("SELECT * FROM teacher_feedback -- user_id"), /missing_user_id/);
+  // bare token inside a string literal
+  assert.throws(() => assertTenantPredicate("SELECT * FROM teacher_feedback WHERE feedback='user_id'"), /missing_user_id/);
+  // projection-only mention
+  assert.throws(() => assertTenantPredicate("SELECT user_id FROM teacher_feedback"), /missing_user_id/);
+  // schema-qualified identifier is recognised and must still be scoped
+  assert.doesNotThrow(() => assertTenantPredicate("SELECT * FROM main.teacher_feedback WHERE user_id=?"));
+  // comma-separated FROM list: one unscoped tenant table trips
+  assert.throws(() => assertTenantPredicate("SELECT * FROM teacher_feedback, learner_states WHERE teacher_feedback.id=?"), /missing_user_id/);
+  // comma list with user_id passes
+  assert.doesNotThrow(() => assertTenantPredicate("SELECT * FROM review_tasks, analysis_artifacts WHERE review_tasks.user_id=?"));
+});
+
 test("non-tenant statements are untouched", () => {
   assert.doesNotThrow(() => assertTenantPredicate("SELECT sqlite_master"));
 });
