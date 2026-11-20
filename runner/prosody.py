@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence, TypedDict
 
 import numpy as np
+from scipy.ndimage import uniform_filter1d
 from scipy.signal import butter, resample_poly, sosfiltfilt
 
 __all__ = [
@@ -89,6 +90,7 @@ __all__ = [
     "write_wav",
     "frame_energy",
     "detect_pauses",
+    "detect_pauses_hardened",
     "gate_pauses_to_word_gaps",
     "parse_textgrid_words",
     "estimate_f0",
@@ -122,6 +124,24 @@ PAUSE_BRIDGE_MAX_SECONDS = 0.10
 PAUSE_BRIDGE_NOISE_MULTIPLIER = 4.0
 PAUSE_ABSOLUTE_FLOOR = 0.0005
 PAUSE_HIGH_ABSOLUTE_FLOOR = 0.0008
+
+# DSP-hardened waveform detector (opt-in ``pause_mode="waveform_hardened"``).
+# F2 robustness route: highpass the codec rumble, estimate the noise PSD from
+# quiet frames, spectrally subtract it, smooth the envelope, and merge short
+# speech islands.  Tuned only on the iteration-29 tune split (first 11 sorted
+# L2-ARCTIC speakers); the held-out split is not used for any parameter.
+HARDENED_HIGHPASS_HZ = None
+HARDENED_FRAME_SECONDS = 0.040
+HARDENED_HOP_SECONDS = 0.010
+HARDENED_NOISE_PERCENTILE = 10.0
+HARDENED_SUBTRACTION_BETA = 4.0
+HARDENED_LEVEL_PERCENTILE = 90.0
+HARDENED_LOW_FRACTION = 0.015
+HARDENED_HIGH_FRACTION = 0.030
+HARDENED_SMOOTH_FRAMES = 13
+HARDENED_BRIDGE_SECONDS = 0.10
+HARDENED_BRIDGE_FRACTION = 0.5
+HARDENED_MIN_SPEECH_SECONDS = 0.0
 
 # F0 analysis.  The 40 ms window can contain at least two periods at 60 Hz.
 F0_FRAME_SECONDS = 0.040
@@ -762,6 +782,141 @@ def detect_pauses(
         noise_floor_rms=round(noise, 6),
         low_threshold_rms=round(low, 6),
         high_threshold_rms=round(high, 6),
+        speech_span=(round(span_start, 4), round(span_end, 4)),
+        speech_seconds=speech_seconds,
+        total_seconds=total_seconds,
+    )
+
+
+def _hardened_spectrum(
+    samples: np.ndarray,
+    sample_rate: int,
+    frame_seconds: float,
+    hop_seconds: float,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Hann-windowed STFT power and frame start times (deterministic)."""
+    frame = max(1, int(round(frame_seconds * sample_rate)))
+    hop = max(1, int(round(hop_seconds * sample_rate)))
+    if len(samples) < frame:
+        samples = np.pad(samples, (0, frame - len(samples)))
+    count = 1 + (len(samples) - frame) // hop
+    starts = np.arange(count) * hop
+    frames = samples[starts[:, None] + np.arange(frame)[None, :]]
+    spec = np.fft.rfft(frames * np.hanning(frame), axis=1)
+    power = spec.real**2 + spec.imag**2
+    times = starts / float(sample_rate)
+    return power, times, frame / float(sample_rate)
+
+
+def detect_pauses_hardened(
+    samples: np.ndarray,
+    sample_rate: int = TARGET_SAMPLE_RATE,
+    *,
+    min_pause_seconds: float = PAUSE_MIN_SECONDS,
+    pause_low_noise_multiplier: float = PAUSE_LOW_NOISE_MULTIPLIER,
+) -> PauseDetection:
+    """DSP-hardened waveform pause detector (opt-in research mode).
+
+    Pipeline (F2 route): 70 Hz highpass -> per-frame STFT power -> noise PSD
+    from the 10th percentile of each frequency bin over the recording ->
+    spectral subtraction -> 90 ms envelope smoothing -> hysteresis on
+    fractions of the 90th-percentile speech level -> bridge short low-energy
+    splits and short speech islands -> minimum pause.
+
+    The absolute level cancels: thresholds are fractions of the speech
+    envelope, and the noise PSD is subtracted, so stationary additive noise
+    does not inflate pause durations.  Tuned only on the iteration-29 tune
+    split; the held-out split is never used for parameters.  This mode is not
+    the production default and its human-annotation calibration and cross-codec
+    retest are reported in the iteration-29 closure.
+
+    ``pause_low_noise_multiplier`` is re-derived for this mode as a relative
+    scale on the low threshold (1.6 = nominal).  Per-user T1 calibration was
+    measured for ``waveform_only`` only and is NOT validated for this mode.
+    """
+    x = np.asarray(samples, dtype=np.float64).reshape(-1)
+    if len(x) == 0:
+        raise ValueError("empty audio for pause detection")
+    if HARDENED_HIGHPASS_HZ is not None and len(x) > 32:
+        sos = butter(4, HARDENED_HIGHPASS_HZ / (sample_rate / 2.0),
+                     btype="highpass", output="sos")
+        x = sosfiltfilt(sos, x)
+    power, times, frame_seconds = _hardened_spectrum(
+        x, sample_rate, HARDENED_FRAME_SECONDS, HARDENED_HOP_SECONDS
+    )
+    noise_psd = np.percentile(power, HARDENED_NOISE_PERCENTILE, axis=0)
+    clean = np.maximum(power - HARDENED_SUBTRACTION_BETA * noise_psd, 0.0)
+    energy = clean.mean(axis=1)
+    if HARDENED_SMOOTH_FRAMES > 1:
+        energy = uniform_filter1d(energy, size=HARDENED_SMOOTH_FRAMES, mode="nearest")
+    level = float(np.percentile(energy, HARDENED_LEVEL_PERCENTILE))
+    total_seconds = len(x) / float(sample_rate)
+    if not np.isfinite(level) or level <= 0.0:
+        return PauseDetection(
+            pauses=[], noise_floor_rms=0.0, low_threshold_rms=0.0,
+            high_threshold_rms=0.0, speech_span=(0.0, round(total_seconds, 4)),
+            speech_seconds=0.0, total_seconds=total_seconds,
+        )
+    scale = max(0.1, min(5.0, float(pause_low_noise_multiplier))) / PAUSE_LOW_NOISE_MULTIPLIER
+    low = level * HARDENED_LOW_FRACTION * scale
+    high = max(level * HARDENED_HIGH_FRACTION, low * 1.25)
+
+    segments: list[list[int]] = []
+    in_silence = False
+    start = 0
+    for index, value in enumerate(energy):
+        if not in_silence and value < low:
+            in_silence = True
+            start = index
+        elif in_silence and value > high:
+            in_silence = False
+            segments.append([start, index])
+    if in_silence:
+        segments.append([start, len(energy)])
+
+    bridge_level = level * HARDENED_BRIDGE_FRACTION
+    merged: list[list[int]] = []
+    for seg_start, seg_end in segments:
+        if merged:
+            previous_start, previous_end = merged[-1]
+            gap_seconds = (seg_start - previous_end) * frame_seconds
+            between = energy[previous_end:min(seg_start + 1, len(energy))]
+            low_island = len(between) == 0 or float(np.median(between)) < bridge_level
+            if (gap_seconds <= HARDENED_BRIDGE_SECONDS and low_island) or (
+                HARDENED_MIN_SPEECH_SECONDS > 0
+                and gap_seconds <= HARDENED_MIN_SPEECH_SECONDS
+            ):
+                merged[-1] = [previous_start, seg_end]
+                continue
+        merged.append([seg_start, seg_end])
+
+    active = np.flatnonzero(energy > high)
+    if len(active):
+        span_start = float(times[active[0]])
+        span_end = min(total_seconds, float(times[active[-1]] + frame_seconds))
+    else:
+        span_start, span_end = 0.0, total_seconds
+    speech_span = (span_start, span_end)
+
+    pauses: list[dict[str, float]] = []
+    if not len(active):
+        merged = []
+    for seg_start, seg_end in merged:
+        begin = float(times[seg_start])
+        finish = float(times[seg_end]) if seg_end < len(times) else total_seconds
+        begin = max(begin, span_start)
+        finish = min(finish, span_end)
+        if finish - begin >= min_pause_seconds - 1e-9:
+            pauses.append({"start": round(begin, 4), "end": round(finish, 4),
+                           "seconds": round(finish - begin, 4)})
+    pauses.sort(key=lambda p: p["start"])
+    pause_seconds = sum(p["seconds"] for p in pauses)
+    speech_seconds = max(0.0, (span_end - span_start) - pause_seconds)
+    return PauseDetection(
+        pauses=pauses,
+        noise_floor_rms=round(float(np.sqrt(max(np.mean(noise_psd), 0.0))), 6),
+        low_threshold_rms=round(float(np.sqrt(max(low, 0.0))), 6),
+        high_threshold_rms=round(float(np.sqrt(max(high, 0.0))), 6),
         speech_span=(round(span_start, 4), round(span_end, 4)),
         speech_seconds=speech_seconds,
         total_seconds=total_seconds,
@@ -1409,8 +1564,22 @@ def vad_pauses(
 
 
 def _calibration_status_for_pause_mode(
-    word_source: str, word_gated: bool, vad: bool = False
+    word_source: str, word_gated: bool, vad: bool = False,
+    hardened: bool = False,
 ) -> tuple[str, str]:
+    if hardened:
+        # Opt-in research mode: tuned on the iteration-29 tune split only. Its
+        # held-out cross-codec retest and human-annotation calibration
+        # re-validation are reported in the iteration-29 closure; it is not the
+        # production default and the per-user T1 multiplier is not validated
+        # for this mode.
+        return STATUS_CONSISTENCY, (
+            "DSP-hardened waveform detector (highpass + quiet-frame spectral "
+            "noise subtraction + hysteresis + short-island merge). Cross-codec "
+            "and additive-noise retest and human-annotation calibration are "
+            "reported in the iteration-29 research closure; not the production "
+            "default, and the per-user T1 multiplier is not validated here."
+        )
     if vad:
         # 2026-11-19: the earlier "calibrated / retest=1.0" claim was vacuous
         # (empty timelines compared 0==0 while the call convention was broken).
@@ -1502,7 +1671,8 @@ def analyze_wav(
         ``"human_annotation"``, ``"asr"``, ``"supplied"`` or ``"none"``.
     pause_mode:
         ``"auto"`` (word-gated when words are supplied, waveform-only
-        otherwise), ``"waveform_only"`` or ``"word_gated"``.
+        otherwise), ``"waveform_only"``, ``"word_gated"``, ``"vad"`` or the
+        opt-in research mode ``"waveform_hardened"``.
     include_contour:
         Include the per-frame F0 contour in the output.
     pause_low_noise_multiplier:
@@ -1514,7 +1684,8 @@ def analyze_wav(
         raise ValueError(f"invalid word_source: {word_source!r}")
     if transcript_source not in {"human_annotation", "asr", "supplied", "none"}:
         raise ValueError(f"invalid transcript_source: {transcript_source!r}")
-    if pause_mode not in {"auto", "waveform_only", "word_gated", "vad"}:
+    if pause_mode not in {"auto", "waveform_only", "word_gated", "vad",
+                          "waveform_hardened"}:
         raise ValueError(f"invalid pause_mode: {pause_mode!r}")
 
     audio = load_wav(path)
@@ -1528,6 +1699,12 @@ def analyze_wav(
     energy = frame_energy(samples, audio.sample_rate)
     if pause_mode == "vad":
         raw_detection = vad_pauses(samples, audio.sample_rate)
+    elif pause_mode == "waveform_hardened":
+        raw_detection = detect_pauses_hardened(
+            samples,
+            audio.sample_rate,
+            pause_low_noise_multiplier=pause_low_noise_multiplier,
+        )
     else:
         raw_detection = detect_pauses(
             samples,
@@ -1557,14 +1734,17 @@ def analyze_wav(
     speech_ratio = speech_seconds / total_seconds if total_seconds > 0 else None
 
     pause_status, pause_caveat = _calibration_status_for_pause_mode(
-        word_source, effective_mode == "word_gated", vad=effective_mode == "vad"
+        word_source, effective_mode == "word_gated", vad=effective_mode == "vad",
+        hardened=effective_mode == "waveform_hardened",
     )
     pause_evidence = (
         "CALIBRATION_REPORT.md; calibration_results.json; "
         + (
             "word-gated"
             if effective_mode == "word_gated"
-            else "vad" if effective_mode == "vad" else "waveform-only"
+            else "vad" if effective_mode == "vad"
+            else "waveform-hardened" if effective_mode == "waveform_hardened"
+            else "waveform-only"
         )
     )
 
