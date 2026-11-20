@@ -4,7 +4,13 @@ export function json(value: unknown, status = 200) {
 
 export function crossOrigin(request: Request) {
   const origin = request.headers.get("Origin");
-  return origin !== null && origin !== new URL(request.url).origin;
+  if (origin !== null && origin !== new URL(request.url).origin) return true;
+  // CSRF defence (rev2 S17). A browser-initiated cross-site request is refused
+  // even if it omits Origin (older form posts). Non-browser clients (the runner,
+  // CLI) send no Sec-Fetch-Site and are unaffected — we deliberately do NOT
+  // require an Origin header, because service-token POSTs carry none.
+  if (request.headers.get("Sec-Fetch-Site") === "cross-site") return true;
+  return false;
 }
 
 export async function limitedBody(request: Request, maxBytes: number): Promise<Uint8Array<ArrayBuffer> | Response> {
