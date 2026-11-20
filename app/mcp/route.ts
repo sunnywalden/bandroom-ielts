@@ -31,9 +31,17 @@ export async function POST(request:Request) {
       const tool=coachTools.find(entry=>entry.name===message.params.name);
       if((env as {BANDROOM_READONLY?:string}).BANDROOM_READONLY==="1"&&!tool?.annotations?.readOnlyHint)
         return err(-32004,"Write operations are disabled in read-only mirror mode.",403);
-      const result=await callCoach(auth.user.userId,message.params.name,message.params.arguments??{});
+      // S7.1: only a lease verified by the review-tool layer may attribute the
+      // audit row to a tenant. The callback fires during dispatch, so an
+      // invalid/failed lease leaves this undefined and the audit stays
+      // service-scoped (userId=null, taskId=null).
+      let verifiedUid:string|undefined;
+      const result=await callCoach(auth.user.userId,message.params.name,message.params.arguments??{},{
+        onLeaseVerified:lease=>{verifiedUid=lease.uid;},
+      });
       if(auth.scope==="coach"||auth.scope==="coach-runner")
-        void auditServiceCall(auth,message.params.name,message.params.arguments,result);
+        void auditServiceCall(auth,message.params.name,message.params.arguments,result,
+          result&&!(result as {isError?:boolean}).isError?verifiedUid:undefined);
       return reply(result);
     }
     default: return err(-32601,"Method not found");

@@ -14,9 +14,13 @@ import {
   recordAnalysisEvent, renewReviewLease, reportSchedulerHeartbeat, reviewTaskDb, saveReviewCheckpoint,
   ReviewTaskError, type ReviewTask, type ReviewTaskDb,
 } from "./review-tasks";
-import { signLease, leaseEnabled } from "./lease";
+import { signLease, leaseEnabled, verifyLease, type LeasePayload } from "./lease";
 
 const taskId = z.string().trim().min(1).max(200).describe("Exact review task ID returned by claim_review_tasks.");
+// B1: server-issued capability returned by claim_next_review_task. When present
+// and the lease system is configured, it is the authority for the tenant, task
+// and fence — the request body's userId/taskId/fence are never trusted.
+const leaseToken = z.string().optional().describe("Opaque server-issued task lease from claim_next_review_task.");
 const fence = z.number().int().min(1).describe("Current task fence; stale fences are rejected.");
 const clientRunId = z.string().trim().min(1).max(200).describe("Client-generated run identifier used to correlate evidence.");
 const hex64 = z.string().regex(/^[0-9a-f]{64}$/).describe("Lowercase SHA-256.");
@@ -29,13 +33,13 @@ const claimNextSpec = z.strictObject({
   clientRunId: clientRunId.optional(),
 });
 const renewSpec = z.strictObject({
-  taskId, fence,
+  taskId, fence, lease: leaseToken,
   extendMs: z.number().int().min(30_000).max(15 * 60_000).optional(),
 });
 const checkpointStage = z.enum(["read_input", "decode", "vad", "chunk", "acoustic", "align", "detect", "validate", "explain"]);
 const checkpointChunkIndex = z.number().int().min(0).max(100_000);
 const checkpointSpec = z.strictObject({
-  taskId, fence,
+  taskId, fence, lease: leaseToken,
   analysisVersion: z.string().trim().min(1).max(120),
   stage: checkpointStage,
   chunkIndex: checkpointChunkIndex,
@@ -47,13 +51,13 @@ const checkpointSpec = z.strictObject({
   payload: z.record(z.string(), z.unknown()).optional(),
 });
 const checkpointReadSpec = z.strictObject({
-  taskId, fence,
+  taskId, fence, lease: leaseToken,
   stage: checkpointStage.optional(),
   chunkIndex: checkpointChunkIndex.optional(),
 }).refine(input => (input.stage === undefined) === (input.chunkIndex === undefined),
   "Provide both stage and chunkIndex to retrieve a specific checkpoint.");
 const failSpec = z.strictObject({
-  taskId, fence,
+  taskId, fence, lease: leaseToken,
   code: z.string().trim().min(1).max(120),
   retryable: z.boolean(),
   nextAt: z.number().int().min(0).optional(),
@@ -65,7 +69,7 @@ const pronunciationSpec = z.strictObject({
   recordingId: z.uuidv4(),
 });
 const completeSpec = z.strictObject({
-  taskId, fence,
+  taskId, fence, lease: leaseToken,
   feedback: z.string().trim().min(1).max(6000),
   evidence: z.string().trim().min(1).max(2000),
   analysisVersion: z.string().trim().min(1).max(120).optional(),
@@ -89,11 +93,11 @@ const transferSpec = z.discriminatedUnion("action", [
   }),
 ]);
 const recordingSpec = z.strictObject({
-  taskId, fence,
+  taskId, fence, lease: leaseToken,
   offset: z.number().int().min(0).max(12 * 1024 * 1024),
   length: z.number().int().min(1).max(256 * 1024).optional(),
 });
-const receiptSpec = z.strictObject({ taskId, clientRunId: clientRunId.optional() });
+const receiptSpec = z.strictObject({ taskId, lease: leaseToken, clientRunId: clientRunId.optional() });
 const heartbeatSpec = z.strictObject({
   automationId: z.string().trim().min(1).max(200),
   generation: z.number().int().min(0),
@@ -166,7 +170,43 @@ function toolError(error: unknown) {
   throw error;
 }
 
-export async function callReviewTool(userId: string, name: string, args: unknown) {
+export type ReviewToolOptions = {
+  /** Reports a lease that verified successfully so the MCP audit layer can
+   * attribute the call to the signed tenant (S7.1) instead of guessing. */
+  onLeaseVerified?: (payload: LeasePayload) => void;
+};
+
+type EffectiveScope = {
+  user: string;
+  task: string;
+  fence: number;
+  revocationEpoch: number | undefined;
+};
+
+/** Verify an optional lease (B1). A missing token, or a deployment without a
+ * lease key, keeps the legacy owner path unchanged. A present-but-invalid
+ * lease is always an error — never a silent fallback to caller identity. */
+async function verifiedLease(token: string | undefined, tool: string): Promise<LeasePayload | null> {
+  if (!token || !leaseEnabled()) return null;
+  try {
+    return await verifyLease(token, tool);
+  } catch (error) {
+    const code = error instanceof Error ? error.message : "lease_invalid";
+    throw new ReviewTaskError(code, "The task lease is not valid for this operation.");
+  }
+}
+
+function effectiveScope(
+  lease: LeasePayload | null, userId: string, taskId: string, fence: number,
+): EffectiveScope {
+  return lease
+    ? { user: lease.uid, task: lease.tid, fence: lease.fence, revocationEpoch: lease.rev }
+    : { user: userId, task: taskId, fence, revocationEpoch: undefined };
+}
+
+export async function callReviewTool(
+  userId: string, name: string, args: unknown, options: ReviewToolOptions = {},
+) {
   const db = reviewTaskDb();
   try {
     switch (name) {
@@ -209,13 +249,20 @@ export async function callReviewTool(userId: string, name: string, args: unknown
         let lease: string | null = null;
         if (leaseEnabled()) {
           const now = Date.now();
+          // S1.1: bind the tenant's CURRENT revocation epoch. The write
+          // predicate compares it atomically, so a lease minted at epoch 0 for
+          // a tenant that has since been revoked/reactivated would fail closed.
+          const owner = await db.prepare(
+            "SELECT revocation_epoch AS revocationEpoch FROM users WHERE user_id=?",
+          ).bind(task.userId).first<{ revocationEpoch: number }>();
           lease = await signLease({
             tid: task.id, uid: task.userId, fence: task.fence,
             rid: input.clientRunId ?? "runner",
             ops: ["renew_review_lease", "save_review_checkpoint", "read_review_checkpoint",
               "fail_review_task", "complete_review_task", "read_review_recording",
               "read_review_receipt", "get_analysis_bundle", "get_review_transfer"],
-            iat: now, exp: task.leaseUntil ?? now + 300_000, rev: 0,
+            iat: now, exp: task.leaseUntil ?? now + 300_000,
+            rev: Number(owner?.revocationEpoch ?? 0),
           });
         }
         await recordAnalysisEvent(db, {
@@ -226,19 +273,29 @@ export async function callReviewTool(userId: string, name: string, args: unknown
       }
       case "renew_review_lease": {
         const input = renewSpec.parse(args);
-        const lease = await renewReviewLease(db, userId, input.taskId, input.fence, { extendMs: input.extendMs });
+        const verified = await verifiedLease(input.lease, name);
+        if (verified) options.onLeaseVerified?.(verified);
+        const scope = effectiveScope(verified, userId, input.taskId, input.fence);
+        const lease = await renewReviewLease(db, scope.user, scope.task, scope.fence, {
+          extendMs: input.extendMs, revocationEpoch: scope.revocationEpoch,
+        });
         return { content: [{ type: "text", text: JSON.stringify(lease) }] };
       }
       case "save_review_checkpoint": {
         const input = checkpointSpec.parse(args);
-        const task = await getReviewTask(db, userId, input.taskId);
+        const verified = await verifiedLease(input.lease, name);
+        if (verified) options.onLeaseVerified?.(verified);
+        const scope = effectiveScope(verified, userId, input.taskId, input.fence);
+        const task = await getReviewTask(db, scope.user, scope.task);
         if (task?.kind === "speaking")
           throw new ReviewTaskError("binary_checkpoint_required", "Speaking checkpoints must store verified decoded bytes.");
-        const saved = await saveReviewCheckpoint(db, userId, {
-          ...input, coverage: input.coverage, objectRef: input.objectRef ?? null, payload: input.payload,
+        const saved = await saveReviewCheckpoint(db, scope.user, {
+          ...input, taskId: scope.task, fence: scope.fence,
+          coverage: input.coverage, objectRef: input.objectRef ?? null, payload: input.payload,
+          revocationEpoch: scope.revocationEpoch,
         });
         await recordAnalysisEvent(db, {
-          taskId: input.taskId, fence: input.fence, event: "save_review_checkpoint",
+          taskId: scope.task, fence: scope.fence, event: "save_review_checkpoint",
           stage: input.stage, outcome: saved.duplicate ? "duplicate" : "ok",
           metadata: { chunkIndex: input.chunkIndex, analysisVersion: input.analysisVersion,
             inputSha256: input.inputSha256, artifactSha256: input.artifactSha256, bytes: input.bytes },
@@ -247,9 +304,14 @@ export async function callReviewTool(userId: string, name: string, args: unknown
       }
       case "read_review_checkpoint": {
         const input = checkpointReadSpec.parse(args);
-        const checkpoint = await readReviewCheckpoint(db, userId, input);
+        const verified = await verifiedLease(input.lease, name);
+        if (verified) options.onLeaseVerified?.(verified);
+        const scope = effectiveScope(verified, userId, input.taskId, input.fence);
+        const checkpoint = await readReviewCheckpoint(db, scope.user, {
+          ...input, taskId: scope.task, fence: scope.fence,
+        });
         await recordAnalysisEvent(db, {
-          taskId: input.taskId, fence: input.fence, event: "read_review_checkpoint",
+          taskId: scope.task, fence: scope.fence, event: "read_review_checkpoint",
           stage: checkpoint?.stage, outcome: checkpoint ? "ok" : "missing",
           metadata: checkpoint ? { chunkIndex: checkpoint.chunkIndex, analysisVersion: checkpoint.analysisVersion,
             inputSha256: checkpoint.inputSha256, artifactSha256: checkpoint.artifactSha256, bytes: checkpoint.bytes } : null,
@@ -258,18 +320,26 @@ export async function callReviewTool(userId: string, name: string, args: unknown
       }
       case "fail_review_task": {
         const input = failSpec.parse(args);
-        const task = await failReviewTask(db, userId, input);
+        const verified = await verifiedLease(input.lease, name);
+        if (verified) options.onLeaseVerified?.(verified);
+        const scope = effectiveScope(verified, userId, input.taskId, input.fence);
+        const task = await failReviewTask(db, scope.user, {
+          ...input, taskId: scope.task, fence: scope.fence, revocationEpoch: scope.revocationEpoch,
+        });
         await recordAnalysisEvent(db, {
-          taskId: input.taskId, fence: input.fence, event: "fail_review_task", stage: task.stage,
+          taskId: scope.task, fence: scope.fence, event: "fail_review_task", stage: task.stage,
           outcome: task.state, metadata: { code: input.code, nextAt: task.nextAt },
         });
         return { content: [{ type: "text", text: JSON.stringify(task) }] };
       }
       case "complete_review_task": {
         const input = completeSpec.parse(args);
-        const task = await getReviewTask(db, userId, input.taskId);
+        const verified = await verifiedLease(input.lease, name);
+        if (verified) options.onLeaseVerified?.(verified);
+        const scope = effectiveScope(verified, userId, input.taskId, input.fence);
+        const task = await getReviewTask(db, scope.user, scope.task);
         if (!task) throw new ReviewTaskError("task_not_found", "The task is not available to this account.");
-        const snapshot = await snapshotFor(db, userId, task);
+        const snapshot = await snapshotFor(db, scope.user, task);
         const attempt = snapshot.attempt as Record<string, unknown> | undefined;
         if (!attempt || typeof attempt.stage !== "string")
           throw new ReviewTaskError("snapshot_invalid", "The immutable submission snapshot has no attempt stage.");
@@ -304,7 +374,7 @@ export async function callReviewTool(userId: string, name: string, args: unknown
             throw new ReviewTaskError("analysis_not_released", "The grounded-prosody analysis version has not passed the contract gate.");
           const bucket = env.BUCKET;
           if (!bucket) throw new ReviewTaskError("recordings_unavailable", "Private recording storage is unavailable.");
-          const metadata = await bucket.head(`speaking/${encodeURIComponent(userId)}/${task.recordingId}`);
+          const metadata = await bucket.head(`speaking/${encodeURIComponent(scope.user)}/${task.recordingId}`);
           const digest = metadata?.customMetadata?.digest;
           if (!metadata || !digest) throw new ReviewTaskError("recording_digest_unavailable", "The original recording digest is unavailable.");
           if (digest !== input.recordingSha256)
@@ -328,7 +398,7 @@ export async function callReviewTool(userId: string, name: string, args: unknown
           // (security review: fail-open integrity bypass). The committed receipt is
           // the source of truth; no new write occurs here.
           if (task.state === "completed") {
-            const receipt = await readReviewReceipt(db, userId, task.id);
+            const receipt = await readReviewReceipt(db, scope.user, task.id);
             if (receipt) {
               return { content: [{ type: "text", text: JSON.stringify({
                 receiptId: receipt.id, feedbackId: receipt.feedbackId,
@@ -343,7 +413,7 @@ export async function callReviewTool(userId: string, name: string, args: unknown
             // inflating n_shown. (A2: no decoded-PCM checkpoint proof.)
             if (grounded.candidates.length) {
               const issued = await issueCalibrationCandidatesIdempotent(
-                reviewTaskDb(), userId,
+                reviewTaskDb(), scope.user,
                 toIssueInput(grounded, { attemptId: task.attemptId, recordingId: task.recordingId! }));
               effectiveAnalysis = enrichCandidateIds(grounded, issued);
             } else {
@@ -361,7 +431,7 @@ export async function callReviewTool(userId: string, name: string, args: unknown
             throw new ReviewTaskError("analysis_not_released", "That analysis version has not passed the release gate.");
           const bucket = env.BUCKET;
           if (!bucket) throw new ReviewTaskError("recordings_unavailable", "Private recording storage is unavailable.");
-          const metadata = await bucket.head(`speaking/${encodeURIComponent(userId)}/${task.recordingId}`);
+          const metadata = await bucket.head(`speaking/${encodeURIComponent(scope.user)}/${task.recordingId}`);
           const digest = metadata?.customMetadata?.digest;
           if (!metadata || !digest) throw new ReviewTaskError("recording_digest_unavailable", "The original recording digest is unavailable.");
           if (digest !== input.recordingSha256)
@@ -370,16 +440,16 @@ export async function callReviewTool(userId: string, name: string, args: unknown
             recordingSha256: input.recordingSha256!, analysisVersion,
           });
           if (!validation.ok) throw new ReviewTaskError("invalid_analysis", validation.errors.join("; "));
-          const sampleCount = await requireDecodedInput(db, userId, task.id, input.fence,
+          const sampleCount = await requireDecodedInput(db, scope.user, task.id, scope.fence,
             { sha256: digest, bytes: metadata.size }, analysisVersion);
           if ((input.analysis?.decoded as { sampleCount?: number }).sampleCount !== sampleCount)
             throw new ReviewTaskError("invalid_analysis", "The decoded sample count differs from the committed timeline.");
         }
-        const completed = await completeReviewTask(db, userId, {
-          taskId: input.taskId, fence: input.fence,
+        const completed = await completeReviewTask(db, scope.user, {
+          taskId: scope.task, fence: scope.fence,
           output: { feedback: input.feedback, evidence: input.evidence, analysis: effectiveAnalysis },
           feedback: {
-            id: `rt:${input.taskId}`, day: task.day, stage: attempt.stage, attempt: task.attemptId,
+            id: `rt:${scope.task}`, day: task.day, stage: attempt.stage, attempt: task.attemptId,
             evidence: input.evidence, feedback: input.feedback,
             pronunciation: input.pronunciation ? { ...input.pronunciation, scope: "partial" as const } : undefined,
             analysis: effectiveAnalysis ?? undefined,
@@ -387,11 +457,12 @@ export async function callReviewTool(userId: string, name: string, args: unknown
           receipt: {
             recordingSha256: input.recordingSha256 ?? null,
             analysisVersion,
-            payload: { ...input.payload, taskId: task.id, fence: input.fence },
+            payload: { ...input.payload, taskId: task.id, fence: scope.fence },
           },
+          revocationEpoch: scope.revocationEpoch,
         });
         await recordAnalysisEvent(db, {
-          taskId: input.taskId, fence: input.fence, event: "complete_review_task", stage: "finalize",
+          taskId: scope.task, fence: scope.fence, event: "complete_review_task", stage: "finalize",
           outcome: completed.duplicate ? "duplicate" : "ok",
           metadata: { receiptId: completed.receipt.id, feedbackId: completed.receipt.feedbackId },
         });
@@ -412,15 +483,18 @@ export async function callReviewTool(userId: string, name: string, args: unknown
       }
       case "read_review_recording": {
         const input = recordingSpec.parse(args);
-        const task = await getReviewTask(db, userId, input.taskId);
+        const verified = await verifiedLease(input.lease, name);
+        if (verified) options.onLeaseVerified?.(verified);
+        const scope = effectiveScope(verified, userId, input.taskId, input.fence);
+        const task = await getReviewTask(db, scope.user, scope.task);
         if (!task) throw new ReviewTaskError("task_not_found", "The task is not available to this account.");
         if (task.kind !== "speaking" || !task.recordingId)
           throw new ReviewTaskError("not_speaking", "Only speaking tasks with a submitted recording expose audio.");
-        if (task.state !== "running" || task.fence !== input.fence || (task.leaseUntil ?? 0) <= Date.now())
+        if (task.state !== "running" || task.fence !== scope.fence || (task.leaseUntil ?? 0) <= Date.now())
           throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
         const bucket = env.BUCKET;
         if (!bucket) throw new ReviewTaskError("recordings_unavailable", "Private recording storage is unavailable.");
-        const key = `speaking/${encodeURIComponent(userId)}/${task.recordingId}`;
+        const key = `speaking/${encodeURIComponent(scope.user)}/${task.recordingId}`;
         const read = async () => {
           const metadata = await bucket.head(key);
           if (!metadata) throw new ReviewTaskError("recording_missing", "The original recording is unavailable.");
@@ -440,16 +514,16 @@ export async function callReviewTool(userId: string, name: string, args: unknown
           const failure = error instanceof ReviewTaskError ? error :
             new ReviewTaskError("recording_read_failed", "The private recording could not be read. Retry this byte range.");
           await recordAnalysisEvent(db, {
-            taskId: task.id, fence: input.fence, event: "read_review_recording", stage: "read_input", outcome: "error",
+            taskId: task.id, fence: scope.fence, event: "read_review_recording", stage: "read_input", outcome: "error",
             metadata: { code: failure.code, offset: input.offset },
           });
           throw failure;
         });
-        const current = await getReviewTask(db, userId, input.taskId);
-        if (!current || current.state !== "running" || current.fence !== input.fence || (current.leaseUntil ?? 0) <= Date.now())
+        const current = await getReviewTask(db, scope.user, scope.task);
+        if (!current || current.state !== "running" || current.fence !== scope.fence || (current.leaseUntil ?? 0) <= Date.now())
           throw new ReviewTaskError("stale_lease", "The task lease expired while reading the recording.");
         await recordAnalysisEvent(db, {
-          taskId: task.id, fence: input.fence, event: "read_review_recording", stage: "read_input", outcome: "ok",
+          taskId: task.id, fence: scope.fence, event: "read_review_recording", stage: "read_input", outcome: "ok",
           metadata: { recordingId: task.recordingId, offset: input.offset, length: bytes.length, total: metadata.size, sha256 },
         });
         let binary = "";
@@ -465,11 +539,14 @@ export async function callReviewTool(userId: string, name: string, args: unknown
       }
       case "read_review_receipt": {
         const input = receiptSpec.parse(args);
-        const receipt = await readReviewReceipt(db, userId, input.taskId);
+        const verified = await verifiedLease(input.lease, name);
+        if (verified) options.onLeaseVerified?.(verified);
+        const scope = effectiveScope(verified, userId, input.taskId, 0);
+        const receipt = await readReviewReceipt(db, scope.user, scope.task);
         if (receipt && input.clientRunId) {
-          const task = await getReviewTask(db, userId, input.taskId);
+          const task = await getReviewTask(db, scope.user, scope.task);
           await recordAnalysisEvent(db, {
-            taskId: input.taskId, fence: task?.fence, event: "read_review_receipt", stage: "finalize",
+            taskId: scope.task, fence: task?.fence, event: "read_review_receipt", stage: "finalize",
             clientRunId: input.clientRunId, outcome: "ok", metadata: { receiptId: receipt.id, feedbackId: receipt.feedbackId },
           });
         }

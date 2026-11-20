@@ -11,7 +11,7 @@ import { frozenReviews } from "./review-jobs";
 import { reviewContext } from "./review-context";
 import { listRecoverable } from "./recording-recovery";
 import { initial, oldResults, part3, writings, type Ledger } from "@/app/ledger";
-import { callReviewTool, reviewTools } from "./review-tools";
+import { callReviewTool, reviewTools, type ReviewToolOptions } from "./review-tools";
 import { calibrationToolNames, calibrationTools, callCalibrationTool, issueCalibrationCandidates, verdictsForCandidates } from "./calibration";
 import { claimManualReviewTask, completeReviewTask, createReviewTaskStatement, findReviewTaskByAttempt, reviewTaskDb, ReviewTaskError } from "./review-tasks";
 
@@ -298,7 +298,7 @@ async function encoded(file:R2ObjectBody) {
   for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));
   return btoa(binary);
 }
-export async function callCoach(userId:string, name:string, args:unknown) {
+export async function callCoach(userId:string, name:string, args:unknown, options:ReviewToolOptions={}) {
   try {
     switch(name) {
       case "read_study_session": {const q=readSpec.parse(args);return content(await studySession(userId,q.day,q.inspectUnlinkedRecordings,q.attemptId));}
@@ -475,7 +475,7 @@ export async function callCoach(userId:string, name:string, args:unknown) {
         // Calibration tools take the session userId directly; their strict input
         // schemas have no userId field, so a client cannot choose the account.
         if (calibrationToolNames.has(name)) return callCalibrationTool(reviewTaskDb(), userId, name, args);
-        if (reviewToolNames.has(name)) return callReviewTool(userId, name, args);
+        if (reviewToolNames.has(name)) return callReviewTool(userId, name, args, options);
         return toolError("Unknown coaching tool.");
     }
   } catch(error) {

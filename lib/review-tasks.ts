@@ -4,6 +4,24 @@ const LEASE_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 4;
 const MAX_AGE_MS = 24 * 60 * 60_000;
 
+// S1.1: fold tenant liveness into the same statement as the task write so a
+// suspension/revocation cannot race between a check and the update. When a
+// revocation epoch is supplied (lease-verified queue writes) the row must still
+// be owned by an active user at that exact epoch. The legacy owner path passes
+// no epoch and keeps the pre-S1.1 statement byte-for-byte.
+function ownerPredicate(revocationEpoch?: number): string {
+  return revocationEpoch === undefined ? "" : ` AND EXISTS (
+    SELECT 1 FROM users u
+    WHERE u.user_id = review_tasks.user_id
+      AND u.status = 'active'
+      AND u.revocation_epoch = ?
+  )`;
+}
+
+function ownerArgs(revocationEpoch?: number): number[] {
+  return revocationEpoch === undefined ? [] : [revocationEpoch];
+}
+
 type Prepared = {
   bind(...values: unknown[]): Prepared;
   first<T = Record<string, unknown>>(): Promise<T | null>;
@@ -233,14 +251,15 @@ export async function hasOtherDueTasks(db: D1Like, excludeUserId: string, option
 }
 
 export async function renewReviewLease(db: D1Like, userId: string, taskId: string, fence: number, options: {
-  now?: number; extendMs?: number;
+  now?: number; extendMs?: number; revocationEpoch?: number;
 } = {}) {
   const now = options.now ?? Date.now();
   const extendMs = Math.max(30_000, options.extendMs ?? LEASE_MS);
   const row = await db.prepare(`UPDATE review_tasks SET lease_until=MAX(lease_until, ?), updated_at=?
-    WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?
+    WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?${ownerPredicate(options.revocationEpoch)}
     RETURNING lease_until AS leaseUntil`)
-    .bind(now + extendMs, now, taskId, userId, fence, now).first<{ leaseUntil: number }>();
+    .bind(now + extendMs, now, taskId, userId, fence, now, ...ownerArgs(options.revocationEpoch))
+    .first<{ leaseUntil: number }>();
   if (!row) throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
   return { leaseUntil: Number(row.leaseUntil), serverNow: now };
 }
@@ -251,6 +270,7 @@ export async function saveReviewCheckpoint(db: D1Like, userId: string, input: {
   objectRef?: string | null; payload?: Record<string, unknown>; now?: number;
   expectedDecodePointer?: string | null;
   expectedAcousticPointer?: { stage: "decode" | "acoustic"; sha256: string };
+  revocationEpoch?: number;
 }) {
   const now = input.now ?? Date.now();
   const lease = [input.taskId, userId, input.fence, now];
@@ -258,6 +278,8 @@ export async function saveReviewCheckpoint(db: D1Like, userId: string, input: {
   const objectRef = input.objectRef ?? null;
   const payloadJson = JSON.stringify(input.payload ?? {});
   const active = "id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?";
+  const owner = ownerPredicate(input.revocationEpoch);
+  const rev = ownerArgs(input.revocationEpoch);
   const artifact = "task_id=? AND stage=? AND chunk_index=? AND analyzer_version=?";
   const verifiedDecode = input.expectedDecodePointer !== undefined;
   const previous = input.expectedAcousticPointer;
@@ -269,7 +291,7 @@ export async function saveReviewCheckpoint(db: D1Like, userId: string, input: {
     db.prepare(`INSERT INTO analysis_artifacts
       (task_id, stage, chunk_index, analyzer_version, input_sha256, artifact_sha256, bytes, object_ref, payload_json, created_at)
       SELECT ?,?,?,?,?,?,?,?,?,? WHERE EXISTS (
-        SELECT 1 FROM review_tasks WHERE ${active} AND (analysis_version IS NULL OR analysis_version=?) ${pointer}
+        SELECT 1 FROM review_tasks WHERE ${active} AND (analysis_version IS NULL OR analysis_version=?) ${pointer}${owner}
       )
       ON CONFLICT(task_id, stage, chunk_index, analyzer_version) DO UPDATE SET
         artifact_sha256=excluded.artifact_sha256, bytes=excluded.bytes, object_ref=excluded.object_ref,
@@ -278,26 +300,26 @@ export async function saveReviewCheckpoint(db: D1Like, userId: string, input: {
         AND analysis_artifacts.input_sha256=excluded.input_sha256
         AND COALESCE(json_extract(analysis_artifacts.payload_json, '$.format'), '')<>'bandroom-decode-v1'`)
       .bind(...key, input.inputSha256, input.artifactSha256, input.bytes,
-        objectRef, payloadJson, now, ...lease, input.analysisVersion, ...pointerArgs, Number(verifiedDecode)),
+        objectRef, payloadJson, now, ...lease, input.analysisVersion, ...pointerArgs, ...rev, Number(verifiedDecode)),
     // A matching replay can repair an old artifact whose task pointer was never written.
     db.prepare(`UPDATE review_tasks
       SET stage=?, checkpoint_sha256=?, coverage=COALESCE(?, coverage),
           analysis_version=COALESCE(analysis_version, ?), lease_until=MAX(lease_until, ?), updated_at=?
-      WHERE ${active} AND (analysis_version IS NULL OR analysis_version=?) ${pointer}
+      WHERE ${active} AND (analysis_version IS NULL OR analysis_version=?) ${pointer}${owner}
         AND (changes()=1 OR (checkpoint_sha256 IS NULL AND EXISTS (
           SELECT 1 FROM analysis_artifacts WHERE ${artifact} AND input_sha256=? AND artifact_sha256=? AND bytes=?
             AND object_ref IS ? AND payload_json=?
         )))`)
       .bind(input.stage, input.artifactSha256, input.coverage ?? null, input.analysisVersion,
-        now + LEASE_MS, now, ...lease, input.analysisVersion, ...pointerArgs, ...key,
+        now + LEASE_MS, now, ...lease, input.analysisVersion, ...pointerArgs, ...rev, ...key,
         input.inputSha256, input.artifactSha256, input.bytes, objectRef, payloadJson),
     db.prepare(`SELECT analysis_version AS analysisVersion, checkpoint_sha256 AS checkpointSha256, review_tasks.stage,
         a.input_sha256 AS inputSha256, a.artifact_sha256 AS artifactSha256, a.bytes,
         a.object_ref AS objectRef, a.payload_json AS payloadJson
       FROM review_tasks LEFT JOIN analysis_artifacts a
         ON a.task_id=review_tasks.id AND a.stage=? AND a.chunk_index=? AND a.analyzer_version=?
-      WHERE review_tasks.id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?`)
-      .bind(input.stage, input.chunkIndex, input.analysisVersion, ...lease),
+      WHERE review_tasks.id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?${owner}`)
+      .bind(input.stage, input.chunkIndex, input.analysisVersion, ...lease, ...rev),
   ]) as [
     { meta?: { changes?: number } },
     unknown,
@@ -348,15 +370,17 @@ export async function readReviewCheckpoint(db: D1Like, userId: string, input: {
 
 export async function failReviewTask(db: D1Like, userId: string, input: {
   taskId: string; fence: number; code: string; retryable: boolean; nextAt?: number; now?: number;
+  revocationEpoch?: number;
 }) {
   const now = input.now ?? Date.now();
   const state = input.retryable ? "retry_wait" : "blocked";
   const nextAt = input.retryable ? (input.nextAt ?? now + 5 * 60_000) : now;
   const row = await db.prepare(`UPDATE review_tasks
     SET state=?, last_error=?, next_at=?, retry_epoch=retry_epoch+?, lease_until=NULL, updated_at=?
-    WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?
+    WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?${ownerPredicate(input.revocationEpoch)}
     RETURNING ${taskColumns}`)
-    .bind(state, input.code, nextAt, input.retryable ? 1 : 0, now, input.taskId, userId, input.fence, now)
+    .bind(state, input.code, nextAt, input.retryable ? 1 : 0, now, input.taskId, userId, input.fence, now,
+      ...ownerArgs(input.revocationEpoch))
     .first<Record<string, unknown>>();
   const task = toTask(row);
   if (!task) throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
@@ -389,7 +413,10 @@ export async function completeReviewTask(db: D1Like, userId: string, input: {
     recordingSha256?: string | null; analysisVersion?: string | null; payload?: Record<string, unknown>;
   };
   now?: number;
+  revocationEpoch?: number;
 }) {
+  const owner = ownerPredicate(input.revocationEpoch);
+  const rev = ownerArgs(input.revocationEpoch);
   const outputSha256V2 = await sha256Json({
     ...input.output,
     pronunciation: input.feedback.pronunciation ?? null,
@@ -446,28 +473,28 @@ export async function completeReviewTask(db: D1Like, userId: string, input: {
     db.prepare(`INSERT INTO teacher_feedback
       (id, user_id, day, stage, attempt, evidence, feedback, pronunciation, review_task_id, analysis_json, created_at)
       SELECT ?,?,?,?,?,?,?,?,?,?,?
-      WHERE EXISTS (SELECT 1 FROM review_tasks WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?)
+      WHERE EXISTS (SELECT 1 FROM review_tasks WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?${owner})
       ON CONFLICT(review_task_id) DO NOTHING`)
       .bind(input.feedback.id, userId, input.feedback.day, input.feedback.stage, input.feedback.attempt,
         input.feedback.evidence, input.feedback.feedback,
         input.feedback.pronunciation == null ? null : JSON.stringify(input.feedback.pronunciation),
         input.taskId, input.feedback.analysis == null ? null : JSON.stringify(input.feedback.analysis),
-        new Date(now).toISOString(), input.taskId, userId, input.fence, now),
+        new Date(now).toISOString(), input.taskId, userId, input.fence, now, ...rev),
     db.prepare(`INSERT INTO review_receipts
       (id, task_id, user_id, attempt_id, attempt_revision, recording_sha256, analysis_version, fence,
        feedback_id, output_sha256, output_sha256_v2, payload_json, created_at)
       SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?
-      WHERE EXISTS (SELECT 1 FROM review_tasks WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?)
+      WHERE EXISTS (SELECT 1 FROM review_tasks WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?${owner})
       ON CONFLICT(task_id) DO NOTHING`)
       .bind(receiptId, input.taskId, userId, task.attemptId, task.attemptRevision,
         input.receipt.recordingSha256 ?? null, input.receipt.analysisVersion ?? task.analysisVersion ?? null,
         input.fence, input.feedback.id, await v1Digest(), outputSha256V2,
         JSON.stringify(input.receipt.payload ?? {}), now,
-        input.taskId, userId, input.fence, now),
+        input.taskId, userId, input.fence, now, ...rev),
     db.prepare(`UPDATE review_tasks
       SET state='completed', receipt_id=?, last_error=NULL, lease_until=NULL, updated_at=?
-      WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?`)
-      .bind(receiptId, now, input.taskId, userId, input.fence, now),
+      WHERE id=? AND user_id=? AND fence=? AND state='running' AND lease_until>?${owner}`)
+      .bind(receiptId, now, input.taskId, userId, input.fence, now, ...rev),
   ];
   const results = await db.batch(statements) as Array<{ meta?: { changes?: number } }>;
   const changed = results?.[2]?.meta?.changes;

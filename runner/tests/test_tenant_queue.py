@@ -30,6 +30,45 @@ def test_lease_renew_once_counts_and_errors():
     assert bad.renew_once() is False and bad.errors == 1 and bad.renewals == 0
 
 
+def test_lease_renewer_carries_lease_and_retries_once():
+    client = FakeClient()
+    r = tq.LeaseRenewer(client, "u1", "t1", 3, lease="lease-1", retry_delay=0)
+    assert r.renew_once() is True
+    assert client.calls[-1] == (
+        "renew_review_lease",
+        {"taskId": "t1", "fence": 3, "extendMs": tq.DEFAULT_EXTEND_MS, "lease": "lease-1"},
+    )
+
+    # F6: a lease-bound renewal retries once before giving up.
+    bad = FakeClient(renew_fail=True)
+    r2 = tq.LeaseRenewer(bad, "u1", "t1", 3, lease="lease-1", retry_delay=0)
+    assert r2.renew_once() is False
+    assert r2.errors == 1 and r2.renewals == 0
+    assert len([c for c in bad.calls if c[0] == "renew_review_lease"]) == 2
+
+
+def test_run_one_carries_lease_to_process_and_fail(tmp_path):
+    budget = tq.UserBudget(tmp_path / "b.json", per_user_cap_cny=5.0)
+    seen = {}
+
+    def proc(task):
+        seen["lease"] = task.get("_lease")
+        return True
+
+    client = FakeClient({"task": {"id": "t1", "userId": "u1", "fence": 1}, "lease": "lease-ok"})
+    assert tq.run_one(client, proc, budget) == "processed"
+    assert seen["lease"] == "lease-ok"
+
+    failing = FakeClient({"task": {"id": "t2", "userId": "u1", "fence": 1}, "lease": "lease-fail"})
+
+    def boom(task):
+        raise RuntimeError("model blew up")
+
+    assert tq.run_one(failing, boom, budget) == "failed"
+    fail = next(c for c in failing.calls if c[0] == "fail_review_task")[1]
+    assert fail["lease"] == "lease-fail"
+
+
 def test_user_budget_per_user_and_global_caps(tmp_path):
     path = tmp_path / "budget.json"
     b = tq.UserBudget(path, per_user_cap_cny=1.0)

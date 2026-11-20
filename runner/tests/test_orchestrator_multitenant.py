@@ -50,11 +50,12 @@ def _speak_task(task_id, user_id, *, day=12, fence=0, state="queued", analysis_v
 
 
 class FakeQueueClient:
-    def __init__(self, tasks, *, recording=RECORDING_BYTES, complete_error=None):
+    def __init__(self, tasks, *, recording=RECORDING_BYTES, complete_error=None, lease=None):
         self.tasks = [dict(t) for t in tasks]
         self.calls = []
         self.recording = recording
         self.complete_error = complete_error
+        self.lease = lease
         self.renewals = 0
         self.completed = []
         self.failed = []
@@ -85,8 +86,8 @@ class FakeQueueClient:
                         )
                         for o in self.tasks if o is not t
                     )
-                    return {"task": dict(t), "otherTenantsDue": other_due}
-            return {"task": None, "otherTenantsDue": False}
+                    return {"task": dict(t), "otherTenantsDue": other_due, "lease": self.lease}
+            return {"task": None, "otherTenantsDue": False, "lease": None}
         if name == "read_review_recording":
             return {
                 "total": len(self.recording), "length": len(self.recording),
@@ -191,6 +192,31 @@ def test_grounded_task_completes_with_recording_sha_and_analysis(tmp_path, monke
     assert args["analysis"]["detectorVersion"] == "det-v1"
     assert args["analysisVersion"] == "grounded-prosody-v1"
     assert "pronunciation" not in args  # grounded emits no pronunciation band
+
+
+# ①b B1: the claimed lease is carried to reads, completion and failures ----
+def test_runner_carries_lease_to_complete_and_fail(tmp_path):
+    client = FakeQueueClient([_text_task("t1", "u1")], lease="lease-text")
+    report = mt_runner(tmp_path, client).run()
+    assert report.processed == 1
+    assert client.completed[0]["lease"] == "lease-text"
+
+    blocked = _text_task("t2", "u1")
+    blocked["snapshot"] = {}  # permanent snapshot_invalid
+    failing = FakeQueueClient([blocked], lease="lease-fail")
+    failed_report = mt_runner(tmp_path, failing).run()
+    assert failed_report.blocked == 1
+    assert failing.failed[0]["lease"] == "lease-fail"
+
+
+def test_runner_carries_lease_to_recording_reads(tmp_path, monkeypatch):
+    _fake_grounded(monkeypatch)
+    client = FakeQueueClient([_speak_task("s1", "u1")], lease="lease-speak")
+    report = mt_runner(tmp_path, client).run()
+    assert report.processed == 1
+    reads = [args for name, args in client.calls if name == "read_review_recording"]
+    assert reads and all(args.get("lease") == "lease-speak" for args in reads)
+    assert client.completed[0]["lease"] == "lease-speak"
 
 
 # ② capped user skipped, another tenant processed -------------------------

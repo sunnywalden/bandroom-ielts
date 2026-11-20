@@ -23,6 +23,8 @@ from typing import Any, Callable, Mapping
 MICRO = 1_000_000
 DEFAULT_LEASE_INTERVAL = 60.0
 DEFAULT_EXTEND_MS = 300_000
+# F6: a single transient renewal failure should not strand a long model call.
+DEFAULT_RENEW_RETRY_DELAY = 30.0
 
 
 class PermanentTaskError(Exception):
@@ -64,6 +66,7 @@ class LeaseRenewer:
 
     def __init__(self, client: Any, user_id: str, task_id: str, fence: int, *,
                  interval: float = DEFAULT_LEASE_INTERVAL, extend_ms: int = DEFAULT_EXTEND_MS,
+                 lease: str | None = None, retry_delay: float = DEFAULT_RENEW_RETRY_DELAY,
                  logger: Any = None):
         self._client = client
         self._user = user_id
@@ -71,25 +74,42 @@ class LeaseRenewer:
         self._fence = int(fence)
         self._interval = max(1.0, float(interval))
         self._extend = int(extend_ms)
+        self._lease = lease
+        self._retry_delay = max(0.0, float(retry_delay))
         self._log = logger
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.renewals = 0
         self.errors = 0
 
+    def _renew_args(self) -> dict[str, Any]:
+        args: dict[str, Any] = {
+            "taskId": self._task, "fence": self._fence, "extendMs": self._extend,
+        }
+        if self._lease:
+            args["lease"] = self._lease
+        return args
+
     def renew_once(self) -> bool:
-        try:
-            self._client.call_tool(
-                "renew_review_lease",
-                {"taskId": self._task, "fence": self._fence, "extendMs": self._extend},
-            )
-            self.renewals += 1
-            return True
-        except Exception as exc:  # noqa: BLE001 - best-effort renewal
-            self.errors += 1
-            if self._log:
-                self._log.warning("lease_renew_failed task=%s error=%s", self._task, str(exc)[:120])
-            return False
+        # B1 + F6: a lease-bound renewal retries once after a short delay; the
+        # legacy (no-lease) path keeps its single best-effort attempt.
+        attempts = 2 if self._lease else 1
+        for attempt in range(attempts):
+            try:
+                self._client.call_tool("renew_review_lease", self._renew_args())
+                self.renewals += 1
+                return True
+            except Exception as exc:  # noqa: BLE001 - best-effort renewal
+                if self._log:
+                    self._log.warning(
+                        "lease_renew_failed task=%s attempt=%s error=%s",
+                        self._task, attempt + 1, str(exc)[:120],
+                    )
+                if attempt + 1 < attempts and self._retry_delay > 0:
+                    if self._stop.wait(self._retry_delay):
+                        break
+        self.errors += 1
+        return False
 
     def _run(self) -> None:
         while not self._stop.wait(self._interval):
@@ -180,12 +200,15 @@ class UserBudget:
 
 
 def _fail(client: Any, task_id: str, fence: Any, code: str, logger: Any,
-          *, retryable: bool = True, next_at: int | None = None) -> None:
+          *, retryable: bool = True, next_at: int | None = None,
+          lease: str | None = None) -> None:
     args: dict[str, Any] = {
         "taskId": task_id, "fence": int(fence), "code": code, "retryable": retryable,
     }
     if next_at is not None:
         args["nextAt"] = int(next_at)
+    if lease:
+        args["lease"] = lease
     try:
         client.call_tool("fail_review_task", args)
     except Exception as exc:  # noqa: BLE001 - requeue is best-effort
@@ -227,19 +250,23 @@ def run_one(
     fence = task.get("fence")
     if not user_id or not task_id or not fence:
         return "failed"
+    # B1: claim_next_review_task returns the signed lease (or None when the
+    # deployment has no lease key). Carry it on every task-bound call.
+    lease = result.get("lease") if isinstance(result, Mapping) else None
     # F5: server tells us whether other tenants have due tasks. The processor
     # uses this to skip yielding when this is the only active tenant.
     if isinstance(task, dict):
         task["_otherTenantsDue"] = bool((result or {}).get("otherTenantsDue", False))
+        task["_lease"] = lease
     if budget.paused(user_id):
         # Defer to the next UTC budget reset so a capped tenant's task is not
         # re-claimed (and attempt-burned) every run while the cap holds.
         _fail(client, task_id, fence, "per_user_budget_paused", logger,
-              retryable=True, next_at=_next_utc_midnight_ms())
+              retryable=True, next_at=_next_utc_midnight_ms(), lease=lease)
         return "capped"
     try:
         ok = False
-        with LeaseRenewer(client, user_id, task_id, fence,
+        with LeaseRenewer(client, user_id, task_id, fence, lease=lease,
                           interval=lease_interval, extend_ms=extend_ms, logger=logger):
             ok = process(task)
         if ok:
@@ -249,13 +276,13 @@ def run_one(
     except PermanentTaskError as exc:
         if logger:
             logger.warning("tenant_task_blocked task=%s code=%s", task_id, exc.code)
-        _fail(client, task_id, fence, exc.code, logger, retryable=False)
+        _fail(client, task_id, fence, exc.code, logger, retryable=False, lease=lease)
         return "blocked"
     except TaskYielded as exc:
-        _fail(client, task_id, fence, exc.code, logger, retryable=True)
+        _fail(client, task_id, fence, exc.code, logger, retryable=True, lease=lease)
         return "yielded"
     except Exception as exc:  # noqa: BLE001 - classify as a retryable failure
         if logger:
             logger.warning("tenant_task_failed task=%s error=%s", task_id, str(exc)[:160])
-    _fail(client, task_id, fence, "runner_error", logger, retryable=True)
+    _fail(client, task_id, fence, "runner_error", logger, retryable=True, lease=lease)
     return "failed"

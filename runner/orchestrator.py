@@ -1061,6 +1061,7 @@ class CoachRunner:
         """
         task_id = str(task["id"])
         fence = int(task["fence"])
+        lease = task.get("_lease")
         snapshot = task.get("snapshot") or {}
         frozen_sha = (snapshot.get("recording") or {}).get("sha256")
         offset = 0
@@ -1068,15 +1069,16 @@ class CoachRunner:
         total: int | None = None
         server_sha: str | None = None
         while True:
+            arguments = {
+                "taskId": task_id,
+                "fence": fence,
+                "offset": offset,
+                "length": self.config.chunk_bytes,
+            }
+            if lease is not None:
+                arguments["lease"] = lease
             response = self.client.call_tool(
-                "read_review_recording",
-                {
-                    "taskId": task_id,
-                    "fence": fence,
-                    "offset": offset,
-                    "length": self.config.chunk_bytes,
-                },
-                client_run_id=run_id,
+                "read_review_recording", arguments, client_run_id=run_id
             )
             if not isinstance(response, Mapping):
                 raise McpError("read_review_recording returned an unexpected payload")
@@ -1159,6 +1161,7 @@ class CoachRunner:
         user_id = str(task["userId"])
         task_id = str(task["id"])
         fence = int(task["fence"])
+        lease = task.get("_lease")
         day = int(task.get("day") or attempt.get("day") or 1)
         kind = str(task.get("kind") or "")
 
@@ -1199,6 +1202,10 @@ class CoachRunner:
             arguments = produced.complete_args(
                 task_id, fence, analysis_version=task.get("analysisVersion")
             )
+
+        # B1: the lease is the authority for tenant/task/fence server-side.
+        if lease is not None:
+            arguments["lease"] = lease
 
         try:
             result = self.client.call_tool(
