@@ -17,6 +17,9 @@ export const MCP_TOOL_SCOPES: Readonly<Record<string, readonly AuthScope[]>> = {
   read_recording_bytes: ["owner", "coach", "coach-runner"],
   read_speaking_recording: ["owner", "coach", "coach-runner"],
   claim_review_tasks: ["owner", "coach", "coach-runner"],
+  // Runner-only cross-tenant claim (rev2 §7): the server selects the next due
+  // task across all tenants and derives the target userId from the task row.
+  claim_next_review_task: ["coach-runner"],
   renew_review_lease: ["owner", "coach", "coach-runner"],
   save_review_checkpoint: ["owner", "coach", "coach-runner"],
   read_review_checkpoint: ["owner", "coach", "coach-runner"],

@@ -1,4 +1,4 @@
-// MCP scope matrix (design rev2 §4.3/§9): 19 tools.
+// MCP scope matrix (design rev2 §4.3/§9): 20 tools.
 // owner may use every tool; coach may use every tool except the owner-only
 // calibration verdict/reset writes; coach-runner additionally cannot publish
 // lessons or answer/reset the learner's calibration. Unknown scopes/tools are
@@ -10,7 +10,7 @@ import {MCP_TOOL_SCOPES, mcpToolAllowed, mcpToolsForScope} from "../lib/mcp-scop
 const tools = [
   "read_study_session", "add_coach_feedback", "publish_lesson",
   "read_recording_bytes", "read_speaking_recording",
-  "claim_review_tasks", "renew_review_lease", "save_review_checkpoint",
+  "claim_review_tasks", "claim_next_review_task", "renew_review_lease", "save_review_checkpoint",
   "read_review_checkpoint", "fail_review_task", "complete_review_task",
   "get_analysis_bundle", "get_review_transfer", "read_review_recording",
   "read_review_receipt", "report_scheduler_heartbeat",
@@ -18,21 +18,23 @@ const tools = [
   "reset_pronunciation_profile",
 ];
 const ownerOnly = new Set(["record_pronunciation_verdict", "reset_pronunciation_profile"]);
+const runnerOnly = new Set(["claim_next_review_task"]);
 
-test("matrix covers exactly the 19 coach tools", () => {
+test("matrix covers exactly the 20 coach tools", () => {
   assert.deepEqual(Object.keys(MCP_TOOL_SCOPES).sort(), [...tools].sort());
-  assert.equal(tools.length, 19);
+  assert.equal(tools.length, 20);
 });
 
-test("owner may use every tool", () => {
-  assert.deepEqual(mcpToolsForScope("owner").sort(), [...tools].sort());
-  for (const tool of tools) assert.equal(mcpToolAllowed("owner", tool), true, tool);
+test("owner may use every tool except the runner-only cross-tenant claim", () => {
+  const allowed = tools.filter(tool => !runnerOnly.has(tool));
+  assert.deepEqual(mcpToolsForScope("owner").sort(), [...allowed].sort());
+  for (const tool of tools) assert.equal(mcpToolAllowed("owner", tool), !runnerOnly.has(tool), tool);
 });
 
-test("coach may read the profile but cannot write owner calibration answers", () => {
-  const allowed = tools.filter(tool => !ownerOnly.has(tool));
+test("coach may read the profile but cannot write owner calibration answers or claim across tenants", () => {
+  const allowed = tools.filter(tool => !ownerOnly.has(tool) && !runnerOnly.has(tool));
   assert.deepEqual(mcpToolsForScope("coach").sort(), [...allowed].sort());
-  for (const tool of tools) assert.equal(mcpToolAllowed("coach", tool), !ownerOnly.has(tool), tool);
+  for (const tool of tools) assert.equal(mcpToolAllowed("coach", tool), !ownerOnly.has(tool) && !runnerOnly.has(tool), tool);
 });
 
 test("coach-runner may use every tool except publish_lesson and owner calibration writes", () => {

@@ -6,7 +6,7 @@ import { createAnalysisBundleGrant } from "./analysis-bundle";
 import { decodeCheckpointLimit, issueReviewTransfer, requireDecodedInput } from "./review-transfer";
 import { validateSpeakingAnalysis } from "./speaking-analysis";
 import {
-  claimReviewTasks, completeReviewTask, failReviewTask, getReviewTask, readReviewCheckpoint, readReviewReceipt,
+  claimReviewTasks, claimNextReviewTask, completeReviewTask, failReviewTask, getReviewTask, readReviewCheckpoint, readReviewReceipt,
   recordAnalysisEvent, renewReviewLease, reportSchedulerHeartbeat, reviewTaskDb, saveReviewCheckpoint,
   ReviewTaskError, type ReviewTask, type ReviewTaskDb,
 } from "./review-tasks";
@@ -18,6 +18,9 @@ const hex64 = z.string().regex(/^[0-9a-f]{64}$/).describe("Lowercase SHA-256.");
 
 const claimSpec = z.strictObject({
   limit: z.number().int().min(1).max(3).optional().describe("Maximum tasks to claim in this call, default 1."),
+  clientRunId: clientRunId.optional(),
+});
+const claimNextSpec = z.strictObject({
   clientRunId: clientRunId.optional(),
 });
 const renewSpec = z.strictObject({
@@ -102,6 +105,9 @@ export const reviewTools = [
     name: "claim_review_tasks", description: "Claim up to three due Bandroom review tasks for the signed-in owner. Returns the immutable submission snapshot. Creates a processing lease and increases the fence; call again only after the current tasks are completed or failed.", schema: claimSpec, readOnly: false,
   },
   {
+    name: "claim_next_review_task", description: "Runner-only: claim the next due review task across ALL tenants. The server selects it and derives the target userId from the task row; pass that userId to every subsequent call. Returns the task (userId, fence, lease) plus its snapshot, or null when the queue is empty.", schema: claimNextSpec, readOnly: false,
+  },
+  {
     name: "renew_review_lease", description: "Extend the current processing lease for one claimed task. A stale fence or expired lease is rejected; stop writing when this fails.", schema: renewSpec, readOnly: false,
   },
   {
@@ -174,6 +180,19 @@ export async function callReviewTool(userId: string, name: string, args: unknown
           });
         }
         return { content: [{ type: "text", text: JSON.stringify({ serverNow: Date.now(), tasks: hydrated }) }] };
+      }
+      case "claim_next_review_task": {
+        const input = claimNextSpec.parse(args ?? {});
+        const task = await claimNextReviewTask(db, { clientRunId: input.clientRunId ?? "unknown" });
+        if (!task) {
+          return { content: [{ type: "text", text: JSON.stringify({ serverNow: Date.now(), task: null }) }] };
+        }
+        const snapshot = await snapshotFor(db, task.userId, task);
+        await recordAnalysisEvent(db, {
+          taskId: task.id, fence: task.fence, event: "claim_next_review_task", stage: task.stage,
+          outcome: "ok", clientRunId: input.clientRunId ?? null,
+        });
+        return { content: [{ type: "text", text: JSON.stringify({ serverNow: Date.now(), task: { ...task, snapshot } }) }] };
       }
       case "renew_review_lease": {
         const input = renewSpec.parse(args);

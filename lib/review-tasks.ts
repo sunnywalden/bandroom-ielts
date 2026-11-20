@@ -172,6 +172,30 @@ export async function claimReviewTasks(db: D1Like, userId: string, options: {
   return tasks;
 }
 
+// Claim the next due task ACROSS tenants (runner-only queue path, rev2 §7).
+// The target tenant is derived server-side from the task row (RETURNING includes
+// user_id); the caller's identity never selects it, preserving the "no
+// client-supplied userId" invariant. Fence + lease_until + task.userId are the
+// bound lease that every downstream queue call must present.
+export async function claimNextReviewTask(db: D1Like, options: { now?: number; clientRunId?: string } = {}) {
+  const now = options.now ?? Date.now();
+  const clientRunId = options.clientRunId ?? "unknown";
+  const row = await db.prepare(`UPDATE review_tasks
+    SET state='running', fence=fence+1, attempts=attempts+1, lease_until=?, updated_at=?,
+        claimed_by=?, claim_kind='auto', manual_grant_sha256=NULL, claimed_client_run_id=?
+    WHERE id = (
+      SELECT id FROM review_tasks
+      WHERE ((state IN ('queued','retry_wait') AND next_at<=?)
+          OR (state='running' AND lease_until<=?))
+        AND attempts < ? AND created_at > ?
+      ORDER BY next_at, id LIMIT 1
+    )
+    RETURNING ${taskColumns}`)
+    .bind(now + LEASE_MS, now, clientRunId, clientRunId, now, now, MAX_ATTEMPTS, now - MAX_AGE_MS)
+    .first<Record<string, unknown>>();
+  return toTask(row);
+}
+
 export async function renewReviewLease(db: D1Like, userId: string, taskId: string, fence: number, options: {
   now?: number; extendMs?: number;
 } = {}) {

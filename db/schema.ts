@@ -79,6 +79,9 @@ export const reviewTasks = sqliteTable("review_tasks", {
   uniqueIndex("review_tasks_job").on(table.reviewJobId),
   uniqueIndex("review_tasks_attempt").on(table.userId, table.attemptId),
   index("review_tasks_due").on(table.userId, table.state, table.nextAt, table.id),
+  // Cross-tenant runner claim (rev2 §7): the claim-any query cannot use the
+  // per-user due index, so it gets its own (state, next_at, id) index.
+  index("review_tasks_claim_any").on(table.state, table.nextAt, table.id),
 ]);
 
 export const analysisArtifacts = sqliteTable("analysis_artifacts", {

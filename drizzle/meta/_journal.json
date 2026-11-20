@@ -71,6 +71,13 @@
       "when": 1795151456243,
       "tag": "0009_analysis_events_user",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1795152737641,
+      "tag": "0010_claim_any_index",
+      "breakpoints": true
     }
   ]
 }

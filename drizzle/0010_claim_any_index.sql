@@ -1,0 +1,1 @@
+CREATE INDEX `review_tasks_claim_any` ON `review_tasks` (`state`,`next_at`,`id`);
