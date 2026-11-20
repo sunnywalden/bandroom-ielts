@@ -291,14 +291,18 @@ export async function callReviewTool(userId: string, name: string, args: unknown
           if (!metadata || !digest) throw new ReviewTaskError("recording_digest_unavailable", "The original recording digest is unavailable.");
           if (digest !== input.recordingSha256)
             throw new ReviewTaskError("recording_mismatch", "The recording digest differs from the original object.");
-          // Snapshot recording binding (A2 recordingSha256-only integrity). The
-          // decoded-PCM checkpoint (A1) is not used here: isCanonicalOrigin
-          // rejects .workers.dev, so the binary transfer endpoint is unavailable on
-          // the current deployment (controlled-verification finding). Owner-only
-          // scope means recordingSha256 <-> R2 digest <-> snapshot is the same
-          // integrity level as the shipped owner path.
+          // Snapshot recording binding — enforced UNCONDITIONALLY (review: the
+          // previous `snapRecording?.sha256 &&` form was fail-open when the
+          // snapshot carried no digest). A2 (owner-decided, Z-2): the decoded-PCM
+          // checkpoint (A1) is unavailable on .workers.dev (isCanonicalOrigin
+          // rejects it), so integrity here is recordingSha256 <-> R2 digest <->
+          // snapshot.recording — the SAME level the shipped owner path
+          // (add_coach_feedback / submittedRecording) already relies on. This is a
+          // disclosed reduction vs A1, not a silent skip; see CONTRACT_GATE.md.
           const snapRecording = (snapshot as { recording?: { sha256?: unknown } }).recording;
-          if (snapRecording?.sha256 && snapRecording.sha256 !== input.recordingSha256)
+          if (!snapRecording?.sha256)
+            throw new ReviewTaskError("recording_unbound", "The submission snapshot is missing its recording digest.");
+          if (snapRecording.sha256 !== input.recordingSha256)
             throw new ReviewTaskError("recording_mismatch", "The recording digest differs from the submission snapshot.");
           // Replay of an already-completed task: return the stored receipt WITHOUT
           // re-issuing candidates. This prevents a rejected/altered replay from
