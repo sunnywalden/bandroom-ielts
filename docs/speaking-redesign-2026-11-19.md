@@ -144,8 +144,8 @@ band 描述符区间；LR/GRA 由 LLM 对转写的问题计数与严重度映射
 | 非流式重试重复扣费 | 仅在实际发起调用的路径预扣（已修）；重试即真实重调，扣费与调用对齐 |
 
 以上均有测试锁定；无新增 Worker 契约变更（运行器侧 + UI 回退）。
-最终部署：版本 `839ac8b5-709a-4180-954d-0358d2cc3113`（100% 流量），
-配置备份 `~/.config/bandroom/wrangler.prod-20261119-speaking-final.json`。
+最终部署：版本 `fce97a96-4863-460e-bba7-4a504b80e818`（100% 流量，PR #41 合并后从 main 构建），
+配置备份 `~/.config/bandroom/wrangler.prod-20261120-main-fce97a96.json`。
 
 ## 5. 不做的事
 
