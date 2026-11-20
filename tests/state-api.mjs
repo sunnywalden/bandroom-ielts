@@ -25,6 +25,7 @@ globalThis.fixturePlatform={
     }},
   BUCKET:{head:async key=>clips.has(key)?{size:44}:null}
 };
+globalThis.fixturePlatform.BANDROOM_CONSENT_GATE='off'; // fixture: consent tested separately
 registerHooks({resolve(specifier,ctx,next){
   const mock=source=>({url:'data:text/javascript,'+encodeURIComponent(source),shortCircuit:true});
   if(specifier==='cloudflare:workers')return mock('export const env=globalThis.fixturePlatform');

@@ -35,6 +35,7 @@ globalThis.testCloud.BUCKET={
  async put(key,body){r2Objects.set(key,new Uint8Array(body))},
 };
 globalThis.user={userId:'feedback-fixture'};
+globalThis.testCloud.BANDROOM_CONSENT_GATE='off'; // fixture: consent tested separately
 registerHooks({resolve(spec,ctx,next){
  const mock=src=>({url:'data:text/javascript,'+encodeURIComponent(src),shortCircuit:true});
  if(spec==='cloudflare:workers')return mock('export const env=globalThis.testCloud');

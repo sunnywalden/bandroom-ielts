@@ -7,6 +7,7 @@ import { automationHeartbeats, learnerStates, reviewTasks, teacherFeedback, teac
 import { getExercises, type Lesson } from "@/app/curriculum";
 import { targets, overallTarget } from "@/app/goals";
 import { coachingContentViolation } from "./content-rules";
+import { assertConsent, ConsentError } from "./consent";
 import { frozenReviews } from "./review-jobs";
 import { reviewContext } from "./review-context";
 import { listRecoverable } from "./recording-recovery";
@@ -483,6 +484,9 @@ export async function callCoach(userId:string, name:string, args:unknown, option
       }
       case "read_recording_bytes":
       case "read_speaking_recording": {
+        // MT-3 (S8.1): reading learner voice requires active consent.
+        try { await assertConsent(getDb(), userId); }
+        catch (error) { if (error instanceof ConsentError) throw new CoachError(error.message); throw error; }
         const options=recordingSpec.parse(args);
         const {day,recordingId,offset=0,length=12288}=options;
         const mode=name==="read_recording_bytes"?"bytes":options.mode??"audio";

@@ -36,7 +36,7 @@ globalThis.testBucket={
     return {arrayBuffer:async()=>slice.buffer.slice(slice.byteOffset,slice.byteOffset+slice.byteLength),body:new Response(slice).body};
   },
 };
-globalThis.testEnv={BUCKET:globalThis.testBucket,ANALYSIS_SIGNING_KEY:'s'.repeat(32),ANALYSIS_BUNDLE_VERSION:'v1',ANALYSIS_RELEASED_VERSIONS:'analysis-v1',BANDROOM_PUBLIC_ORIGIN:'https://fixture.example'};
+globalThis.testEnv={BUCKET:globalThis.testBucket,ANALYSIS_SIGNING_KEY:'s'.repeat(32),ANALYSIS_BUNDLE_VERSION:'v1',ANALYSIS_RELEASED_VERSIONS:'analysis-v1',BANDROOM_PUBLIC_ORIGIN:'https://fixture.example',BANDROOM_CONSENT_GATE:'off'};
 registerHooks({resolve(specifier,context,next){
   if(specifier==='@/db')return {url:'data:text/javascript,export function getDb(){return globalThis.testDb}',shortCircuit:true};
   if(specifier==='cloudflare:workers')return {url:'data:text/javascript,export const env=globalThis.testEnv',shortCircuit:true};

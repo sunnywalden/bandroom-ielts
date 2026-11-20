@@ -108,14 +108,15 @@ test("suspended/revoked tenants are not consented even with a grant", async () =
   assert.equal(await consent.hasValidConsent(db, "learner-e"), false);
 });
 
-test("gate opt-in: off (default) -> always valid; on -> enforced (rollout)", async () => {
+test("gate fails closed: default enforced; only explicit off disables (security review)", async () => {
   seedUser("learner-f");
-  globalThis.__consentEnv.BANDROOM_CONSENT_GATE = "off";
-  assert.equal(await consent.hasValidConsent(db, "learner-f"), true);
-  delete globalThis.__consentEnv.BANDROOM_CONSENT_GATE; // default off
-  assert.equal(await consent.hasValidConsent(db, "learner-f"), true);
+  delete globalThis.__consentEnv.BANDROOM_CONSENT_GATE; // default = enforced
+  assert.equal(await consent.hasValidConsent(db, "learner-f"), false, "missing flag must NOT allow voice");
   globalThis.__consentEnv.BANDROOM_CONSENT_GATE = "on";
   assert.equal(await consent.hasValidConsent(db, "learner-f"), false);
+  globalThis.__consentEnv.BANDROOM_CONSENT_GATE = "off"; // explicit fixture opt-out
+  assert.equal(await consent.hasValidConsent(db, "learner-f"), true);
+  globalThis.__consentEnv.BANDROOM_CONSENT_GATE = "on"; // restore for other tests
 });
 
 test("recordConsent refuses non-active tenants", async () => {

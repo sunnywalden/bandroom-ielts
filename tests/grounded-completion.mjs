@@ -37,7 +37,7 @@ globalThis.testBucket={
 };
 globalThis.testEnv={BUCKET:globalThis.testBucket,ANALYSIS_SIGNING_KEY:'s'.repeat(32),
   GROUNDED_ANALYSIS_VERSION:'grounded-prosody-v1',GROUNDED_RELEASED_VERSIONS:'grounded-prosody-v1',
-  BANDROOM_PUBLIC_ORIGIN:'https://fixture.example'};
+  BANDROOM_PUBLIC_ORIGIN:'https://fixture.example',BANDROOM_CONSENT_GATE:'off'};
 registerHooks({resolve(specifier,context,next){
   if(specifier==='@/db')return {url:'data:text/javascript,export function getDb(){return globalThis.testDb}',shortCircuit:true};
   if(specifier==='cloudflare:workers')return {url:'data:text/javascript,export const env=globalThis.testEnv',shortCircuit:true};

@@ -40,14 +40,14 @@ export function requiredConsentVersion(): string {
 }
 
 /**
- * Whether the consent gate is enforced. Opt-in via BANDROOM_CONSENT_GATE="on"
- * for gradual rollout (mirrors the dormant-until-keyed lease system). The
- * mechanism is fully built and tested; the operator activates it BEFORE
- * onboarding real second users (the compliance hard gate). Default off keeps
- * the single-owner production and existing fixtures unchanged until activation.
+ * Whether the consent gate is enforced. FAIL CLOSED (security review): consent
+ * is required unless explicitly disabled with BANDROOM_CONSENT_GATE="off" for
+ * local/test fixtures. A missing flag must NOT silently allow voice processing.
+ * The env owner remains transitionally exempt (F10) so the operator is not
+ * locked out before an explicit owner consent record is seeded.
  */
 export function consentGateEnabled(): boolean {
-  return (env as { BANDROOM_CONSENT_GATE?: string }).BANDROOM_CONSENT_GATE?.trim() === "on";
+  return (env as { BANDROOM_CONSENT_GATE?: string }).BANDROOM_CONSENT_GATE?.trim() !== "off";
 }
 
 function ownerUserId(): string | undefined {

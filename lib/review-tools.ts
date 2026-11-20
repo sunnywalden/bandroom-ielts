@@ -207,6 +207,18 @@ function effectiveScope(
     : { user: userId, task: taskId, fence, revocationEpoch: undefined };
 }
 
+// MT-3 (S8.2, security review): enforce consent for the EFFECTIVE tenant on every
+// voice tool, regardless of caller scope (a runner must not read a non-consented
+// tenant's recording). Builds a Drizzle handle from the raw queue D1 client.
+async function assertVoiceConsent(rawDb: unknown, tenantUserId: string): Promise<void> {
+  try {
+    await assertConsent(drizzle(rawDb as never, { schema }), tenantUserId);
+  } catch (error) {
+    if (error instanceof ConsentError) throw new ReviewTaskError("consent_required", error.message);
+    throw error;
+  }
+}
+
 export async function callReviewTool(
   userId: string, name: string, args: unknown, options: ReviewToolOptions = {},
 ) {
@@ -345,16 +357,7 @@ export async function callReviewTool(
         // MT-3 (S8.2): a speaking completion processes the TASK tenant's voice.
         // Check consent for the effective tenant (lease.uid for runner), not the
         // caller. The owner is exempt transitionally (F10).
-        if (task.kind === "speaking") {
-          try {
-            // Build a Drizzle handle from the same raw D1 client the queue uses
-            // (works in production and in tests that mock getDb().$client).
-            await assertConsent(drizzle(db as never, { schema }), scope.user);
-          } catch (error) {
-            if (error instanceof ConsentError) throw new ReviewTaskError("consent_required", error.message);
-            throw error;
-          }
-        }
+        if (task.kind === "speaking") await assertVoiceConsent(db, scope.user);
         const snapshot = await snapshotFor(db, scope.user, task);
         const attempt = snapshot.attempt as Record<string, unknown> | undefined;
         if (!attempt || typeof attempt.stage !== "string")
@@ -494,6 +497,7 @@ export async function callReviewTool(
       }
       case "get_review_transfer": {
         const input = transferSpec.parse(args);
+        await assertVoiceConsent(db, userId);
         const grant = await issueReviewTransfer(db, userId, input.taskId, input.fence, input);
         return { content: [{ type: "text", text: JSON.stringify(grant) }] };
       }
@@ -506,6 +510,7 @@ export async function callReviewTool(
         if (!task) throw new ReviewTaskError("task_not_found", "The task is not available to this account.");
         if (task.kind !== "speaking" || !task.recordingId)
           throw new ReviewTaskError("not_speaking", "Only speaking tasks with a submitted recording expose audio.");
+        await assertVoiceConsent(db, scope.user);
         if (task.state !== "running" || task.fence !== scope.fence || (task.leaseUntil ?? 0) <= Date.now())
           throw new ReviewTaskError("stale_lease", "The task lease is no longer current.");
         const bucket = env.BUCKET;
