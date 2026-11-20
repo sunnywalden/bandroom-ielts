@@ -314,3 +314,68 @@ test('control disclosure warns a constant confirmer and never names the control 
  assert.match(text(),/不确定/);
  assert.doesNotMatch(text(),/DH|AH|expected|actual/);
 });
+
+// --- reference-audio fallback chain -----------------------------------------
+// The runner's TTS contrast audio is off by default in production; the card
+// must still offer an honest, provenance-labeled listening reference.
+test('without runner audio, curated words play the verified dictionary recording',async()=>{
+ const fixture=analysisFixture();
+ fixture.pronunciation.items=[{candidateId:'c-rec',word:'evidence',expected:'EH',actual:'IH',atMs:1000,tier:'T3'}];
+ await render(createElement(PronunciationCoach,{analysis:fixture}));
+ const card=document.querySelector('.pc-card');
+ assert.ok(buttons('播放词典真人发音',card).length);
+ assert.ok(buttons('0.75× 慢速对比',card).length);
+ const audio=card.querySelector('.pc-canonical audio');
+ assert.equal(audio.getAttribute('src'),'https://media.merriam-webster.com/audio/prons/en/us/mp3/e/eviden01.mp3');
+ assert.equal(audio.getAttribute('preload'),'none');
+ assert.match(card.textContent,/ˈev\.ə\.dəns/);
+ assert.ok([...card.querySelectorAll('a')].some(link=>link.textContent?.includes('韦氏词典')));
+ assert.match(card.textContent,/不是评分依据/);
+ assert.doesNotMatch(card.textContent,/标准发音对比暂不可用/);
+});
+
+test('without runner audio, ordinary words use the external dictionary reference',async()=>{
+ await render(createElement(PronunciationCoach,{analysis:analysisFixture()}));
+ const card=[...document.querySelectorAll('.pc-card')].find(row=>row.textContent?.includes('think'));
+ assert.ok(buttons('播放词典参考音',card).length);
+ const audio=card.querySelector('.pc-canonical audio');
+ assert.equal(audio.getAttribute('src'),'https://dict.youdao.com/dictvoice?audio=think&type=2');
+ assert.equal(audio.getAttribute('preload'),'none');
+ assert.ok([...card.querySelectorAll('a')].some(link=>link.textContent?.includes('有道词典')));
+ assert.match(card.textContent,/不是评分依据/);
+ assert.doesNotMatch(card.textContent,/标准发音对比暂不可用/);
+});
+
+test('catch trials stay indistinguishable when the reference comes from the fallback chain',async()=>{
+ const fixture=analysisFixture();
+ fixture.pronunciation.items=[
+  {candidateId:'c-real2',word:'think',expected:'TH',actual:'S',atMs:1000,tier:'T3'},
+  {candidateId:'c-ctrl2',word:'think',expected:'TH',actual:'TH',atMs:1000,tier:'T3',isCatchTrial:true},
+ ];
+ await render(createElement(PronunciationCoach,{analysis:fixture}));
+ const cards=[...document.querySelectorAll('.pc-card')];
+ assert.equal(cards.length,2);
+ assert.equal(cards[0].outerHTML,cards[1].outerHTML);
+});
+
+test('non-word tokens keep the honest unavailable note and never load external audio',async()=>{
+ const fixture=analysisFixture();
+ fixture.pronunciation.items=[{candidateId:'c-nonword',word:'um uh',expected:'AH',actual:'UH',atMs:1000,tier:'T3'}];
+ await render(createElement(PronunciationCoach,{analysis:fixture}));
+ const card=document.querySelector('.pc-card');
+ assert.match(card.textContent,/标准发音对比暂不可用，仍可回听原录音/);
+ assert.equal(card.querySelector('.pc-canonical audio'),null);
+});
+
+test('a failed reference load offers retry and the dictionary page',async()=>{
+ const fixture=analysisFixture();
+ fixture.pronunciation.items=[{candidateId:'c-err',word:'think',expected:'TH',actual:'S',atMs:1000,tier:'T3'}];
+ await render(createElement(PronunciationCoach,{analysis:fixture}));
+ const card=document.querySelector('.pc-card');
+ const audio=card.querySelector('.pc-canonical audio');
+ await act(async()=>{audio.dispatchEvent(new Event('error'));});
+ await flush();
+ assert.match(card.textContent,/词典参考音暂时无法播放/);
+ assert.ok([...card.querySelectorAll('a')].some(link=>link.textContent?.includes('查词典美音')));
+ assert.ok(buttons('播放词典参考音',card).length,'retry stays available');
+});
