@@ -192,11 +192,18 @@ async function resolveIdentity(
     if (db) {
       try {
         const now = Date.now();
+        // F10: backfill owner consent so the MT-3 consent gate does not lock out
+        // the operator. COALESCE preserves an existing grant/withdrawal — we never
+        // overwrite a deliberate withdrawal on re-login.
+        const consentVersion = (authEnv as { BANDROOM_CONSENT_VERSION?: string }).BANDROOM_CONSENT_VERSION?.trim()
+          || "voice-processing-v1";
         await db.prepare(
-          "INSERT INTO users (user_id, idp_iss, idp_sub, email_normalized, role, status, created_at, updated_at) " +
-          "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET status='active', updated_at=?",
+          "INSERT INTO users (user_id, idp_iss, idp_sub, email_normalized, role, status, consent_version, consent_at, created_at, updated_at) " +
+          "VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET status='active', " +
+          "consent_version=COALESCE(users.consent_version, excluded.consent_version), " +
+          "consent_at=COALESCE(users.consent_at, excluded.consent_at), updated_at=?",
         ).bind(userId, String(claims.iss ?? "env-owner"), String(claims.sub ?? userId),
-          email.toLowerCase(), "admin", "active", now, now, now).run();
+          email.toLowerCase(), "admin", "active", consentVersion, now, now, now, now).run();
       } catch { /* best-effort seed; env owner auth does not depend on it */ }
     }
     return { scope: "owner", user: { userId, displayName: email, email, fullName: null } };

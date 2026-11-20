@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { requireUserScope } from "@/lib/route-guard";
-import { crossOrigin, json, limitedBody } from "../shared";
+import { consentGate, crossOrigin, json, limitedBody } from "../shared";
 import { uuid } from "@/lib/recording-recovery";
 
 export const dynamic = "force-dynamic";
@@ -29,6 +29,8 @@ export async function POST(request: Request) {
   const user = auth.user;
   if (crossOrigin(request)) return json({ error: "invalid_origin" }, 403);
   if(request.headers.get("X-Bandroom-Account")!==user.userId)return json({error:"refresh_account"},428);
+  const denied = await consentGate(user.userId);
+  if (denied) return denied;
   if (!env.BUCKET) return json({ error: "recordings_unavailable" }, 503);
   const type = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
   if (!["audio/webm","audio/ogg","audio/mp4","audio/wav","audio/x-wav"].includes(type)) return json({ error: "unsupported_audio" },415);
@@ -67,6 +69,8 @@ export async function GET(request: Request) {
   const auth = await requireUserScope();
   if (auth instanceof Response) return auth;
   const user = auth.user;
+  const denied = await consentGate(user.userId);
+  if (denied) return denied;
   const id = new URL(request.url).searchParams.get("id") ?? "";
   if (!uuid.test(id)) return json({ error: "invalid_recording_id" }, 400);
   const bucket = env.BUCKET;

@@ -2,6 +2,22 @@ export function json(value: unknown, status = 200) {
   return Response.json(value, { status, headers: { "Cache-Control": "private, no-store" } });
 }
 
+// MT-3 (S8.1): shared consent gate for voice upload/playback/derived processing.
+// Returns a 403 response when the tenant lacks active consent, else null.
+// Dynamic imports keep this module free of a top-level DB dependency so lightweight
+// tests that only use json/crossOrigin do not need to mock the database binding.
+export async function consentGate(userId: string): Promise<Response | null> {
+  const { getDb } = await import("@/db");
+  const { assertConsent, ConsentError } = await import("@/lib/consent");
+  try {
+    await assertConsent(getDb(), userId);
+    return null;
+  } catch (error) {
+    if (error instanceof ConsentError) return json({ error: error.code, message: error.message }, 403);
+    throw error;
+  }
+}
+
 export function crossOrigin(request: Request) {
   const origin = request.headers.get("Origin");
   if (origin !== null && origin !== new URL(request.url).origin) return true;

@@ -15,6 +15,9 @@ import {
   ReviewTaskError, type ReviewTask, type ReviewTaskDb,
 } from "./review-tasks";
 import { signLease, leaseEnabled, verifyLease, type LeasePayload } from "./lease";
+import { assertConsent, ConsentError } from "./consent";
+import { drizzle } from "drizzle-orm/d1";
+import * as schema from "@/db/schema";
 
 const taskId = z.string().trim().min(1).max(200).describe("Exact review task ID returned by claim_review_tasks.");
 // B1: server-issued capability returned by claim_next_review_task. When present
@@ -339,6 +342,19 @@ export async function callReviewTool(
         const scope = effectiveScope(verified, userId, input.taskId, input.fence);
         const task = await getReviewTask(db, scope.user, scope.task);
         if (!task) throw new ReviewTaskError("task_not_found", "The task is not available to this account.");
+        // MT-3 (S8.2): a speaking completion processes the TASK tenant's voice.
+        // Check consent for the effective tenant (lease.uid for runner), not the
+        // caller. The owner is exempt transitionally (F10).
+        if (task.kind === "speaking") {
+          try {
+            // Build a Drizzle handle from the same raw D1 client the queue uses
+            // (works in production and in tests that mock getDb().$client).
+            await assertConsent(drizzle(db as never, { schema }), scope.user);
+          } catch (error) {
+            if (error instanceof ConsentError) throw new ReviewTaskError("consent_required", error.message);
+            throw error;
+          }
+        }
         const snapshot = await snapshotFor(db, scope.user, task);
         const attempt = snapshot.attempt as Record<string, unknown> | undefined;
         if (!attempt || typeof attempt.stage !== "string")

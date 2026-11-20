@@ -308,3 +308,44 @@ export const userTokens = sqliteTable("user_tokens", {
   uniqueIndex("user_tokens_hash").on(table.tokenHash),
   index("user_tokens_user").on(table.userId),
 ]);
+
+// MT-3 (design rev3.1 §4.7): append-only versioned consent trail. The current
+// snapshot lives on users.consent_version/consent_at; this table is the history.
+export const consentEvents = sqliteTable("consent_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull(),
+  version: text("version").notNull(),
+  purpose: text("purpose").notNull(),
+  at: integer("at").notNull(),
+  withdrawnAt: integer("withdrawn_at"),
+  ipHash: text("ip_hash"),
+}, table => [
+  index("consent_events_user").on(table.userId, table.at),
+]);
+
+// MT-3 (F8): resumable DSR export/delete jobs. cursor_json tracks per-table /
+// per-prefix progress; manifest_json records deletion counts (no content).
+export const dsrJobs = sqliteTable("dsr_jobs", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  kind: text("kind").notNull(), // 'export' | 'delete'
+  status: text("status").notNull(), // 'pending' | 'running' | 'done' | 'failed'
+  cursorJson: text("cursor_json", { mode: "json" }).$type<Record<string, unknown>>(),
+  manifestJson: text("manifest_json", { mode: "json" }).$type<Record<string, unknown>>(),
+  requestedBy: text("requested_by").notNull(),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+  finishedAt: integer("finished_at"),
+}, table => [
+  index("dsr_jobs_user").on(table.userId, table.createdAt),
+  index("dsr_jobs_status").on(table.status, table.updatedAt),
+]);
+
+// MT-3: retention policy per data class. Seeded by the app; the scheduled
+// handler reads it to purge expired R2 objects / D1 rows.
+export const retentionPolicy = sqliteTable("retention_policy", {
+  dataClass: text("data_class").primaryKey(),
+  retentionDays: integer("retention_days").notNull(),
+  action: text("action").notNull(), // 'delete' | 'anonymize'
+  updatedAt: integer("updated_at").notNull(),
+});

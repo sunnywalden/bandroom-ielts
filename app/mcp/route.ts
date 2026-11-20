@@ -3,10 +3,25 @@ import { callCoach, coachTools } from "@/lib/coach";
 import { mcpToolAllowed, mcpToolsForScope } from "@/lib/mcp-scope";
 import { auditServiceCall } from "@/lib/service-audit";
 import { env } from "cloudflare:workers";
-import { crossOrigin, json, limitedBody } from "../api/shared";
+import { consentGate, crossOrigin, json, limitedBody } from "../api/shared";
 
 export const dynamic = "force-dynamic";
 const protocolVersion = "2026-07-28";
+
+// MT-3 (S8.1): tools that read/process learner voice or voice-derived calibration.
+// add_coach_feedback / complete_review_task only need consent for speaking attempts.
+const ALWAYS_VOICE_TOOLS = new Set([
+  "read_speaking_recording", "read_recording_bytes", "get_review_transfer",
+  "record_pronunciation_verdict", "reset_pronunciation_profile", "read_pronunciation_profile",
+]);
+function voiceToolNeedsConsent(name: string, args: unknown): boolean {
+  if (ALWAYS_VOICE_TOOLS.has(name)) return true;
+  if (name === "add_coach_feedback" || name === "complete_review_task") {
+    const a = (args ?? {}) as { stage?: unknown; recordingId?: unknown; groundedAnalysis?: unknown; analysis?: unknown };
+    return a.stage === "speak" || Boolean(a.recordingId) || Boolean(a.groundedAnalysis) || Boolean(a.analysis);
+  }
+  return false;
+}
 export async function POST(request:Request) {
   if (crossOrigin(request)) return json({error:"invalid_origin"},403);
   const body=await limitedBody(request,128*1024);
@@ -37,6 +52,14 @@ export async function POST(request:Request) {
       const tool=coachTools.find(entry=>entry.name===message.params.name);
       if((env as {BANDROOM_READONLY?:string}).BANDROOM_READONLY==="1"&&!tool?.annotations?.readOnlyHint)
         return err(-32004,"Write operations are disabled in read-only mirror mode.",403);
+      // MT-3 (S8.1): voice tools require active consent. For human scopes the
+      // tenant is the caller; gate here. Service scopes (coach/coach-runner) act
+      // on a task tenant resolved from the lease — that consent check happens in
+      // the review-tool layer against lease.uid (S8.2), not the caller.
+      if(auth.scope!=="coach"&&auth.scope!=="coach-runner"&&voiceToolNeedsConsent(message.params.name,message.params.arguments)){
+        const denied=await consentGate(auth.user.userId);
+        if(denied) return err(-32005,"Consent required for voice processing.",403);
+      }
       // S7.1: only a lease verified by the review-tool layer may attribute the
       // audit row to a tenant. The callback fires during dispatch, so an
       // invalid/failed lease leaves this undefined and the audit stays

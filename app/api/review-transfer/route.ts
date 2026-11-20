@@ -4,7 +4,7 @@ import {
   uploadAcousticCheckpoint, uploadDecodeCheckpoint,
 } from "@/lib/review-transfer";
 import { isCanonicalOrigin, readOnlyMode } from "@/lib/route-guard";
-import { json, limitedBody } from "../shared";
+import { consentGate, json, limitedBody } from "../shared";
 
 export const dynamic = "force-dynamic";
 
@@ -31,6 +31,9 @@ async function transfer(request: Request) {
   if (!isCanonicalOrigin(request)) return json({ error: "untrusted_origin" }, 403);
   const grant = await authenticateReviewTransfer(request);
   if (!grant) return json({ error: "transfer_access_denied" }, 403);
+  // MT-3 (S8.1): binary voice transfer requires the task tenant's consent.
+  const denied = await consentGate(grant.userId);
+  if (denied) return denied;
   if (isReviewUpload(grant) && readOnlyMode()) return json({ error: "read_only" }, 403);
   const db = reviewTaskDb();
   const audit = {

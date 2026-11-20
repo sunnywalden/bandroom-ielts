@@ -7,7 +7,7 @@ import { findSubmission, submitReview } from "@/lib/review-jobs";
 import { reviewContext } from "@/lib/review-context";
 import { reviewAttempts } from "@/app/feedback-model";
 import { linkedRecordings } from "@/lib/recording-recovery";
-import { crossOrigin, json, limitedBody } from "../shared";
+import { consentGate, crossOrigin, json, limitedBody } from "../shared";
 
 import { env } from "cloudflare:workers";
 import { getExercises } from "../../curriculum";
@@ -87,6 +87,11 @@ export async function PUT(request: Request) {
   }
   if ((state.fullTests?.length??0)>(previous?.fullTests?.length??0) && state.fullTests.at(-1)?.audio)
     refs.push({id:state.fullTests.at(-1).audio,phase:"assessment"});
+  // MT-3 (S8.1): submitting/linking voice recordings requires active consent.
+  if (refs.length) {
+    const denied = await consentGate(user.userId);
+    if (denied) return denied;
+  }
   const linked=refs.length&&previous?linkedRecordings(previous):new Set<string>();
   const recordingIdentities = new Map<string, { sha256: string; bytes: number }>();
   for (const {id,phase} of refs) {
