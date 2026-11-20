@@ -134,7 +134,9 @@ async function claimFor(userId) {
   return task;
 }
 
-async function leaseFor(task, userId, ops, { exp = Date.now() + 300_000, rev = 0, rid = "runner-1" } = {}) {
+async function leaseFor(task, userId, ops, {
+  exp = Date.now() + 300_000, rev = 0, rid = task.claimedClientRunId ?? "runner-1",
+} = {}) {
   const token = await signLease({
     tid: task.id, uid: userId, fence: task.fence, rid, ops,
     iat: Date.now(), exp, rev,
@@ -192,6 +194,24 @@ test("lease with the wrong operation is rejected", async () => {
   assert.equal(result.isError, true);
   assert.equal(text(result).error, "lease_ops_denied");
   assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM teacher_feedback").get().n, 0);
+});
+
+test("a lease rid must match the runner that claimed the task (G19)", async () => {
+  reset();
+  seedUser(TENANT);
+  const task = await claimFor(TENANT);
+  assert.equal(task.claimedClientRunId, "run-claim");
+  // A second runner holds a validly signed lease for the same task/fence but
+  // did not claim it. The claimed_by predicate must reject the write.
+  const lease = await leaseFor(task, TENANT, ["complete_review_task"], { rid: "runner-other" });
+  const result = await callReviewTool(TENANT, "complete_review_task", {
+    taskId: task.id, fence: task.fence, lease,
+    feedback: "Text correction", evidence: "Text evidence",
+  });
+  assert.equal(result.isError, true);
+  assert.equal(text(result).error, "stale_lease");
+  assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM teacher_feedback").get().n, 0);
+  assert.equal(sql.prepare("SELECT state FROM review_tasks WHERE id=?").get(task.id).state, "running");
 });
 
 test("no lease with the lease system enabled falls back to the legacy owner path", async () => {

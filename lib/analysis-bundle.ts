@@ -119,7 +119,10 @@ export async function createAnalysisBundleGrant(
   const origin = options.origin ?? env.BANDROOM_PUBLIC_ORIGIN;
   if (!origin || !/^https?:\/\//.test(origin))
     throw new ReviewTaskError("bundle_origin_unavailable", "The public site origin is not configured.");
-  const expiresAt = now + Math.max(60_000, Math.min(options.ttlMs ?? 10 * 60_000, 15 * 60_000));
+  const requested = now + Math.max(60_000, Math.min(options.ttlMs ?? 10 * 60_000, 15 * 60_000));
+  // H20: the grant must never outlive the task lease it was minted for, so a
+  // completed/reclaimed task cannot be downloaded through a still-valid token.
+  const expiresAt = Math.min(requested, task.leaseUntil ?? requested);
   const payload: SignedPayload = {
     v: 1, key, user: userId, task: taskId, fence, iat: now, exp: expiresAt,
   };

@@ -143,6 +143,23 @@ const ranged=await bundleGet(new Request(bundleUrl,{headers:{Range:'bytes=0-3'}}
 eq(ranged.status,206,'bundle range status');eq(await ranged.text(),'anal','bundle range body');
 eq((await bundleGet(new Request(bundleUrl,{headers:{Origin:'https://evil.example'}}))).status,403,'bundle origin rejected');
 eq((await bundleGet(new Request('https://fixture.example/api/analysis-bundle?token=abc.def'))).status,403,'invalid token rejected');
+// H20: redemption re-checks live task/tenant state, not just the signed token.
+const claimedLease=sql.prepare('SELECT lease_until FROM review_tasks WHERE id=?').get(speakingJob.taskId).lease_until;
+sql.prepare('UPDATE review_tasks SET lease_until=? WHERE id=?').run(Date.now()-1,speakingJob.taskId);
+eq((await bundleGet(new Request(bundleUrl))).status,403,'expired task lease rejects bundle token');
+sql.prepare('UPDATE review_tasks SET lease_until=? WHERE id=?').run(claimedLease,speakingJob.taskId);
+eq((await bundleGet(new Request(bundleUrl))).status,200,'live lease still downloads');
+sql.prepare('UPDATE review_tasks SET fence=fence+1 WHERE id=?').run(speakingJob.taskId);
+eq((await bundleGet(new Request(bundleUrl))).status,403,'reclaimed fence rejects bundle token');
+sql.prepare('UPDATE review_tasks SET fence=fence-1 WHERE id=?').run(speakingJob.taskId);
+const stamp=Date.now();
+sql.prepare(`INSERT INTO users
+  (user_id,idp_iss,idp_sub,email_normalized,role,status,revocation_epoch,created_at,updated_at)
+  VALUES (?,?,?,?,?,?,?,?,?)`).run(owner,'issuer',owner,`${owner}@example.test`,'learner','suspended',0,stamp,stamp);
+eq((await bundleGet(new Request(bundleUrl))).status,403,'suspended tenant rejects bundle token');
+sql.prepare('DELETE FROM users WHERE user_id=?').run(owner);
+eq((await bundleGet(new Request(bundleUrl))).status,200,'active tenant still downloads');
+globalThis.testEnv.ANALYSIS_SIGNING_KEY='';
 globalThis.testEnv.ANALYSIS_SIGNING_KEY='';
 const unsigned=await callReviewTool(owner,'get_analysis_bundle',{taskId:speakingJob.taskId,fence:1});
 eq(unsigned.isError,true,'missing signing key');eq(text(unsigned).error,'bundle_signing_unavailable','signing error code');

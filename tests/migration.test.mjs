@@ -137,6 +137,7 @@ try{
   ]);
   const {exportBackup,restoreBackup,restoreAudio}=backupModule;
   const {hash}=formatModule;
+  const {backupNamespacedId}=await bundled('lib/uuidv5.ts');
 
   // Offline export (rev2 S4): the Worker no longer exposes /api/migrate; the
   // snapshot comes from the shared server module, invoked offline.
@@ -297,8 +298,37 @@ try{
   const restoredRevision=await target.db.prepare('SELECT revision FROM learner_states WHERE user_id=?').bind(uid).first();
   equal(restoredRevision.revision,5);
 
+  // MT-5 (S5.1/G5): restore stores tenant-namespaced ids. The offline six-table
+  // import and the verifier must address the SAME ids, so transform the snapshot
+  // and manifest with the deterministic map before importing.
+  const namespaced=id=>backupNamespacedId(uid,id);
+  const jobIds=new Map([[completedJobId,await namespaced(completedJobId)],[pendingJobId,await namespaced(pendingJobId)]]);
+  const mapAttempt=id=>jobIds.get(id)??id;
+  const migratedFeedbackId=await namespaced(feedbackA);
+  const migratedPendingJobId=jobIds.get(pendingJobId);
+  const migratedSnapshot=structuredClone(sourceSnapshot);
+  for(const row of migratedSnapshot.tables.teacher_feedback.rows){
+    row.id=await namespaced(row.id);row.attempt=mapAttempt(row.attempt);
+  }
+  for(const row of migratedSnapshot.tables.review_jobs.rows){
+    row.id=await namespaced(row.id);
+    const frozen=JSON.parse(row.snapshot);
+    if(frozen?.attempt)frozen.attempt.id=mapAttempt(frozen.attempt.id);
+    row.snapshot=JSON.stringify(frozen);
+  }
+  for(const row of migratedSnapshot.tables.review_receipts.rows)row.feedback_id=await namespaced(row.feedback_id);
+  for(const row of migratedSnapshot.tables.review_tasks.rows){
+    row.review_job_id=mapAttempt(row.review_job_id);row.attempt_id=mapAttempt(row.attempt_id);
+  }
+  const migratedBackup=structuredClone(signed);
+  migratedBackup.manifest.feedback=await Promise.all(migratedBackup.manifest.feedback.map(async row=>
+    ({...row,id:await namespaced(row.id),attempt:mapAttempt(row.attempt)})));
+  migratedBackup.manifest.reviewJobs=await Promise.all(migratedBackup.manifest.reviewJobs.map(async row=>
+    ({...row,id:await namespaced(row.id),
+      snapshot:{...row.snapshot,attempt:{...row.snapshot.attempt,id:mapAttempt(row.snapshot.attempt.id)}}})));
+
   // --- Six-table import, task rebuild, backfill ----------------------------
-  const {sql,statements,summary}=exportImport.buildImportSql(sourceSnapshot,{now:1234567890});
+  const {sql,statements,summary}=exportImport.buildImportSql(migratedSnapshot,{now:1234567890});
   equal(summary.tables.review_tasks,1);
   equal(summary.tables.review_receipts,1);
   equal(summary.tables.analysis_artifacts,1);
@@ -322,10 +352,10 @@ try{
   equal(targetCounts.analysis_events,2);
   equal(targetCounts.scheduler_heartbeats,1);
   equal(targetCounts.automation_heartbeats,1);
-  const backfill=await target.db.prepare('SELECT review_task_id FROM teacher_feedback WHERE id=?').bind(feedbackA).first();
+  const backfill=await target.db.prepare('SELECT review_task_id FROM teacher_feedback WHERE id=?').bind(migratedFeedbackId).first();
   equal(backfill.review_task_id,taskA);
-  const rebuilt=await target.db.prepare('SELECT * FROM review_tasks WHERE review_job_id=?').bind(pendingJobId).first();
-  equal(rebuilt.attempt_id,pendingJobId);
+  const rebuilt=await target.db.prepare('SELECT * FROM review_tasks WHERE review_job_id=?').bind(migratedPendingJobId).first();
+  equal(rebuilt.attempt_id,migratedPendingJobId);
   equal(rebuilt.recording_id,recordingB);
   equal(rebuilt.kind,'speaking');
   equal(rebuilt.state,'queued');
@@ -343,7 +373,7 @@ try{
   equal(targetSnapshot.r2.count,2);
   const frozenManifest={bundleSha256:'3'.repeat(64),runtimeSha256:'4'.repeat(64)};
   const shaByKey={[keyA]:shaA,[keyB]:shaB};
-  const result=verify.verifyMigration({backup:signed,source:sourceSnapshot,target:targetSnapshot,
+  const result=verify.verifyMigration({backup:migratedBackup,source:migratedSnapshot,target:targetSnapshot,
     shaByKey,frozenManifest,bundleSha:frozenManifest.bundleSha256,runtimeSha:frozenManifest.runtimeSha256});
   if(!result.ok)process.stderr.write(JSON.stringify(result.checks.filter(entry=>!entry.ok),null,2)+'\n');
   ok(result.ok);
@@ -358,19 +388,19 @@ try{
 
   const tamperedRevision=structuredClone(targetSnapshot);
   tamperedRevision.tables.learner_states.rows[0].revision=4;
-  const badRevision=verify.verifyMigration({backup:signed,source:sourceSnapshot,target:tamperedRevision,
+  const badRevision=verify.verifyMigration({backup:migratedBackup,source:migratedSnapshot,target:tamperedRevision,
     shaByKey,frozenManifest,bundleSha:frozenManifest.bundleSha256,runtimeSha:frozenManifest.runtimeSha256});
   ok(!badRevision.ok);
   ok(badRevision.checks.some(entry=>entry.name==='restore revision'&&!entry.ok));
 
   const tamperedReceipt=structuredClone(targetSnapshot);
   tamperedReceipt.tables.review_receipts.rows[0].output_sha256='0'.repeat(64);
-  const badReceipt=verify.verifyMigration({backup:signed,source:sourceSnapshot,target:tamperedReceipt,
+  const badReceipt=verify.verifyMigration({backup:migratedBackup,source:migratedSnapshot,target:tamperedReceipt,
     shaByKey,frozenManifest,bundleSha:frozenManifest.bundleSha256,runtimeSha:frozenManifest.runtimeSha256});
   ok(!badReceipt.ok);
   ok(badReceipt.checks.some(entry=>entry.name.startsWith('receipt ')&&!entry.ok));
 
-  const missingSha=verify.verifyMigration({backup:signed,source:sourceSnapshot,target:targetSnapshot,
+  const missingSha=verify.verifyMigration({backup:migratedBackup,source:migratedSnapshot,target:targetSnapshot,
     shaByKey:{},frozenManifest,bundleSha:frozenManifest.bundleSha256,runtimeSha:frozenManifest.runtimeSha256});
   ok(!missingSha.ok);
   ok(missingSha.checks.some(entry=>entry.name===`recording ${recordingA}`&&!entry.ok));
@@ -378,9 +408,9 @@ try{
   // --- verify CLI -----------------------------------------------------------
   const sourceFile=join(tmp,'source.json'),targetFile=join(tmp,'target.json'),backupFile=join(tmp,'backup.json');
   const shaFile=join(tmp,'sha.json'),frozenFile=join(tmp,'frozen.json');
-  await writeFile(sourceFile,JSON.stringify(sourceSnapshot));
+  await writeFile(sourceFile,JSON.stringify(migratedSnapshot));
   await writeFile(targetFile,JSON.stringify(targetSnapshot));
-  await writeFile(backupFile,JSON.stringify(signed));
+  await writeFile(backupFile,JSON.stringify(migratedBackup));
   await writeFile(shaFile,JSON.stringify(shaByKey));
   await writeFile(frozenFile,JSON.stringify(frozenManifest));
   const verifyScript=join(root,'scripts/migrate/verify-migration.mjs');

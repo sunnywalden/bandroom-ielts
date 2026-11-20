@@ -12,6 +12,7 @@ const esbuild=wrangler('esbuild'),tmp=await mkdtemp(join(tmpdir(),'bandroom-back
 async function bundled(file,plugins=[]){const out=join(tmp,file.split('/').at(-1).replace('.ts','.mjs'));await esbuild.build({entryPoints:[file],outfile:out,bundle:true,format:'esm',platform:'node',plugins});return import(out);}
 const {prepareBackup,downloadBackup,exportBackup,restoreBackup,restoreAudio,sealDevice,verifyDevice}=await bundled('lib/backup.ts');
 const {pack,unpack,hash}=await bundled('lib/backup-format.ts');
+const {backupNamespacedId}=await bundled('lib/uuidv5.ts');
 let mf,sql;
 function sqliteD1(){
  sql=new DatabaseSync(':memory:');
@@ -149,11 +150,18 @@ try{
  for(const [i,c] of m.audio.entries())await restoreAudio(bucket,uid,secret,c,new Uint8Array(await recovered.blobs[i].arrayBuffer()));
  await restoreBackup(db,bucket,uid,secret,signed,true);
  const restored=(await exportBackup(db,bucket,uid,secret)).manifest;
- ok(JSON.stringify(restored.reviewJobs)===JSON.stringify(m.reviewJobs));
- ok(restored.feedback[0].pronunciation.band===7);ok(restored.revision===5);ok(JSON.stringify(restored.state)===JSON.stringify(m.state));ok(JSON.stringify(restored.feedback)===JSON.stringify(m.feedback));ok(JSON.stringify(restored.lessons)===JSON.stringify(m.lessons));ok(JSON.stringify(restored.audio)===JSON.stringify(m.audio));
+ // MT-5 (S5.1/G5): restored ids are tenant-namespaced uuidv5 images. The row
+ // content is otherwise identical and every cross-reference follows the map.
+ const expectedFeedback=await Promise.all(m.feedback.map(async row=>({...structuredClone(row),id:await backupNamespacedId(uid,row.id)})));
+ expectedFeedback.sort((a,b)=>String(a.id)<String(b.id)?-1:String(a.id)>String(b.id)?1:0);
+ const expectedJobs=await Promise.all(m.reviewJobs.map(async job=>({...structuredClone(job),id:await backupNamespacedId(uid,job.id),
+   snapshot:{...structuredClone(job.snapshot),attempt:{...job.snapshot.attempt,id:await backupNamespacedId(uid,job.snapshot.attempt.id)}}})));
+ ok(JSON.stringify(restored.reviewJobs)===JSON.stringify(expectedJobs),'review job ids and attempt references are namespaced consistently');
+ ok(restored.feedback.some(row=>row.pronunciation?.band===7),'pronunciation survives restore');ok(restored.revision===5);ok(JSON.stringify(restored.state)===JSON.stringify(m.state));ok(JSON.stringify(restored.feedback)===JSON.stringify(expectedFeedback),'feedback ids are namespaced and content preserved');ok(JSON.stringify(restored.lessons)===JSON.stringify(m.lessons));ok(JSON.stringify(restored.audio)===JSON.stringify(m.audio));
+ ok(restored.reviewJobs.every(job=>!m.reviewJobs.some(row=>row.id===job.id)),'raw review job ids are not stored verbatim');
  const duplicate=await restoreBackup(db,bucket,uid,secret,signed,true);ok(!duplicate.stateToAdd&&duplicate.reviewJobs===0&&duplicate.lessons===0&&duplicate.feedback===0&&duplicate.missing.length===0);
  await run('DELETE FROM teacher_feedback WHERE user_id=?',uid);await restoreBackup(db,bucket,uid,secret,signed,true);
- ok((await exportBackup(db,bucket,uid,secret)).manifest.feedback[0].feedback==='review');
+ ok((await exportBackup(db,bucket,uid,secret)).manifest.feedback.some(row=>row.feedback==='review'));
  // Same bytes, missing private metadata: plan must treat the clip as missing
  // and restoreAudio must write the metadata instead of rejecting a no-op put.
  await bucket.put(addr(clip1),wave,{httpMetadata:{contentType:'audio/wav'}});
@@ -173,6 +181,35 @@ try{
  await run('UPDATE learner_states SET state=? WHERE user_id=?',JSON.stringify({...data,day:12}),uid);
  await denied(()=>restoreBackup(db,bucket,uid,secret,signed,true),409);
  ok((await exportBackup(db,bucket,other,secret)).manifest.state.other===true);
+ // MT-5 (S5.1/G5): two tenants restoring the SAME source ids store DIFFERENT
+ // ids, and a crafted archive referencing a victim's stored id does not collide
+ // (which previously surfaced as a 409 existence oracle / self-DoS).
+ const probeJobId='v2:'+crypto.randomUUID();
+ const probeJob={id:probeJobId,day:11,submissionKey:'probe',requestHash:'d'.repeat(64),revision:1,
+   createdAt:'2026-11-09T00:00:00.000Z',
+   snapshot:{sourceId:'v1:probe',attempt:{id:probeJobId,day:11,stage:'write'},context:{prompt:'probe'}}};
+ const probeFeedback={id:'shared-source-id',day:11,stage:'write',attempt:probeJobId,
+   evidence:'probe',feedback:'probe',createdAt:'2026-11-09T00:00:00.000Z'};
+ const craft=async tenant=>{const manifest={format:2,owner:await hash(new TextEncoder().encode(tenant)),
+   created:'2026-11-09T00:00:00.000Z',state:null,revision:0,feedback:[structuredClone(probeFeedback)],
+   lessons:[],reviewJobs:[structuredClone(probeJob)],audio:[],local:[]};
+   return {manifest,signature:signManifest(secret,manifest)}};
+ await restoreBackup(db,bucket,'tenant-victim',secret,await craft('tenant-victim'),true);
+ await restoreBackup(db,bucket,'tenant-thief',secret,await craft('tenant-thief'),true);
+ const victimExport=(await exportBackup(db,bucket,'tenant-victim',secret)).manifest;
+ const thiefExport=(await exportBackup(db,bucket,'tenant-thief',secret)).manifest;
+ ok(victimExport.feedback[0].id!==thiefExport.feedback[0].id,'same source feedback id maps per tenant');
+ ok(victimExport.reviewJobs[0].id!==thiefExport.reviewJobs[0].id,'same review job id maps per tenant');
+ ok(victimExport.reviewJobs[0].snapshot.attempt.id===victimExport.reviewJobs[0].id,'attempt reference follows the remapped job id');
+ ok(![victimExport.feedback[0].id,thiefExport.feedback[0].id].includes(probeFeedback.id),'source ids are not stored verbatim');
+ const victimStored=victimExport.feedback[0].id;
+ const probeArchive=await craft('tenant-thief');
+ probeArchive.manifest.feedback=[structuredClone(probeFeedback),{...structuredClone(probeFeedback),id:victimStored,feedback:'probe-victim-id'}];
+ probeArchive.signature=signManifest(secret,probeArchive.manifest);
+ const probePlan=await restoreBackup(db,bucket,'tenant-thief',secret,probeArchive,true);
+ ok(probePlan.feedback===1,'victim id reference inserts under a tenant-local id instead of colliding');
+ const thiefAfter=(await exportBackup(db,bucket,'tenant-thief',secret)).manifest;
+ ok(thiefAfter.feedback.length===2&&thiefAfter.feedback.every(row=>row.id!==victimStored),'victim id is never reachable from another tenant');
  // Real HTTP route + account-gating middleware. Only hosted identity/env binding injection is replaced in this isolated test.
  const routePath=join(tmp,'download-route.mjs');
  await esbuild.build({entryPoints:['app/api/backup/download/route.ts'],outfile:routePath,bundle:true,format:'esm',platform:'node',

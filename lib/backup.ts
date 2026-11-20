@@ -1,4 +1,5 @@
 import { archiveLimit,clipLimit,hash,headerBytes,metadataLimit,toHex,uuid, type CalibrationCandidateRow, type CalibrationEventRow, type CalibrationProfileRow, type Clip, type Data, type Manifest, type RemoteClip, type Signed, type Review,type Header,type SavedReviewJob } from './backup-format';
+import { backupTenantNamespace, uuidv5 } from './uuidv5';
 
 export class BackupError extends Error {
   status:number;
@@ -230,23 +231,73 @@ export async function restoreAudio(bucket:R2Bucket,uid:string,key:string,c:Remot
     if(raced?.type!==c.type||raced.hash!==c.hash||canonical(raced?.meta??{})!==canonical(c.meta??{}))
       return reject(409,'相同录音标识下存在其他内容，已停止恢复。');}
 }
+type Loose=Record<string,unknown>;
+// MT-5 (S5.1/G5): remap the denormalized attempt id inside a job snapshot so it
+// keeps pointing at the SAME namespaced review_jobs.id. A snapshot that does not
+// carry a string attempt id is left untouched (restore would reject it later).
+function remapJobSnapshot(snapshot:unknown,mapAttempt:(id:string)=>string):unknown {
+  if(!snapshot||typeof snapshot!=='object')return snapshot;
+  const attempt=(snapshot as Loose).attempt;
+  if(!attempt||typeof attempt!=='object')return snapshot;
+  const id=(attempt as Loose).id;
+  return typeof id==='string'
+    ?{...(snapshot as Loose),attempt:{...(attempt as Loose),id:mapAttempt(id)}}
+    :snapshot;
+}
 export async function restoreBackup(db:D1Database,bucket:R2Bucket,uid:string,key:string,signed:Signed,apply:boolean){
   const m=await authentic(uid,key,signed),data=await snapshot(db,uid);
   if(data.state&&(!m.state||canonical(data.state)!==canonical(m.state)))return reject(409,'当前学习进度与备份不同，已停止恢复。');
+  // MT-5 (S5.1/G5): every imported primary key gets a tenant-specific uuidv5
+  // image before it is compared or inserted. A crafted archive can therefore
+  // reference another tenant's id without colliding (no existence oracle / no
+  // self-DoS): it simply lands on a fresh id in THIS tenant's namespace.
+  //
+  // An id already present in this tenant's current snapshot is kept as-is: it
+  // is this tenant's own row, so compareRows must match or reject it instead of
+  // inserting a duplicate. This also keeps "export -> restore into the same
+  // tenant" idempotent, because an exported archive contains already-stored ids.
+  // Mapping is deterministic, so re-restoring the same archive re-derives the
+  // same ids and ON CONFLICT DO NOTHING still dedups.
+  //
+  // Formats 1-4 do not carry review_tasks/review_receipts, so there is no
+  // review_job_id/task_id/receipt_id reference to remap here. The denormalized
+  // attempt ids on snapshots/feedback and the calibration event -> candidate
+  // reference ARE carried and are remapped below.
+  const namespace=await backupTenantNamespace(uid);
+  const remap=async(id:string,present:Set<string>)=>present.has(id)?id:uuidv5(id,namespace);
+  const currentFeedbackIds=new Set(data.feedback.map(row=>row.id));
+  const currentJobIds=new Set((data.reviewJobs??[]).map(row=>row.id));
+  const currentCandidateIds=new Set((data.calibrationCandidates??[]).map(row=>row.candidateId));
+  const feedbackIds=new Map<string,string>();
+  for(const row of m.feedback)feedbackIds.set(row.id,await remap(row.id,currentFeedbackIds));
+  const jobIds=new Map<string,string>();
+  for(const row of m.reviewJobs??[])jobIds.set(row.id,await remap(row.id,currentJobIds));
+  const candidateIds=new Map<string,string>();
+  for(const row of m.calibrationCandidates??[])
+    candidateIds.set(row.candidateId,await remap(row.candidateId,currentCandidateIds));
+  const mapAttempt=(id:string)=>jobIds.get(id)??id;
+  const archiveFeedback=m.feedback.map(row=>({...row,id:feedbackIds.get(row.id)??row.id,
+    attempt:mapAttempt(row.attempt)}));
+  const archiveJobs=(m.reviewJobs??[]).map(row=>({...row,id:jobIds.get(row.id)??row.id,
+    snapshot:remapJobSnapshot(row.snapshot,mapAttempt) as SavedReviewJob['snapshot']}));
+  const archiveCandidates=(m.calibrationCandidates??[]).map(row=>({...row,
+    candidateId:candidateIds.get(row.candidateId)??row.candidateId,attemptId:mapAttempt(row.attemptId)}));
+  const archiveEvents=(m.calibrationEvents??[]).map(row=>({...row,
+    candidateId:candidateIds.get(row.candidateId)??row.candidateId,attemptId:mapAttempt(row.attemptId)}));
   // Format 1/2 backups predate acoustic evidence; ignore analysis fields when
   // comparing them against current rows so old backups remain restorable.
   const withoutAnalysis=(rows:Review[])=>rows.map(row=>{const copy:Review={...row};delete copy.analysis;return copy;});
   const feedback=compareRows(m.format<3?withoutAnalysis(data.feedback):data.feedback,
-    m.format<3?withoutAnalysis(m.feedback):m.feedback,x=>x.id);
+    m.format<3?withoutAnalysis(archiveFeedback):archiveFeedback,x=>x.id);
   const lessons=compareRows(data.lessons,m.lessons,x=>x.day);
-  const reviewJobs=compareRows(data.reviewJobs??[],m.reviewJobs??[],x=>x.id);
+  const reviewJobs=compareRows(data.reviewJobs??[],archiveJobs,x=>x.id);
   // Format <4 has no calibration section. If the current database already has
   // calibration rows, such a backup cannot restore cleanly: the extra rows are
   // not in the archive, and silently deleting them would lose confirmations.
   const profile=compareRows(data.personalCalibration??[],m.personalCalibration??[],
     x=>`${x.expected}\u0000${x.actual}`);
-  const candidates=compareRows(data.calibrationCandidates??[],m.calibrationCandidates??[],x=>x.candidateId);
-  const events=compareRows(data.calibrationEvents??[],m.calibrationEvents??[],
+  const candidates=compareRows(data.calibrationCandidates??[],archiveCandidates,x=>x.candidateId);
+  const events=compareRows(data.calibrationEvents??[],archiveEvents,
     x=>`${x.attemptId}\u0000${x.candidateId}`);
   const missing:string[]=[];
   for(const c of m.audio){

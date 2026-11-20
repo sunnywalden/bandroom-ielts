@@ -251,7 +251,11 @@ export async function callReviewTool(
       // tenant's due task — accepted for the single trusted runner (F13/F15).
       case "claim_next_review_task": {
         const input = claimNextSpec.parse(args ?? {});
-        const task = await claimNextReviewTask(db, { clientRunId: input.clientRunId ?? "unknown" });
+        // G19: the runner id signed into the lease must equal the id stored in
+        // review_tasks.claimed_client_run_id, otherwise every later lease-bound
+        // write would fail the claimed_by predicate.
+        const clientRunId = input.clientRunId ?? "runner";
+        const task = await claimNextReviewTask(db, { clientRunId });
         if (!task) {
           return { content: [{ type: "text", text: JSON.stringify({ serverNow: Date.now(), task: null, otherTenantsDue: false }) }] };
         }
@@ -272,7 +276,7 @@ export async function callReviewTool(
           ).bind(task.userId).first<{ revocationEpoch: number }>();
           lease = await signLease({
             tid: task.id, uid: task.userId, fence: task.fence,
-            rid: input.clientRunId ?? "runner",
+            rid: clientRunId,
             ops: ["renew_review_lease", "save_review_checkpoint", "read_review_checkpoint",
               "fail_review_task", "complete_review_task", "read_review_recording",
               "read_review_receipt", "get_analysis_bundle", "get_review_transfer"],
@@ -293,6 +297,7 @@ export async function callReviewTool(
         const scope = effectiveScope(verified, userId, input.taskId, input.fence);
         const lease = await renewReviewLease(db, scope.user, scope.task, scope.fence, {
           extendMs: input.extendMs, revocationEpoch: scope.revocationEpoch,
+          claimedBy: verified?.rid,
         });
         return { content: [{ type: "text", text: JSON.stringify(lease) }] };
       }
@@ -307,7 +312,7 @@ export async function callReviewTool(
         const saved = await saveReviewCheckpoint(db, scope.user, {
           ...input, taskId: scope.task, fence: scope.fence,
           coverage: input.coverage, objectRef: input.objectRef ?? null, payload: input.payload,
-          revocationEpoch: scope.revocationEpoch,
+          revocationEpoch: scope.revocationEpoch, claimedBy: verified?.rid,
         });
         await recordAnalysisEvent(db, {
           taskId: scope.task, fence: scope.fence, event: "save_review_checkpoint",
@@ -340,6 +345,7 @@ export async function callReviewTool(
         const scope = effectiveScope(verified, userId, input.taskId, input.fence);
         const task = await failReviewTask(db, scope.user, {
           ...input, taskId: scope.task, fence: scope.fence, revocationEpoch: scope.revocationEpoch,
+          claimedBy: verified?.rid,
         });
         await recordAnalysisEvent(db, {
           taskId: scope.task, fence: scope.fence, event: "fail_review_task", stage: task.stage,
@@ -478,7 +484,7 @@ export async function callReviewTool(
             analysisVersion,
             payload: { ...input.payload, taskId: task.id, fence: scope.fence },
           },
-          revocationEpoch: scope.revocationEpoch,
+          revocationEpoch: scope.revocationEpoch, claimedBy: verified?.rid,
         });
         await recordAnalysisEvent(db, {
           taskId: scope.task, fence: scope.fence, event: "complete_review_task", stage: "finalize",

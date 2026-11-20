@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { verifyBundleToken } from "@/lib/analysis-bundle";
+import { getReviewTask, reviewTaskDb } from "@/lib/review-tasks";
 import { isCanonicalOrigin } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
@@ -28,6 +29,18 @@ export async function GET(request: Request) {
   if (!secret || secret.length < 32) return denied(503);
   const payload = await verifyBundleToken(secret, token, Date.now());
   if (!payload || !/^analysis\/[A-Za-z0-9._-]{1,120}\/bundle\.tar\.zst$/.test(payload.key)) return denied(403);
+  // H20: the token only proves it was minted for this user/task/fence. Re-read
+  // live server state so a completed/revoked task, a reclaimed fence or a
+  // suspended tenant cannot keep downloading after the grant was issued.
+  const db = reviewTaskDb();
+  const task = await getReviewTask(db, payload.user, payload.task);
+  if (!task || task.fence !== payload.fence || task.state !== "running"
+    || (task.leaseUntil ?? 0) <= Date.now()) return denied(403, "bundle_task_inactive");
+  const account = await db.prepare("SELECT status FROM users WHERE user_id=?")
+    .bind(payload.user).first<{ status: string }>();
+  // Owner exemption (H14): deployments without a users row keep working; a
+  // present non-active row always fails closed.
+  if (account && account.status !== "active") return denied(403, "bundle_user_inactive");
   const bucket = env.BUCKET;
   if (!bucket) return denied(503);
   const metadata = await bucket.head(payload.key);

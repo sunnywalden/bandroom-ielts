@@ -113,6 +113,7 @@ const signManifest=(key,manifest)=>createHmac("sha256",Buffer.from(key,"hex"))
 try{
   const {exportBackup,restoreBackup}=await bundled("lib/backup.ts");
   const {pack,unpack}=await bundled("lib/backup-format.ts");
+  const {backupNamespacedId}=await bundled("lib/uuidv5.ts");
   const secret=randomBytes(32).toString("hex");
   const uid="fixture-owner";
   const source=await createRuntime();
@@ -164,9 +165,17 @@ try{
   equal(restored.personalCalibration,2);
   const roundTrip=await exportBackup(target.db,target.bucket,uid,secret);
   equal(roundTrip.manifest.format,4);
+  // MT-5 (S5.1/G5): restored candidate ids are tenant-namespaced; the event
+  // candidateId reference must follow the same map.
+  const candidatesById=await Promise.all(signed.manifest.calibrationCandidates.map(async row=>
+    ({...row,candidateId:await backupNamespacedId(uid,row.candidateId)})));
+  const eventsById=await Promise.all(signed.manifest.calibrationEvents.map(async row=>
+    ({...row,candidateId:await backupNamespacedId(uid,row.candidateId)})));
   deepEqual(roundTrip.manifest.personalCalibration,signed.manifest.personalCalibration,"profile survives round-trip");
-  deepEqual(roundTrip.manifest.calibrationCandidates,signed.manifest.calibrationCandidates,"candidates survive round-trip");
-  deepEqual(roundTrip.manifest.calibrationEvents,signed.manifest.calibrationEvents,"events survive round-trip");
+  deepEqual(roundTrip.manifest.calibrationCandidates,candidatesById,"candidates survive round-trip with namespaced ids");
+  deepEqual(roundTrip.manifest.calibrationEvents,eventsById,"events survive round-trip with namespaced candidate references");
+  ok(roundTrip.manifest.calibrationCandidates.every(row=>row.candidateId!==candidateA&&row.candidateId!==candidateB),
+    "source candidate ids are not stored verbatim");
   const replay=await restoreBackup(target.db,target.bucket,uid,secret,signed,true);
   equal(replay.personalCalibration,0,"idempotent restore");
   equal(replay.calibrationCandidates,0);
