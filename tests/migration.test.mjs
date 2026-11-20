@@ -135,17 +135,9 @@ try{
   const {exportBackup,restoreBackup,restoreAudio}=backupModule;
   const {hash}=formatModule;
 
-  const routeOut=join(tmp,'migrate-route.mjs');
-  await esbuild.build({
-    entryPoints:[join(root,'app/api/migrate/route.ts')],outfile:routeOut,bundle:true,format:'esm',platform:'node',
-    plugins:[{name:'test-identity',setup(build){
-      build.onResolve({filter:/^cloudflare:workers$|^@\/lib\/auth-adapter$/},args=>({path:args.path,namespace:'fixture'}));
-      build.onLoad({filter:/.*/,namespace:'fixture'},args=>({contents:args.path==='cloudflare:workers'
-        ?'export const env=new Proxy({},{get(_target,key){return globalThis.__migrationEnv?.[key]}});'
-        :'export async function getAuthContext(){return globalThis.__migrationAuth ?? {user:null,scope:null,identityType:null}}'}));
-    }}],
-  });
-  const {GET}=await import(pathToFileURL(routeOut).href);
+  // Offline export (rev2 S4): the Worker no longer exposes /api/migrate; the
+  // snapshot comes from the shared server module, invoked offline.
+  const {exportMigrationSnapshot}=await bundled('lib/migrate-export.ts');
 
   const plugin=await bundled('scripts/vite/sites-vite-plugin.ts');
   const exportImport=await import(pathToFileURL(join(root,'scripts/migrate/export-import.mjs')).href);
@@ -275,27 +267,7 @@ try{
   await source.bucket.put(keyA,wave,{httpMetadata:{contentType:'audio/wav'},customMetadata:{purpose:'speaking',day:'11',phase:'part2',digest:shaA}});
   await source.bucket.put(keyB,webm,{httpMetadata:{contentType:'audio/webm'},customMetadata:{purpose:'speaking',day:'11',phase:'followup',digest:shaB}});
 
-  const ownerAuth={user:{userId:uid,displayName:'Owner',email:'owner@example.test',fullName:null},scope:'owner',identityType:'mock'};
-  const fetchSnapshot=async(runtime)=>{
-    globalThis.__migrationEnv={DB:runtime.db,BUCKET:runtime.bucket,BANDROOM_MIGRATION_ENABLED:'1'};
-    globalThis.__migrationAuth=ownerAuth;
-    const response=await GET(new Request('https://fixture.test/api/migrate'));
-    equal(response.status,200);
-    return response.json();
-  };
-
-  // --- Endpoint gating ------------------------------------------------------
-  globalThis.__migrationEnv={DB:source.db,BUCKET:source.bucket};
-  globalThis.__migrationAuth=ownerAuth;
-  await jsonResponse(await GET(new Request('https://fixture.test/api/migrate')),404);
-  globalThis.__migrationEnv.BANDROOM_MIGRATION_ENABLED='1';
-  globalThis.__migrationAuth={...ownerAuth,scope:'coach'};
-  await jsonResponse(await GET(new Request('https://fixture.test/api/migrate')),403);
-  globalThis.__migrationAuth={user:null,scope:null,identityType:null};
-  await jsonResponse(await GET(new Request('https://fixture.test/api/migrate')),401);
-  globalThis.__migrationAuth=ownerAuth;
-  await jsonResponse(await GET(new Request('https://fixture.test/api/migrate',{headers:{Origin:'https://evil.test'}})),403);
-  equal(globalThis.__migrationEnv.BANDROOM_MIGRATION_ENABLED,'1');
+  const fetchSnapshot=async(runtime)=>exportMigrationSnapshot(runtime.db,runtime.bucket);
 
   // --- Ten-table export completeness ---------------------------------------
   const sourceSnapshot=await fetchSnapshot(source);
@@ -308,7 +280,7 @@ try{
   }
   equal(sourceSnapshot.r2.count,2);
   equal(sourceSnapshot.r2.objects.length,2);
-  ok(sourceSnapshot.notices.some((notice)=>notice.includes('Disable BANDROOM_MIGRATION_ENABLED')));
+  ok(sourceSnapshot.notices.some((notice)=>notice.includes('offline')));
 
   // --- Backup v3 + empty-target restore ------------------------------------
   const signed=await exportBackup(source.db,source.bucket,uid,secret);

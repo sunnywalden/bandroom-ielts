@@ -6,7 +6,8 @@
 //   node scripts/migrate/export-import.mjs import \
 //     --snapshot bandroom-migration.json --out bandroom-runtime-import.sql --execute
 //
-// The input is the JSON produced by GET /api/migrate (BANDROOM_MIGRATION_ENABLED=1).
+// The input is the JSON snapshot produced offline by lib/migrate-export.ts
+// (there is no /api/migrate HTTP route in the Worker; rev2 S4).
 // The output is idempotent SQL: INSERT ... ON CONFLICT DO NOTHING plus
 // teacher_feedback.review_task_id backfill UPDATEs. Pending review_jobs that
 // have no feedback are rebuilt as queued review_tasks so the new site does not
