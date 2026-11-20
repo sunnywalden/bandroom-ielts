@@ -24,10 +24,28 @@ function equalSig(a:unknown,b:string) {
 const ownerTag=(uid:string)=>hash(utf8.encode(uid));
 const path=(uid:string,id:string)=>'speaking/'+encodeURIComponent(uid)+'/'+id;
 type StoredClip=Clip&{meta?:Record<string,string>};
-const ticket=(key:string,uid:string,c:StoredClip)=>sign(key,JSON.stringify(c.meta
+// Per-tenant signing key (rev2 S12): HMAC(root, "bandroom-backup-kdf-v1|"+uid).
+// This is DOMAIN SEPARATION — a signature minted for tenant A cannot be replayed
+// as tenant B — and prepares the path for per-tenant secrets. It does NOT
+// mitigate root-key compromise: an attacker holding BANDROOM_BACKUP_KEY can
+// derive every tenant key. Treat root-key compromise as total; prefer a KMS or
+// asymmetric signing key for real isolation. Legacy backups (signed with the raw
+// root key, format 1-4) are still accepted by verifyWith.
+async function tenantKey(rootKey:string,uid:string){
+  if(!/^[\da-f]{64}$/i.test(rootKey))return reject(503,'备份服务密钥暂不可用。');
+  const secret=await crypto.subtle.importKey('raw',Uint8Array.from(rootKey.match(/../g)!,a=>parseInt(a,16)),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+  return toHex(await crypto.subtle.sign('HMAC',secret,utf8.encode('bandroom-backup-kdf-v1|'+uid)));
+}
+async function signWith(rootKey:string,uid:string,input:string){return sign(await tenantKey(rootKey,uid),input);}
+async function verifyWith(rootKey:string,uid:string,input:string,sig:unknown){
+  if(equalSig(sig,await signWith(rootKey,uid,input)))return true;
+  return equalSig(sig,await sign(rootKey,input));
+}
+const ticketInput=(uid:string,c:StoredClip)=>JSON.stringify(c.meta
   ?['clip',uid,c.id,c.size,c.type,c.hash,c.meta]
-  :['clip',uid,c.id,c.size,c.type,c.hash]));
-const recordSignature=(key:string,m:Manifest)=>sign(key,'manifest\n'+canonical(m));
+  :['clip',uid,c.id,c.size,c.type,c.hash]);
+const ticket=(key:string,uid:string,c:StoredClip)=>signWith(key,uid,ticketInput(uid,c));
+const recordSignature=(key:string,uid:string,m:Manifest)=>signWith(key,uid,'manifest\n'+canonical(m));
 function refs(state:Data['state'],reviewJobs:SavedReviewJob[]=[]){
   const cloud=new Set<string>(),device=new Set<string>();
   const add=(bag:Set<string>,id:unknown)=>{if(id===undefined)return;if(typeof id!=='string'||!uuid.test(id))reject(422,'学习记录含有无法识别的录音标识。');else bag.add(id)};
@@ -119,10 +137,10 @@ export async function exportBackup(db:D1Database,bucket:R2Bucket,uid:string,key:
     ...(format>=4?{personalCalibration:profile,calibrationCandidates:candidates,calibrationEvents:events}:{}),
     audio,local:ids.device};
   if(utf8.encode(JSON.stringify(manifest)).length>metadataLimit-1024)return reject(413,'课程记录超出单份备份的 8 MiB 上限。');
-  return {manifest,signature:await recordSignature(key,manifest)};
+  return {manifest,signature:await recordSignature(key,uid,manifest)};
 }
 const receiptLifetime=15*60*1000;
-const downloadMac=(key:string,uid:string,stamp:string,digest:string)=>sign(key,JSON.stringify(['download',uid,stamp,digest]));
+const downloadMac=(key:string,uid:string,stamp:string,digest:string)=>signWith(key,uid,JSON.stringify(['download',uid,stamp,digest]));
 export async function prepareBackup(db:D1Database,bucket:R2Bucket,uid:string,key:string){
   const signed=await exportBackup(db,bucket,uid,key);
   if(signed.manifest.local.length)return signed;
@@ -131,7 +149,7 @@ export async function prepareBackup(db:D1Database,bucket:R2Bucket,uid:string,key
 }
 export async function downloadBackup(db:D1Database,bucket:R2Bucket,uid:string,key:string,receipt:string,now=Date.now()){
   const match=/^(\d{13})\.([a-f0-9]{64})\.([a-f0-9]{64})$/.exec(receipt);
-  if(!match||!equalSig(match[3],await downloadMac(key,uid,match[1],match[2])))return reject(403,'下载凭据无效或账号已变更。');
+  if(!match||!await verifyWith(key,uid,JSON.stringify(['download',uid,match[1],match[2]]),match[3]))return reject(403,'下载凭据无效或账号已变更。');
   const stamp=Number(match[1]);
   if(stamp>now||now-stamp>receiptLifetime)return reject(410,'下载链接已到期，请重新准备备份。');
   const signed=await exportBackup(db,bucket,uid,key,new Date(stamp).toISOString());
@@ -159,7 +177,7 @@ async function authentic(uid:string,key:string,signed:Signed){
     (m.format>=4&&(!Array.isArray(m.personalCalibration)||!Array.isArray(m.calibrationCandidates)||!Array.isArray(m.calibrationEvents)))||
     !Array.isArray(m.audio)||!Array.isArray(m.feedback)||!Array.isArray(m.lessons)||!Array.isArray(m.local))return reject(422,'备份格式无效。');
   if(m.owner!==await ownerTag(uid))return reject(403,'此备份属于其他账号或站点。');
-  if(!equalSig(signed.signature,await recordSignature(key,m)))return reject(422,'备份签名无效或内容已被修改。');
+  if(!await verifyWith(key,uid,'manifest\n'+canonical(m),signed.signature))return reject(422,'备份签名无效或内容已被修改。');
   return m;
 }
 export async function sealDevice(uid:string,key:string,signed:Signed,device:Clip[]){
@@ -167,11 +185,16 @@ export async function sealDevice(uid:string,key:string,signed:Signed,device:Clip
   if(!Array.isArray(device)||device.length!==m.local.length||device.some((c,i)=>!c||c.id!==m.local[i]||
     !Number.isSafeInteger(c.size)||c.size<1||c.size>clipLimit||!/^audio\/[\w.+-]+$/.test(c.type)||!/^([a-f0-9]{64})$/.test(c.hash)))
     return reject(422,'本机录音清单与备份不匹配。');
-  return sign(key,canonical(['device',uid,signed.signature,device]));
+  return signWith(key,uid,canonical(['device',uid,signed.signature,device]));
 }
 export async function verifyDevice(uid:string,key:string,header:Header){
   if(!header?.signed?.manifest?.local?.length&&!header?.device?.length)return;
-  if(!equalSig(header.deviceSeal,await sealDevice(uid,key,header.signed,header.device)))reject(422,'本机录音签名无效，已停止恢复。');
+  // sealDevice re-validates the manifest owner (403 for another account) and the
+  // device-list shape, then returns the per-tenant seal. Accept a legacy raw-key
+  // seal too (format 1-4 archives signed before per-tenant derivation).
+  const expected=await sealDevice(uid,key,header.signed,header.device);
+  const legacy=await sign(key,canonical(['device',uid,header.signed.signature,header.device]));
+  if(!equalSig(header.deviceSeal,expected)&&!equalSig(header.deviceSeal,legacy))reject(422,'本机录音签名无效，已停止恢复。');
 }
 function compareRows<T,K>(present:T[],archived:T[],id:(v:T)=>K){
   const saved=new Map(archived.map(v=>[id(v),v]));
@@ -183,7 +206,7 @@ function compareRows<T,K>(present:T[],archived:T[],id:(v:T)=>K){
 }
 export async function restoreAudio(bucket:R2Bucket,uid:string,key:string,c:RemoteClip,bytes:Uint8Array<ArrayBuffer>){
   if(!c||!uuid.test(c.id)||!Number.isSafeInteger(c.size)||c.size<1||c.size>clipLimit||bytes.length!==c.size||
-    !equalSig(c.ticket,await ticket(key,uid,c))||await hash(bytes)!==c.hash)return reject(422,'录音凭据或校验值无效。');
+    !await verifyWith(key,uid,ticketInput(uid,c),c.ticket)||await hash(bytes)!==c.hash)return reject(422,'录音凭据或校验值无效。');
   if(c.meta?.digest&&c.meta.digest!==c.hash)return reject(422,'录音摘要与备份元数据不一致。');
   const current=await inspect(bucket,uid,c.id);
   if(current){
