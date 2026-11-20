@@ -67,7 +67,7 @@ function Issues({cards}:{cards:ScorecardCriterion[]}) {
 }
 
 // One shared audio element; clicking a word plays exactly that word's span.
-function Transcript({words,recordingId,candidates}:{words:TranscriptWord[];recordingId?:string;candidates:CoachAnalysis['items']}) {
+function Transcript({words,recordingId,candidates,verdicts}:{words:TranscriptWord[];recordingId?:string;candidates:CoachAnalysis['items'];verdicts?:Record<string,string>}) {
   const audio=useRef<HTMLAudioElement>(null);
   const stopTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
   const [active,setActive]=useState<number|null>(null);
@@ -77,7 +77,7 @@ function Transcript({words,recordingId,candidates}:{words:TranscriptWord[];recor
   for(const item of candidates??[]){
     if(item.isCatchTrial)continue;
     const at=(item.atMs??0)/1000;
-    const verdict=item.priorVerdict??item.answeredVerdict??item.verdict;
+    const verdict=(item.candidateId?verdicts?.[item.candidateId]:undefined)??item.priorVerdict??item.answeredVerdict??item.verdict;
     const idx=words.findIndex(w=>w.start<=at&&at<=w.end+0.15&&w.word.toLowerCase().includes(String(item.word??'').toLowerCase()));
     if(idx<0)continue;
     marks.set(idx,verdict==='confirmed'?'confirmed':verdict==='rejected'?'rejected':'suggested');
@@ -160,7 +160,7 @@ function Drills({drills,words,recordingId}:{drills:SpeakingDrill[];words:Transcr
   </div>;
 }
 
-export default function SpeakingScorecard({analysis,recordingId}:{analysis:CoachAnalysis;recordingId?:string}) {
+export default function SpeakingScorecard({analysis,recordingId,verdicts}:{analysis:CoachAnalysis;recordingId?:string;verdicts?:Record<string,string>}) {
   const card=analysis.scorecard;
   if(!card||card.schema!=='bandroom-speaking-scorecard-v1')return null;
   const words=card.transcript?.words??analysis.transcript??[];
@@ -182,7 +182,7 @@ export default function SpeakingScorecard({analysis,recordingId}:{analysis:Coach
       </article>)}
     </div>
     <Issues cards={card.criteria}/>
-    <Transcript words={words} recordingId={recordingId} candidates={analysis.items}/>
+    <Transcript words={words} recordingId={recordingId} candidates={analysis.items} verdicts={verdicts}/>
     <Drills drills={drills} words={words} recordingId={recordingId}/>
     {card.llm_status==='unavailable'&&<p className="af-hint" role="status">本次结构化分析暂不可用，评分卡仅含流利度与发音建议层；教练详评见下方。</p>}
   </div>;

@@ -41,7 +41,7 @@ export type CoachAnalysis = {
   // v2 transport: ASR transcript + scorecard (validated server-side).
   transcript?: TranscriptWord[];
   scorecard?: SpeakingScorecardData;
-  items?: Array<{word?:string;atMs?:number;priorVerdict?:string;answeredVerdict?:string;verdict?:string;isCatchTrial?:boolean}>;
+  items?: Array<{candidateId?:string;word?:string;atMs?:number;priorVerdict?:string;answeredVerdict?:string;verdict?:string;isCatchTrial?:boolean}>;
 };
 export type CoachFeedback = {id:string;day:number;stage:string;attempt:string;evidence:string;feedback:string;createdAt:string;analysis?:CoachAnalysis};
 export type ReviewAttempt = {

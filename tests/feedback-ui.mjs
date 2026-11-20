@@ -364,7 +364,7 @@ test('score-first scorecard renders bands, honest statuses, transcript and drill
   transcript:{source:'whisper-large-v3-turbo',status:'asr',words},
   drills:[{quote:"I've seen a short video",improved:'I watched a short clip.',focus_zh:'过去时'}],
   llm_status:'ok'};
- feedback=[{id:'fb-scorecard',day:12,stage:'speak',attempt:source.id,evidence:'Scorecard fixture',feedback:'一、评估：整体不错。',createdAt:'2026-11-09T01:00:00Z',analysis:{schema:'bandroom-grounded-analysis-v2',speechSeconds:33.4,items:[{word:'seen',atMs:4570,tier:'T3'}],transcript:words,scorecard}}];
+ feedback=[{id:'fb-scorecard',day:12,stage:'speak',attempt:source.id,evidence:'Scorecard fixture',feedback:'一、评估：整体不错。',createdAt:'2026-11-09T01:00:00Z',analysis:{schema:'bandroom-grounded-analysis-v2',speechSeconds:33.4,items:[{candidateId:'cand-seen',word:'seen',expected:'N',actual:'NG',atMs:4570,detectorConfidence:.94,tier:'T3'}],transcript:words,scorecard}}];
  await mount();
  const section=document.querySelector('[aria-label="口语 Part 2 · 首次回答反馈"]');
  assert.ok(section);
@@ -380,6 +380,12 @@ test('score-first scorecard renders bands, honest statuses, transcript and drill
  assert.ok(card.querySelector('audio'));
  await act(async()=>{wordButtons[1].click();});
  assert.ok(card.querySelector('.ss-w-active'));
+ // Self-listen verdict updates the transcript color in-session (red=confirmed).
+ assert.ok(card.querySelector('.ss-w-suggested'));
+ await act(async()=>{await button('确实读错').click();await flush();});
+ assert.ok(card.querySelector('.ss-w-confirmed'),'transcript turns red after 确实读错');
+ assert.ok(!card.querySelector('.ss-w-suggested'),'amber suggestion is replaced by the verdict');
+ assert.equal(mcpCalls.at(-1).params.name,'record_pronunciation_verdict');
  assert.equal(puts().length,0);
 });
 

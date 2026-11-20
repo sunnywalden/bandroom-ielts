@@ -46,7 +46,10 @@ STATUS_REFERENCE = "reference"
 STATUS_SUGGESTIVE = "suggestive"
 STATUS_ASR = "asr"
 
-_REFERENCE_DISCLOSURE_ZH = "参考估计：由已校准韵律证据与转写分析按披露的启发式映射得出，非官方雅思评分。"
+_REFERENCE_DISCLOSURE_ZH = (
+    "参考估计：由已校准韵律证据与转写分析按披露的启发式映射得出，非官方雅思评分。"
+    "转写来自 ASR，识别误差可能影响语法/词汇判断。"
+)
 _PRONUNCIATION_DISCLOSURE_ZH = (
     "发音层为建议性反馈：音素断言精度门禁未通过，不给发音分数；"
     "琥珀色词为检测器建议回听（非错误断言），红色仅来自你的自听确认。"
@@ -109,6 +112,26 @@ def fluency_card(
     total = float(calibrated.get("total_duration_seconds") or 0.0)
     speech = float(calibrated.get("speech_duration_seconds") or 0.0)
     ratio = float(calibrated.get("speech_ratio") or 0.0)
+    if total <= 0 or speech <= 0:
+        # No usable measurement (e.g. a broken instrument or a silent upload):
+        # NEVER translate that into a low band. Refuse to score the criterion.
+        return {
+            "key": "fluency_coherence",
+            "label_zh": "流利度与连贯性",
+            "band": None,
+            "status": STATUS_REFERENCE,
+            "evidence": {
+                "speech_ratio": round(ratio, 4),
+                "speech_duration_seconds": round(speech, 3),
+                "total_duration_seconds": round(total, 3),
+                "pause_count": int(calibrated.get("pause_count") or 0),
+                "pause_seconds": round(float(calibrated.get("pause_seconds") or 0.0), 3),
+                "metrics_status": STATUS_CALIBRATED,
+                "pace_wpm": None,
+                "pace_status": "uncalibrated",
+            },
+            "disclosure_zh": "本次未测得可用语音（语音时长或总时长为 0），流利度不评分；请确认录音设备后重录。",
+        }
     pause_count = int(calibrated.get("pause_count") or 0)
     pause_seconds = float(calibrated.get("pause_seconds") or 0.0)
     pauses = calibrated.get("pauses") or []

@@ -269,6 +269,7 @@ function Recorder({limit,clip,disabled,stopRequestRef,onClip,onActive,heading}:{
         try{rec.stop()}catch{finish(true)}
       };onActive("recording"); started.current = Date.now(); setDuration(0); setMode("recording");
     } catch {
+      stopMeter();
       stream?.getTracks().forEach(t => t.stop());
       if (mounted.current) { setNotice("麦克风未能开启。请检查浏览器权限，或改用页面外口头练习。");setMode("idle");onActive("idle"); }
     } finally {waiting=false;clearTimeout(permissionTimer);startPending.current=false}

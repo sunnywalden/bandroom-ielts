@@ -363,12 +363,24 @@ def coerce_grounded_analysis(value: Any) -> dict[str, Any] | None:
             raise ContentRuleError("invalid_grounded_analysis", "scorecard must be an object")
         if card.get("schema") != "bandroom-speaking-scorecard-v1":
             raise ContentRuleError("invalid_grounded_analysis", "unknown scorecard schema")
+        overall = card.get("overall")
+        if not isinstance(overall, Mapping):
+            raise ContentRuleError("invalid_grounded_analysis", "scorecard overall must be an object")
+        if not isinstance(overall.get("status"), str) or not isinstance(overall.get("disclosure_zh"), str):
+            raise ContentRuleError("invalid_grounded_analysis", "scorecard overall needs status and disclosure_zh")
         criteria = card.get("criteria")
         if not isinstance(criteria, (list, tuple)) or not 1 <= len(criteria) <= 6:
             raise ContentRuleError("invalid_grounded_analysis", "scorecard criteria must be 1-6 cards")
         for c in criteria:
             if not isinstance(c, Mapping) or not isinstance(c.get("key"), str):
                 raise ContentRuleError("invalid_grounded_analysis", "scorecard card needs a key")
+            # Mirror the Zod schema so a malformed card fails locally, before
+            # the paid model call's payload reaches the server.
+            for field in ("label_zh", "status", "disclosure_zh"):
+                if not isinstance(c.get(field), str) or not c.get(field).strip():
+                    raise ContentRuleError(
+                        "invalid_grounded_analysis", f"scorecard card missing {field}"
+                    )
             band = c.get("band")
             if band is not None:
                 if isinstance(band, bool) or not isinstance(band, (int, float)) or not 0 <= float(band) <= 9:

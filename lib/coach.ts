@@ -12,7 +12,7 @@ import { reviewContext } from "./review-context";
 import { listRecoverable } from "./recording-recovery";
 import { initial, oldResults, part3, writings, type Ledger } from "@/app/ledger";
 import { callReviewTool, reviewTools } from "./review-tools";
-import { calibrationToolNames, calibrationTools, callCalibrationTool, issueCalibrationCandidates } from "./calibration";
+import { calibrationToolNames, calibrationTools, callCalibrationTool, issueCalibrationCandidates, verdictsForCandidates } from "./calibration";
 import { claimManualReviewTask, completeReviewTask, createReviewTaskStatement, findReviewTaskByAttempt, reviewTaskDb, ReviewTaskError } from "./review-tasks";
 
 const text = (max: number, description: string) => z.string().trim().min(1).max(max).describe(description);
@@ -142,11 +142,29 @@ async function reviews(userId:string, day?:number) {
     .where(day === undefined ? eq(teacherFeedback.userId,userId)
       : and(eq(teacherFeedback.userId,userId),eq(teacherFeedback.day,day)))
     .orderBy(desc(teacherFeedback.createdAt),desc(teacherFeedback.id));
-  return rows.map(({analysisJson,...row})=>({
-    ...row,
-    ...(row.pronunciation?{evidence:row.evidence+` · 发音专项暂定 ${row.pronunciation.band.toFixed(1)}/9（本次录音）· ${row.pronunciation.observation}`}:{}),
-    ...(analysisJson?{analysis:analysisJson}:{}),
-  }));
+  // Decorating stored items with the learner's self-listen verdicts keeps the
+  // scorecard transcript colors (red=confirmed, green=rejected) alive across
+  // reloads; the verdicts live in calibration_events, never in analysisJson.
+  const candidateIds=rows.flatMap(({analysisJson})=>{
+    const items=(analysisJson as {items?:Array<{candidateId?:string}>}|null)?.items;
+    return Array.isArray(items)?items.map(item=>item?.candidateId).filter((id):id is string=>typeof id==='string'):[];
+  });
+  const verdicts=await verdictsForCandidates(reviewTaskDb(),userId,candidateIds);
+  return rows.map(({analysisJson,...row})=>{
+    const raw=analysisJson as {items?:Array<Record<string,unknown>>}|null;
+    const analysis=raw
+      ?{...raw,items:(raw.items??[]).map(item=>({
+        ...item,
+        ...(typeof item.candidateId==='string'&&verdicts[item.candidateId]&&item.isCatchTrial!==true
+          ?{priorVerdict:verdicts[item.candidateId]}:{}),
+      }))}
+      :undefined;
+    return {
+      ...row,
+      ...(row.pronunciation?{evidence:row.evidence+` · 发音专项暂定 ${row.pronunciation.band.toFixed(1)}/9（本次录音）· ${row.pronunciation.observation}`}:{}),
+      ...(analysis?{analysis}:{}),
+    };
+  });
 }
 export async function coachData(userId:string) {
   const [lessons,feedback,jobs,tasks,heartbeats] = await Promise.all([

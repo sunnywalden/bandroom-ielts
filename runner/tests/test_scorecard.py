@@ -1,4 +1,6 @@
 """Scorecard contract tests: heuristics, quote traceability, honesty invariants."""
+from typing import Any
+
 import pytest
 
 from runner import scorecard as sc
@@ -51,6 +53,16 @@ def test_fluency_long_pause_penalty_and_floor():
     card = sc.fluency_card(cal, 0)
     assert card["band"] == 3.5  # floor 4.0 - 0.5 penalty, clamped
     assert card["evidence"]["pace_wpm"] is None
+
+
+def test_fluency_refuses_to_score_without_measurable_speech():
+    # A broken instrument or a silent upload must NOT become a low band.
+    assert sc.fluency_card({}, 0)["band"] is None
+    silent = sc.fluency_card(dict(CAL, speech_duration_seconds=0.0, speech_ratio=0.0), 0)
+    assert silent["band"] is None
+    assert "不评分" in silent["disclosure_zh"]
+    card = sc.build_scorecard(calibrated={}, words=[], llm=None, candidate_count=0)
+    assert card["overall"]["band"] is None
 
 
 def test_pronunciation_never_has_a_band():
@@ -159,7 +171,7 @@ def test_transport_coercion_accepts_transcript_and_scorecard():
 def test_drill_tts_enrichment_fail_closed():
     from runner.contrast_audio import enrich_drills
 
-    drills = [{"quote": TEXT, "improved": "I watched a short clip.", "focus_zh": "练"}]
+    drills: list[dict[str, Any]] = [{"quote": TEXT, "improved": "I watched a short clip.", "focus_zh": "练"}]
     # Disabled: no network, no contrast key.
     summary = enrich_drills(drills, enabled=False)
     assert summary["attempted"] == 0
