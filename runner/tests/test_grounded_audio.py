@@ -942,8 +942,10 @@ def test_grounded_mode_processes_speak_and_reserves_cost(tmp_path, monkeypatch):
     client = FakeClient(session)
     captured = {}
 
-    def fake_review(raw, attempt, day, *, config, model, workdir, logger=None):
-        captured.update(raw=raw, attempt=attempt, day=day, config=config)
+    def fake_review(raw, attempt, day, *, config, model, workdir, logger=None,
+                    tenant_user_id=None):
+        captured.update(raw=raw, attempt=attempt, day=day, config=config,
+                        tenant_user_id=tenant_user_id)
         return Feedback(
             feedback=valid_feedback_text(),
             evidence=f"录音 {RECORDING_ID}；已校准韵律证据：停顿 1 个。",
