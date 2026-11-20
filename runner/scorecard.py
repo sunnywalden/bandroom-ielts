@@ -101,6 +101,19 @@ def transcript_text(words: Sequence[Mapping[str, Any]]) -> str:
     return " ".join(str(w.get("word") or "") for w in words).strip()
 
 
+def _clean_text(value: str, limit: int = MAX_QUOTE_CHARS) -> str:
+    """Strip control characters and collapse whitespace in LLM free text.
+
+    Defense-in-depth for the learner-draft prompt-injection surface: whatever
+    the model returns for fix/improved/reason is stored and (for improved)
+    synthesized by TTS. Length is bounded and control bytes are removed; the
+    text stays plain prose the learner reads about their own answer.
+    """
+    text = re.sub(r"[\x00-\x1f\x7f]", " ", str(value))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
+
+
 def _norm_quote(text: str) -> str:
     """Lowercase, drop punctuation (keep apostrophes), collapse whitespace.
 
@@ -254,31 +267,31 @@ def validate_issues(
     for item in raw:
         if not isinstance(item, Mapping):
             continue
-        quote = str(item.get("quote") or "").strip()
-        if not quote or len(quote) > MAX_QUOTE_CHARS:
+        quote = _clean_text(item.get("quote") or "")
+        if not quote:
             continue
         if not _quote_in_transcript(quote, text):
             continue
         if kind == "grammar":
-            fix = str(item.get("fix") or "").strip()
-            reason = str(item.get("reason_zh") or "").strip()
-            if not fix or len(fix) > MAX_QUOTE_CHARS:
+            fix = _clean_text(item.get("fix") or "")
+            reason = _clean_text(item.get("reason_zh") or "")
+            if not fix:
                 continue
             severity = str(item.get("severity") or "minor")
             if severity not in {"major", "minor"}:
                 severity = "minor"
             out.append({
                 "quote": quote, "fix": fix,
-                "reason_zh": reason[:MAX_QUOTE_CHARS], "severity": severity,
+                "reason_zh": reason, "severity": severity,
             })
         else:
-            suggestion = str(item.get("suggestion") or "").strip()
-            reason = str(item.get("reason_zh") or "").strip()
-            if not suggestion or len(suggestion) > MAX_QUOTE_CHARS:
+            suggestion = _clean_text(item.get("suggestion") or "")
+            reason = _clean_text(item.get("reason_zh") or "")
+            if not suggestion:
                 continue
             out.append({
                 "quote": quote, "suggestion": suggestion,
-                "reason_zh": reason[:MAX_QUOTE_CHARS],
+                "reason_zh": reason,
             })
         if len(out) >= MAX_ISSUES:
             break
@@ -292,10 +305,10 @@ def validate_drills(raw: Any, text: str) -> list[dict[str, Any]]:
     for item in raw:
         if not isinstance(item, Mapping):
             continue
-        quote = str(item.get("quote") or "").strip()
-        improved = str(item.get("improved") or "").strip()
-        focus = str(item.get("focus_zh") or "").strip()
-        if not quote or not improved or len(quote) > MAX_QUOTE_CHARS or len(improved) > MAX_QUOTE_CHARS:
+        quote = _clean_text(item.get("quote") or "")
+        improved = _clean_text(item.get("improved") or "")
+        focus = _clean_text(item.get("focus_zh") or "")
+        if not quote or not improved:
             continue
         if not _quote_in_transcript(quote, text):
             continue

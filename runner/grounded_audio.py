@@ -2148,8 +2148,12 @@ def review_speaking_grounded(
 
     self_listen: list[dict[str, Any]] = []
     catch_trial: dict[str, Any] | None = None
-    transcript_words: list[dict[str, Any]] = []
     audio_sha256 = sha256_bytes(raw)
+    # Cache-only read, non-throwing, independent of self_listen_enabled: when a
+    # detector run is already cached (e.g. Stage B was on for an earlier review
+    # of the same bytes) the scorecard can still build its transcript even if
+    # candidate delivery is currently disabled.
+    transcript_words = read_detector_transcript(audio_sha256, grounded, logger=log)
     if getattr(grounded, "self_listen_enabled", False):
         self_listen = collect_self_listen_candidates(
             audio_sha256,
@@ -2163,7 +2167,9 @@ def review_speaking_grounded(
                 audio_sha256, grounded,
                 [str(item.get("word") or "") for item in self_listen],
             )
-        transcript_words = read_detector_transcript(audio_sha256, grounded, logger=log)
+        # A cache miss above is filled by collect_self_listen_candidates; read
+        # again so the first detector run also yields a transcript.
+        transcript_words = read_detector_transcript(audio_sha256, grounded, logger=log) or transcript_words
 
     # Structured tier assignment happens before the model is called.
     assignment = classify_candidates(
@@ -2216,6 +2222,7 @@ def review_speaking_grounded(
                 log.info(json.dumps({
                     "event": "scorecard_model_usage",
                     "model": getattr(config, "text_model", None),
+                    "costCny": getattr(config, "text_cost_cny", None),
                     "usage": getattr(model, "last_usage", None),
                 }, ensure_ascii=False))
             except Exception as exc:  # noqa: BLE001 - degrade, never block

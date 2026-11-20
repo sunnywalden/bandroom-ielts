@@ -216,6 +216,35 @@ def test_drill_tts_enrichment_fail_closed():
     assert drills[0]["contrast_audio"]["status"] == "unavailable"
 
 
+def test_llm_free_text_is_sanitized_and_bounded():
+    raw = [{
+        "quote": "seen a short",
+        "fix": "x\x00y\n\nz" + "z" * 500,
+        "reason_zh": "r\x07",
+        "severity": "minor",
+    }]
+    out = sc.validate_issues(raw, TEXT, kind="grammar")
+    assert len(out) == 1
+    assert "\x00" not in out[0]["fix"] and "\n" not in out[0]["fix"]
+    assert len(out[0]["fix"]) <= sc.MAX_QUOTE_CHARS
+    assert out[0]["reason_zh"] == "r"
+    drills = sc.validate_drills([{
+        "quote": TEXT, "improved": "a\x1b" + "b" * 400, "focus_zh": "f\tf",
+    }], TEXT)
+    assert "\x1b" not in drills[0]["improved"] and "\t" not in drills[0]["focus_zh"]
+    assert len(drills[0]["improved"]) <= sc.MAX_QUOTE_CHARS
+
+
+def test_oversized_analysis_is_rejected_backstop():
+    from runner.content_rules import coerce_grounded_analysis, ContentRuleError
+
+    words = [{"word": "w" * 80, "start": i * 0.1, "end": i * 0.1 + 0.05,
+              "probability": 0.9} for i in range(2000)]
+    card = sc.build_scorecard(calibrated=CAL, words=[], llm=None, candidate_count=0)
+    with pytest.raises(ContentRuleError):
+        coerce_grounded_analysis(_payload(transcript=words, scorecard=card))
+
+
 def test_transport_rejects_pronunciation_band_and_bad_shape():
     from runner.content_rules import coerce_grounded_analysis, ContentRuleError
 

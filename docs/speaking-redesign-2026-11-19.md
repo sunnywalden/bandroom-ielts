@@ -130,6 +130,21 @@ band 描述符区间；LR/GRA 由 LLM 对转写的问题计数与严重度映射
 - 评审修复（独立评审 6 项 + 自审 8 项）全部闭环：见提交 1b913d1、632b74a、46e0c06、
   77afa09、dd800aa。
 
+## 残余风险收敛（2026-11-20 第二轮）
+
+| 残余风险 | 处置 |
+|---|---|
+| learner_draft 提示词注入 → fix/improved 自由文本 | 控制字符清洗 + 长度上限（300）；quote 词边界 fail-closed；improved 仅回灌本人 TTS；无跨用户边界 |
+| Stage B 关闭时评分卡退化 | 转写读取与 self_listen 解耦（缓存命中即可用），LLM 调用仍受 scorecard_enabled/预算控制 |
+| 瞬时写冲突（真实一次 toolerror） | 已知瞬态消息（re-read session / writer contention）分类为可重试，不 block；下一次运行自愈 |
+| 错误详情泄密 | `redact_error_detail`：Bearer/API key/token/secret 等模式脱敏后再入日志与 state；长度 300 |
+| 超大分析写入 | 整体 payload 256 KiB 后挡（单项已有 64 KiB/2000 词上限） |
+| 评分卡成本未记账 | scorecard_model_usage 事件补 costCny |
+| TTS URL 过期 → 坏播放器 | 示范音频 onError 降级为"链接可能已过期"回退；T3 对比播放器原有 error 状态 |
+| 非流式重试重复扣费 | 仅在实际发起调用的路径预扣（已修）；重试即真实重调，扣费与调用对齐 |
+
+以上均有测试锁定；无新增 Worker 契约变更（运行器侧 + UI 回退）。
+
 ## 5. 不做的事
 
 - 不启用 T2 音素断言（门禁未过）。

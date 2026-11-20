@@ -248,6 +248,8 @@ _ANALYSIS_FIELDS = frozenset(
     {"detectorVersion", "inventoryVersion", "speechSeconds", "candidates",
      "transcript", "scorecard"}
 )
+# Whole-payload backstop: 2000 transcript words (~120 KiB) + a 64 KiB card.
+MAX_ANALYSIS_BYTES = 256 * 1024
 _CANDIDATE_FIELDS = frozenset(
     {"word", "expected", "actual", "atMs", "detectorConfidence", "tier", "catchTrial"}
 )
@@ -393,6 +395,13 @@ def coerce_grounded_analysis(value: Any) -> dict[str, Any] | None:
         if len(json.dumps(card, ensure_ascii=False)) > 65536:
             raise ContentRuleError("invalid_grounded_analysis", "scorecard exceeds 64 KiB")
         out["scorecard"] = dict(card)
+    # Backstop against future shape bugs: the whole analysis (transcript +
+    # card) must stay bounded even though each part is individually capped.
+    if len(json.dumps(out, ensure_ascii=False)) > MAX_ANALYSIS_BYTES:
+        raise ContentRuleError(
+            "invalid_grounded_analysis",
+            f"groundedAnalysis exceeds {MAX_ANALYSIS_BYTES} bytes",
+        )
     return out
 
 

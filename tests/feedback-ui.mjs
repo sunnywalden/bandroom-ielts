@@ -405,7 +405,8 @@ test('drill replay locates the FULL quote, not a first-word prefix',async()=>{
  const scorecard={schema:'bandroom-speaking-scorecard-v1',
   overall:{band:6,status:'reference',disclosure_zh:'参考估计',basis_zh:'流利度与连贯性参考估计均值'},
   criteria:[{key:'fluency_coherence',label_zh:'流利度与连贯性',band:6,status:'reference',disclosure_zh:'参考估计',evidence:{}}],
-  drills:[{quote:'I went there',improved:'I went there last year.',focus_zh:'过去时'}],llm_status:'ok'};
+  drills:[{quote:'I went there',improved:'I went there last year.',focus_zh:'过去时',
+    contrast_audio:{status:'ok',url:'https://tts.example/expired.mp3'}}],llm_status:'ok'};
  feedback=[{id:'fb-drill',day:12,stage:'speak',attempt:source.id,evidence:'Drill fixture',feedback:'一、评估：继续。',createdAt:'2026-11-09T01:00:00Z',
   analysis:{schema:'bandroom-grounded-analysis-v2',speechSeconds:10,items:[],transcript:words,scorecard}}];
  await mount();
@@ -414,6 +415,12 @@ test('drill replay locates the FULL quote, not a first-word prefix',async()=>{
  assert.ok(drill);
  // Clip player window: start-500ms .. end+500ms of words[4..6] = 3.5–5.8s.
  assert.match(drill.textContent,/第 3\.5–5\.8 秒/);
+ // An expired TTS link must degrade to the fallback, not a broken player.
+ const tts=drill.querySelector('audio');
+ assert.ok(tts);
+ tts.dispatchEvent(new dom.window.Event('error'));
+ await flush();
+ assert.match(drill.textContent,/示范音频暂不可用/);
 });
 
 test('a superseded word play does not show an error hint',async()=>{

@@ -166,6 +166,14 @@ function drillRange(words:TranscriptWord[],quote:string):{startMs:number;endMs:n
   return null;
 }
 
+// TTS URLs expire (the feedback row outlives the link). A failed load must
+// degrade to the timestamp-only fallback, not a broken player.
+function ModelAudio({url}:{url:string}) {
+  const [failed,setFailed]=useState(false);
+  if(failed)return <span className="af-hint">示范音频暂不可用（链接可能已过期），可先回听自己的片段。</span>;
+  return <label className="ss-tts">示范音频<audio controls preload="none" src={url} onError={()=>setFailed(true)}/></label>;
+}
+
 function Drills({drills,words,recordingId}:{drills:SpeakingDrill[];words:TranscriptWord[];recordingId?:string}) {
   if(!drills.length)return null;
   return <div className="ss-drills" aria-label="跟读练习">
@@ -179,7 +187,7 @@ function Drills({drills,words,recordingId}:{drills:SpeakingDrill[];words:Transcr
         {drill.focus_zh&&<p className="ss-reason">练点：{drill.focus_zh}</p>}
         <div className="ss-drill-players">
           {contrast?.url
-            ?<label className="ss-tts">示范音频<audio controls preload="none" src={contrast.url}/></label>
+            ?<ModelAudio url={contrast.url}/>
             :<span className="af-hint">示范音频暂不可用（fail-closed），可先回听自己的片段。</span>}
           {range&&<RecordingClipPlayer recordingId={recordingId!} startMs={range.startMs} endMs={range.endMs} label="你的片段"/>}
         </div>
