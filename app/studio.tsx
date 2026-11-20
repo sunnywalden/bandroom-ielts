@@ -116,7 +116,9 @@ export default function Studio(){
     registerExtraLessons({});setFeedback([]);setReviewLinks([]);setHistoryDay(next.day);navigate('home');setReply('');setResult(null)
     // MT-5 (G11): wipe locally cached voice clips so the previous account's
     // recordings are not left readable on a shared browser after a switch.
-    void clearLocalClips()
+    // Security review: await the wipe and retry on failure rather than
+    // fire-and-forget; a failed clear must not silently leave clips behind.
+    for(let attempt=0;attempt<3;attempt++){if(await clearLocalClips())break;}
    }
    const previous=live.current
    const differentLesson=next.day!==previous.day||next.stage!==previous.stage||

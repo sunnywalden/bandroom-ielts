@@ -328,6 +328,11 @@ def run_one(
     if isinstance(task, dict):
         task["_otherTenantsDue"] = bool((result or {}).get("otherTenantsDue", False))
         task["_lease"] = lease
+        # MT-5 (G4, security review): carry the Worker's per-tenant entitlements
+        # (source of truth = user_entitlements table) into the task so the
+        # processor's _tenant_entitlements reads the server decision, not just the
+        # runner's owner-config fallback. Absent map → processor fails closed.
+        task["entitlements"] = (result or {}).get("entitlements")
     if budget.paused(user_id):
         # Defer to the next UTC budget reset so a capped tenant's task is not
         # re-claimed (and attempt-burned) every run while the cap holds.

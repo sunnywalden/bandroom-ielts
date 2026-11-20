@@ -222,3 +222,25 @@ def test_partial_refund_shrinks_pending_so_failure_refund_is_exact(tmp_path):
     assert abs(b.spent("a") - 0.12) < 1e-9
     assert b.refund_task("t1") == 120_000
     assert b.spent("a") == 0.0
+
+
+def test_run_one_carries_claim_entitlements_to_process(tmp_path):
+    """MT-5 (G4, security review): the Worker's per-tenant entitlements from the
+    claim response must reach the processor (source of truth), not be dropped."""
+    budget = tq.UserBudget(tmp_path / "b.json", per_user_cap_cny=5.0)
+    seen = {}
+
+    def proc(task):
+        seen["entitlements"] = task.get("entitlements")
+        return True
+
+    ent = {"detector_self_listen": True, "contrast_tts": False}
+    client = FakeClient({"task": {"id": "t1", "userId": "u1", "fence": 1}, "entitlements": ent})
+    assert tq.run_one(client, proc, budget) == "processed"
+    assert seen["entitlements"] == ent
+
+    # Absent entitlements map → None (processor fails closed for non-owner).
+    seen.clear()
+    client2 = FakeClient({"task": {"id": "t2", "userId": "u2", "fence": 1}})
+    assert tq.run_one(client2, proc, budget) == "processed"
+    assert seen["entitlements"] is None

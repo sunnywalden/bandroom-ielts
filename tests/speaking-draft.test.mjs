@@ -81,7 +81,18 @@ test('clearLocalClips wipes the local clip store on account switch (G11)',async 
   Object.defineProperty(globalThis,'indexedDB',{configurable:true,value:idb});
   t.after(()=>delete globalThis.indexedDB);
   assert.equal(map.size,2);
-  await clearLocalClips();
+  const ok=await clearLocalClips();
+  assert.equal(ok,true); // only a committed clear reports success
   assert.equal(cleared,true);
   assert.equal(map.size,0);
+});
+
+test('clearLocalClips reports failure when the clear transaction aborts (G11)',async t=>{
+  const idb={open(){const open={result:{close(){},transaction(){const tx={objectStore(){return {
+    clear(){const r={};queueMicrotask(()=>{tx.onabort?.()});return r},
+  }}};return tx}}};queueMicrotask(()=>open.onsuccess());return open}};
+  Object.defineProperty(globalThis,'indexedDB',{configurable:true,value:idb});
+  t.after(()=>delete globalThis.indexedDB);
+  const ok=await clearLocalClips();
+  assert.equal(ok,false); // aborted clear must NOT report success
 });

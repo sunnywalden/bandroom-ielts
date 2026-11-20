@@ -35,13 +35,17 @@ function ownerUserId(): string | undefined {
  */
 export async function hasEntitlement(db: EntitlementDb, userId: string, feature: Feature): Promise<boolean> {
   if (!userId) return false;
-  const owner = ownerUserId();
-  if (owner && userId === owner) return true;
   const row = await db.select({ revokedAt: userEntitlements.revokedAt })
     .from(userEntitlements)
     .where(and(eq(userEntitlements.userId, userId), eq(userEntitlements.feature, feature)))
     .get();
-  return Boolean(row && row.revokedAt === null);
+  // Security review: an explicit revocation overrides even the owner default.
+  // A revoked row means OFF for everyone; an unrevoked row means ON.
+  if (row) return row.revokedAt === null;
+  // No row: the deployment owner is entitled by the single-owner posture;
+  // every other tenant is default-deny until an explicit grant.
+  const owner = ownerUserId();
+  return Boolean(owner && userId === owner);
 }
 
 export async function grantEntitlement(

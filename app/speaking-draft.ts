@@ -67,24 +67,28 @@ export function discardIfMatch(id:string){return (current:RecordingDraft|undefin
 // readable by the next account. Legacy clips were stored under bare UUIDs with
 // no account scope; wiping the store on account change is the safe remediation.
 // New draft keys are already account-scoped via draftKey().
-export function clearLocalClips():Promise<void> {
+export function clearLocalClips():Promise<boolean> {
   return new Promise((resolve)=>{
     let settled=false,db:IDBDatabase|undefined;
-    const finish=()=>{if(settled)return;settled=true;clearTimeout(timer);db?.close();resolve();};
-    const timer=setTimeout(finish,2500);
+    // Security review: only a committed clear transaction counts as success.
+    // Timeout/error resolves false so the caller can retry or flag the switch
+    // rather than silently leaving the previous account's clips behind.
+    const finish=(ok:boolean)=>{if(settled)return;settled=true;clearTimeout(timer);db?.close();resolve(ok);};
+    const timer=setTimeout(()=>finish(false),2500);
     try {
       const open=indexedDB.open('ielts-speaking-audio',1);
       open.onupgradeneeded=()=>open.result.createObjectStore('clips');
-      open.onerror=finish;open.onblocked=finish;
+      open.onerror=()=>finish(false);open.onblocked=()=>finish(false);
       open.onsuccess=()=>{
         db=open.result;if(settled){db.close();return;}
         try {
           const tx=db.transaction('clips','readwrite');
           tx.objectStore('clips').clear();
-          tx.oncomplete=finish;tx.onabort=tx.onerror=finish;
-        }catch{finish();}
+          tx.oncomplete=()=>finish(true);
+          tx.onabort=tx.onerror=()=>finish(false);
+        }catch{finish(false);}
       };
-    }catch{finish();}
+    }catch{finish(false);}
   });
 }
 

@@ -46,6 +46,18 @@ test("owner is entitled by deployment posture", async () => {
   assert.equal(await ent.hasEntitlement(db, "owner-1", "contrast_tts"), true);
 });
 
+test("explicit revocation overrides even the owner default (security review)", async () => {
+  // Owner has no row → entitled by posture.
+  assert.equal(await ent.hasEntitlement(db, "owner-1", "contrast_tts"), true);
+  // Grant then revoke the owner: the revocation row must win over the default.
+  await ent.grantEntitlement(db, "owner-1", "contrast_tts", "admin-1");
+  await ent.revokeEntitlement(db, "owner-1", "contrast_tts");
+  assert.equal(await ent.hasEntitlement(db, "owner-1", "contrast_tts"), false);
+  // Re-grant restores.
+  await ent.grantEntitlement(db, "owner-1", "contrast_tts", "admin-1");
+  assert.equal(await ent.hasEntitlement(db, "owner-1", "contrast_tts"), true);
+});
+
 test("grant enables; revoke disables; re-grant re-enables", async () => {
   assert.deepEqual(await ent.grantEntitlement(db, "learner-b", "detector_self_listen", "admin-1"), { granted: true });
   assert.equal(await ent.hasEntitlement(db, "learner-b", "detector_self_listen"), true);
