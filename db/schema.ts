@@ -200,6 +200,40 @@ export const calibrationCandidates = sqliteTable("calibration_candidates", {
   index("calibration_candidates_user_attempt").on(table.userId, table.attemptId),
 ]);
 
+// Multi-tenant identity registry (rev2 §2.1). Authoritative identity is the
+// IdP (iss, sub) pair; email is a mutable verified attribute. Deleted tenants
+// keep a permanent `revoked` tombstone so a re-login cannot mint a new tenant.
+// userId is an opaque UUID; it is the tenant key used by every learner table.
+export const users = sqliteTable("users", {
+  userId: text("user_id").primaryKey(),
+  idpIss: text("idp_iss").notNull(),
+  idpSub: text("idp_sub").notNull(),
+  emailNormalized: text("email_normalized").notNull(),
+  displayName: text("display_name"),
+  role: text("role").notNull().default("learner"), // 'learner' | 'admin'
+  status: text("status").notNull().default("pending"), // pending|active|suspended|revoked
+  consentVersion: text("consent_version"),
+  consentAt: integer("consent_at"),
+  revokedAt: integer("revoked_at"),
+  revocationEpoch: integer("revocation_epoch").notNull().default(0),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, table => [
+  uniqueIndex("users_idp_sub").on(table.idpIss, table.idpSub),
+  uniqueIndex("users_email").on(table.emailNormalized),
+  index("users_status").on(table.status),
+]);
+
+// Per-tenant cost ledger (rev2 §2.4). Integer micro-CNY avoids float drift.
+// Rows are pre-created on first reservation; `paused` is per tenant, never global.
+export const userCostLedger = sqliteTable("user_cost_ledger", {
+  userId: text("user_id").notNull(),
+  utcDay: text("utc_day").notNull(),
+  spentMicroCny: integer("spent_micro_cny").notNull().default(0),
+  paused: integer("paused", { mode: "boolean" }).notNull().default(false),
+  updatedAt: integer("updated_at").notNull(),
+}, table => [primaryKey({ columns: [table.userId, table.utcDay] })]);
+
 // Append-only verdict log. expected/actual are denormalised from the immutable
 // candidate so the (user_id, expected, actual) index can serve profile
 // recomputation without a join. The unique key is the idempotency contract:
