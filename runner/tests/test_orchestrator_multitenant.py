@@ -139,7 +139,7 @@ def _fake_grounded(monkeypatch, *, analysis=None):
     }
 
     def fake_review(raw, attempt, day, *, config, model, workdir, logger=None,
-                    tenant_user_id=None):
+                    tenant_user_id=None, reserve_scorecard=None):
         fake_review.tenant = tenant_user_id
         return Feedback(
             feedback=valid_feedback_text(),

@@ -187,6 +187,40 @@ assert.equal(legacyStored.items.length,2);check();
 assert.ok(legacyStored.items.every(i=>i.candidateId&&i.tier==='T3'));check();
 const legacySession=unpack(await call('read_study_session',{day:12,attemptId:legacySpeak.id}));
 assert.ok(legacySession.feedback[0].analysis,'UI receives candidateIds for v1 attempts too');check();
+// Scorecard v2 transport (speaking redesign): transcript + scorecard persist
+// through the real Zod schema and read path; the server rejects a scorecard
+// that scores pronunciation while the assertion gates are unmet.
+const v2Key='11111111-1111-4111-8111-111111111115',v2TaskId='v2:'+v2Key;
+const v2Snapshot={sourceId:revisionAttempt.id,attempt:{...revisionAttempt,id:v2TaskId,stage:'speak',recordingId:speakRecording,response:'Spoken fixture response'},context:{prompt:'Spoken prompt'}};
+db.prepare('INSERT INTO review_jobs VALUES (?,?,?,?,?,?,?,?)').run(v2TaskId,user.userId,12,v2Key,'e'.repeat(64),21,JSON.stringify(v2Snapshot),'2026-11-09T01:00:00Z');
+db.prepare(`INSERT INTO review_tasks(id,review_job_id,user_id,kind,attempt_id,day,attempt_revision,stage,state,fence,attempts,next_at,created_at,updated_at,recording_id)
+ VALUES (?,?,?,?,?,?,?,'speak','queued',0,0,?,?,?,?)`).run('scorecard-task',v2TaskId,user.userId,'speaking',v2TaskId,12,21,Date.now(),Date.now(),Date.now(),speakRecording);
+const transcript=[{word:'they',start:5.2,end:5.4,probability:.91},{word:'have',start:54.7,end:55.0,probability:.8}];
+const scorecard={schema:'bandroom-speaking-scorecard-v1',
+ overall:{band:6,status:'reference',disclosure_zh:'参考估计：非官方雅思评分。',basis_zh:'四科参考估计均值'},
+ criteria:[
+  {key:'fluency_coherence',label_zh:'流利度与连贯性',band:6.5,status:'reference',disclosure_zh:'参考估计',evidence:{speech_ratio:.57}},
+  {key:'grammar',label_zh:'语法',band:6,status:'reference',disclosure_zh:'参考估计',evidence:{issues:[]}},
+  {key:'pronunciation',label_zh:'发音',band:null,status:'suggestive',disclosure_zh:'建议性，不评分',evidence:{}}],
+ drills:[{quote:'they have',improved:'They have got it.',focus_zh:'连读'}],llm_status:'ok'};
+const v2Saved=unpack(await call('add_coach_feedback',{...speakFeedback,attempt:v2TaskId,
+  groundedAnalysis:{...groundedAnalysis,transcript,scorecard}}));
+assert.ok(v2Saved.receiptId,'scorecard v2 save returns a receipt');check();
+const v2Stored=JSON.parse(db.prepare('SELECT analysis_json AS a FROM teacher_feedback WHERE review_task_id=?').get('scorecard-task').a);
+assert.equal(v2Stored.schema,'bandroom-grounded-analysis-v2');check();
+assert.equal(v2Stored.transcript.length,2,'transcript persisted for the interactive UI');check();
+assert.equal(v2Stored.scorecard.schema,'bandroom-speaking-scorecard-v1');check();
+const scoredPronunciation={...scorecard,criteria:scorecard.criteria.map(c=>c.key==='pronunciation'?{...c,band:6}:c)};
+const rejectedScorecard=await call('add_coach_feedback',{...speakFeedback,attempt:v2TaskId,
+  groundedAnalysis:{...groundedAnalysis,scorecard:scoredPronunciation}});
+assert.equal(rejectedScorecard.isError,true,'a pronunciation band is rejected while gates are unmet');check();
+// The learner answers the self-listen card; the coach read path must decorate
+// the stored items with the verdict so transcript colors survive a reload.
+const scorecardCandidate=v2Stored.items[0].candidateId;
+const verdictSaved=unpack(await call('record_pronunciation_verdict',{candidateId:scorecardCandidate,verdict:'confirmed'}));
+assert.equal(verdictSaved.saved,true);check();
+const decorated=(await(await http.GET()).json()).feedback.find(row=>row.attempt===v2TaskId);
+assert.equal(decorated.analysis.items[0].priorVerdict,'confirmed','reads() decorates items with recorded verdicts');check();
 const heartbeat=(status,startedAt,lastSuccessAt,nextExpectedAt)=>db.prepare(`INSERT OR REPLACE INTO automation_heartbeats
  (user_id,automation_id,generation,client_run_id,started_at,finished_at,last_success_at,next_expected_at,status,detail)
  VALUES (?,?,?,?,?,?,?,?,?,?)`).run(user.userId,'Automation_fixture',1,'run-heartbeat',startedAt,null,lastSuccessAt,nextExpectedAt,status,null);
@@ -205,5 +239,5 @@ globalThis.user=null;
 assert.equal((await http.GET()).status,401);assert.equal((await rpc('add_coach_feedback',feedback)).status,401);check();
 const unchanged=db.prepare('SELECT revision,state FROM learner_states WHERE user_id=?').get('feedback-fixture');
 assert.equal(unchanged.revision,21);assert.equal(unchanged.state,snapshot);
-assert.equal(db.prepare('SELECT COUNT(*) n FROM teacher_feedback').get().n,5);check();
+assert.equal(db.prepare('SELECT COUNT(*) n FROM teacher_feedback').get().n,6,'one extra row: scorecard v2 save');check();
 console.log(JSON.stringify({suite:'feedback-api',checks:assertions,passed:true,learnerStateUnchanged:true}));

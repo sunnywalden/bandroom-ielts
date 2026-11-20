@@ -53,7 +53,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .audio import AudioError, sha256_bytes
 from .content_rules import ContentRuleError, load_prompt
-from .contrast_audio import enrich_candidates
+from .contrast_audio import enrich_candidates, enrich_drills
 from .models import Feedback, ModelError
 from .pause_calibration import (
     DEFAULT_MULTIPLIER,
@@ -264,8 +264,12 @@ class GroundedConfig:
     contrast_audio_timeout_seconds: float = 60.0
     pause_calibration_default_multiplier: float = DEFAULT_MULTIPLIER
     # Pause measurement mode. "waveform_only" (per-user calibrated) or "vad"
-    # (Silero, degradation-robust; fixed validated thresholds, disclosed).
+    # (Silero; consistency_checked after the 2026-11-19 non-vacuous retest).
     pause_mode: str = "waveform_only"
+    # Score-first speaking feedback (docs/speaking-redesign-2026-11-19.md).
+    # One extra text call per review for structured grammar/lexical/drill
+    # analysis; budget-reserved by the orchestrator, non-fatal on failure.
+    scorecard_enabled: bool = True
     detector_cache_dir: Path = field(
         default_factory=lambda: _home_path("~/.bandroom-runner/acoustic-cache")
     )
@@ -354,6 +358,8 @@ class GroundedConfig:
             values["pause_mode"] = mode
         if "ffmpeg" in raw and raw["ffmpeg"] is not None:
             values["ffmpeg"] = str(raw["ffmpeg"])
+        if "scorecard_enabled" in raw:
+            values["scorecard_enabled"] = bool(raw["scorecard_enabled"])
         return cls(**values)
 
 
@@ -1570,6 +1576,43 @@ def _write_cache(path: Path, payload: Mapping[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def read_detector_transcript(
+    audio_sha256: str,
+    grounded: GroundedConfig,
+    *,
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
+    """Read the Whisper word timings from the Stage B cache; ``[]`` if absent.
+
+    The detector payload already carries ``words`` (word/start/end/probability)
+    but historically only substitution predictions were surfaced. The speaking
+    redesign (docs/speaking-redesign-2026-11-19.md) needs the transcript for the
+    interactive word-level UI and the LR/GRA scorecard. Non-throwing like the
+    rest of Stage B: a missing cache degrades the scorecard to fluency-only.
+    """
+    log = logger or LOG
+    try:
+        path = detector_cache_path(audio_sha256, grounded.detector_cache_dir)
+        if not path.exists():
+            return []
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, Mapping):
+            return []
+        if str(payload.get("sourceSha256") or "") != audio_sha256:
+            return []
+        from .scorecard import normalize_transcript
+
+        return normalize_transcript(payload.get("words") or [])
+    except Exception as exc:  # noqa: BLE001 - Stage B is optional, never fatal
+        log.info(
+            json.dumps(
+                {"event": "transcript_unavailable", "detail": str(exc)[-300:]},
+                ensure_ascii=False,
+            )
+        )
+        return []
+
+
 def collect_self_listen_candidates(
     audio_sha256: str,
     source_path: str | Path,
@@ -1822,6 +1865,8 @@ def build_grounded_analysis(
     *,
     max_candidates: int = MAX_CALIBRATION_CANDIDATES,
     catch_trial: Mapping[str, Any] | None = None,
+    transcript: Sequence[Mapping[str, Any]] | None = None,
+    scorecard: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Build the server-side calibration payload from raw detector candidates.
 
@@ -1883,14 +1928,24 @@ def build_grounded_analysis(
     control = _catch_trial_item(catch_trial)
     if control is not None:
         items.append(control)
-    if not items:
+    words = list(transcript or [])
+    card = dict(scorecard) if scorecard is not None else None
+    # The transcript/scorecard transport is independent of calibration
+    # candidates: a review with no detector candidates still carries the
+    # interactive transcript and the score-first feedback.
+    if not items and not words and card is None:
         return None
-    return {
+    payload: dict[str, Any] = {
         "detectorVersion": DETECTOR_RECOGNIZER,
         "inventoryVersion": CALIBRATION_INVENTORY_VERSION,
         "speechSeconds": round(speech, 4),
         "candidates": items,
     }
+    if words:
+        payload["transcript"] = words
+    if card is not None:
+        payload["scorecard"] = card
+    return payload
 
 
 def build_queue_grounded_wire(
@@ -2083,6 +2138,7 @@ def review_speaking_grounded(
     logger: logging.Logger | None = None,
     pause_calibration: PauseCalibrationState | None = None,
     tenant_user_id: str | None = None,
+    reserve_scorecard: Callable[[], bool] | None = None,
 ) -> Feedback:
     """Produce a validated grounded speaking review.
 
@@ -2137,8 +2193,13 @@ def review_speaking_grounded(
 
     self_listen: list[dict[str, Any]] = []
     catch_trial: dict[str, Any] | None = None
+    audio_sha256 = sha256_bytes(raw)
+    # Cache-only read, non-throwing, independent of self_listen_enabled: when a
+    # detector run is already cached (e.g. Stage B was on for an earlier review
+    # of the same bytes) the scorecard can still build its transcript even if
+    # candidate delivery is currently disabled.
+    transcript_words = read_detector_transcript(audio_sha256, grounded, logger=log)
     if getattr(grounded, "self_listen_enabled", False):
-        audio_sha256 = sha256_bytes(raw)
         self_listen = collect_self_listen_candidates(
             audio_sha256,
             source,
@@ -2151,6 +2212,9 @@ def review_speaking_grounded(
                 audio_sha256, grounded,
                 [str(item.get("word") or "") for item in self_listen],
             )
+        # A cache miss above is filled by collect_self_listen_candidates; read
+        # again so the first detector run also yields a transcript.
+        transcript_words = read_detector_transcript(audio_sha256, grounded, logger=log) or transcript_words
 
     # Structured tier assignment happens before the model is called.
     assignment = classify_candidates(
@@ -2172,6 +2236,65 @@ def review_speaking_grounded(
         api_key=str(getattr(config, "api_key", "") or ""),
         limit=int(getattr(grounded, "self_listen_max_n", DEFAULT_SELF_LISTEN_MAX_N)),
     )
+
+    # Score-first feedback (speaking redesign): structured scorecard over the
+    # calibrated prosody + Whisper transcript. Separate text call from the
+    # prose coach (whose prompt forbids JSON and scores); non-fatal — any
+    # failure degrades to a fluency-only card, never blocks the review.
+    scorecard_doc: dict[str, Any] | None = None
+    if getattr(grounded, "scorecard_enabled", True):
+        from . import scorecard as scorecard_module
+
+        llm_analysis: Mapping[str, Any] | None = None
+        complete_scorecard = getattr(model, "complete_scorecard", None)
+        # Reserve ONLY when a call will actually be made: reserving on every
+        # grounded review (even with no transcript/detector) overstates spend
+        # in the daily ledger and can pause the runner early.
+        call_possible = bool(transcript_words) and callable(complete_scorecard)
+        budget_ok = (reserve_scorecard() if callable(reserve_scorecard) else True) if call_possible else False
+        if transcript_words and budget_ok and callable(complete_scorecard):
+            sc_system, sc_user = scorecard_module.build_scorecard_prompt(
+                transcript_words,
+                analysis.get("calibrated") or {},
+                learner_draft=str(attempt.get("response") or ""),
+            )
+            try:
+                raw_scorecard = complete_scorecard(
+                    sc_system, sc_user,
+                    timeout=float(getattr(config, "grounded_text_timeout", GROUNDED_TEXT_TIMEOUT_SECONDS)),
+                )
+                llm_analysis = scorecard_module.parse_scorecard_llm(str(raw_scorecard or ""))
+                log.info(json.dumps({
+                    "event": "scorecard_model_usage",
+                    "model": getattr(config, "text_model", None),
+                    "costCny": getattr(config, "text_cost_cny", None),
+                    "usage": getattr(model, "last_usage", None),
+                }, ensure_ascii=False))
+            except Exception as exc:  # noqa: BLE001 - degrade, never block
+                log.info(json.dumps({
+                    "event": "scorecard_llm_unavailable",
+                    "detail": str(exc)[-300:],
+                }, ensure_ascii=False))
+        elif transcript_words and not budget_ok:
+            log.info(json.dumps({"event": "scorecard_skipped", "reason": "budget_paused"}))
+        card = scorecard_module.build_scorecard(
+            calibrated=analysis.get("calibrated") or {},
+            words=transcript_words,
+            llm=llm_analysis,
+            candidate_count=len(t3_documents),
+        )
+        scorecard_doc = card
+        # Speak-style say-it-better loop: canonical model audio for each drill
+        # sentence. Fail-closed — unavailable TTS never blocks the review.
+        if contrast_enabled and card.get("drills"):
+            drill_summary = enrich_drills(
+                card["drills"],
+                enabled=True,
+                transport=getattr(config, "contrast_transport", None),
+                api_key=str(getattr(config, "api_key", "") or ""),
+                limit=int(getattr(grounded, "self_listen_max_n", DEFAULT_SELF_LISTEN_MAX_N)),
+            )
+            log.info(json.dumps({"event": "drill_contrast_summary", **drill_summary}, ensure_ascii=False))
 
     system, user = build_prompt(
         attempt,
@@ -2222,7 +2345,9 @@ def review_speaking_grounded(
 
     try:
         old_analysis = build_grounded_analysis(
-            self_listen, assignment, analysis, catch_trial=catch_trial
+            self_listen, assignment, analysis, catch_trial=catch_trial,
+            transcript=transcript_words or None,
+            scorecard=scorecard_doc,
         )
         return Feedback(
             feedback=text,

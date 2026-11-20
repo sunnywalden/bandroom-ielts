@@ -12,7 +12,7 @@ import { reviewContext } from "./review-context";
 import { listRecoverable } from "./recording-recovery";
 import { initial, oldResults, part3, writings, type Ledger } from "@/app/ledger";
 import { callReviewTool, reviewTools } from "./review-tools";
-import { calibrationToolNames, calibrationTools, callCalibrationTool, issueCalibrationCandidates } from "./calibration";
+import { calibrationToolNames, calibrationTools, callCalibrationTool, issueCalibrationCandidates, verdictsForCandidates } from "./calibration";
 import { claimManualReviewTask, completeReviewTask, createReviewTaskStatement, findReviewTaskByAttempt, reviewTaskDb, ReviewTaskError } from "./review-tasks";
 
 const text = (max: number, description: string) => z.string().trim().min(1).max(max).describe(description);
@@ -91,6 +91,25 @@ const feedbackSpec = z.strictObject({
       tier:z.enum(["T2","T3"]).describe("T2 is history-conditioned SUGGESTION, not assertion; T2 promotion is RETIRED (structurally unreachable, owner 2026-11-19), so items render as T3."),
       catchTrial:z.boolean().optional().describe("Control item; stored as expected===actual and excluded from profile counts."),
     })).max(24).describe("Bounded to keep the payload and the issuance transaction small."),
+    // Speaking redesign (docs/speaking-redesign-2026-11-19.md): ELSA-style
+    // score-first feedback. The transcript is ASR (status=asr), never verified
+    // ground truth; the scorecard carries mandatory evidence statuses and a
+    // NULL pronunciation band while phoneme assertion gates are unmet.
+    transcript:z.array(z.strictObject({
+      word:text(80,"One ASR transcript word."),
+      start:z.number().min(0).max(10800),end:z.number().min(0).max(10800),
+      probability:z.number().min(0).max(1),
+    })).max(2000).optional().describe("Whisper word timings for click-to-relisten; ASR, not verified text."),
+    scorecard:z.object({
+      schema:z.literal("bandroom-speaking-scorecard-v1"),
+      overall:z.object({band:z.number().min(0).max(9).multipleOf(.5).nullable(),status:z.string(),disclosure_zh:z.string(),basis_zh:z.string()}).passthrough(),
+      criteria:z.array(z.object({key:z.string(),label_zh:z.string(),band:z.number().min(0).max(9).nullable(),status:z.string(),disclosure_zh:z.string()}).passthrough()).min(1).max(6),
+      drills:z.array(z.object({quote:z.string(),improved:z.string(),focus_zh:z.string()}).passthrough()).max(3).optional(),
+      llm_status:z.string().optional(),
+    }).passthrough().refine(
+      card=>!card.criteria.some(c=>c.key==="pronunciation"&&c.band!=null),
+      "Pronunciation band is forbidden while phoneme assertion gates are unmet.",
+    ).optional().describe("Score-first feedback; every band is a disclosed reference estimate, pronunciation never scored."),
   }).optional().describe("Grounded speaking evidence only. Requires stage=speak and recordingId. Omit for text reviews."),
 });
 const publishSpec = z.strictObject({ day: z.number().int().min(17).max(62), lesson: lessonSpec });
@@ -123,11 +142,33 @@ async function reviews(userId:string, day?:number) {
     .where(day === undefined ? eq(teacherFeedback.userId,userId)
       : and(eq(teacherFeedback.userId,userId),eq(teacherFeedback.day,day)))
     .orderBy(desc(teacherFeedback.createdAt),desc(teacherFeedback.id));
-  return rows.map(({analysisJson,...row})=>({
-    ...row,
-    ...(row.pronunciation?{evidence:row.evidence+` · 发音专项暂定 ${row.pronunciation.band.toFixed(1)}/9（本次录音）· ${row.pronunciation.observation}`}:{}),
-    ...(analysisJson?{analysis:analysisJson}:{}),
-  }));
+  // Decorating stored items with the learner's self-listen verdicts keeps the
+  // scorecard transcript colors (red=confirmed, green=rejected) alive across
+  // reloads; the verdicts live in calibration_events, never in analysisJson.
+  const candidateIds=rows.flatMap(({analysisJson})=>{
+    const items=(analysisJson as {items?:Array<{candidateId?:string}>}|null)?.items;
+    return Array.isArray(items)?items.map(item=>item?.candidateId).filter((id):id is string=>typeof id==='string'):[];
+  });
+  const verdicts=await verdictsForCandidates(reviewTaskDb(),userId,candidateIds);
+  return rows.map(({analysisJson,...row})=>{
+    const raw=analysisJson as {items?:Array<Record<string,unknown>>}|null;
+    // Only touch analyses that actually carry candidate items; legacy shapes
+    // (errors/coverage) must pass through untouched.
+    const analysis=raw
+      ?(Array.isArray(raw.items)
+        ?{...raw,items:raw.items.map(item=>({
+          ...item,
+          ...(typeof item.candidateId==='string'&&verdicts[item.candidateId]&&item.isCatchTrial!==true
+            ?{priorVerdict:verdicts[item.candidateId]}:{}),
+        }))}
+        :raw)
+      :undefined;
+    return {
+      ...row,
+      ...(row.pronunciation?{evidence:row.evidence+` · 发音专项暂定 ${row.pronunciation.band.toFixed(1)}/9（本次录音）· ${row.pronunciation.observation}`}:{}),
+      ...(analysis?{analysis}:{}),
+    };
+  });
 }
 export async function coachData(userId:string) {
   const [lessons,feedback,jobs,tasks,heartbeats] = await Promise.all([
@@ -320,10 +361,12 @@ export async function callCoach(userId:string, name:string, args:unknown) {
             })),
           });
           storedAnalysis={
-            schema:"bandroom-grounded-analysis-v1",
+            schema:groundedAnalysis.transcript||groundedAnalysis.scorecard?"bandroom-grounded-analysis-v2":"bandroom-grounded-analysis-v1",
             detectorVersion:groundedAnalysis.detectorVersion,
             inventoryVersion:groundedAnalysis.inventoryVersion,
             speechSeconds:groundedAnalysis.speechSeconds,
+            ...(groundedAnalysis.transcript?{transcript:groundedAnalysis.transcript}:{}),
+            ...(groundedAnalysis.scorecard?{scorecard:groundedAnalysis.scorecard}:{}),
             // T2 stays a history-conditioned SUGGESTION; promotion is RETIRED
             // (structurally unreachable, owner 2026-11-19), so every issued item
             // is rendered as T3. The V3 gates remain as versioned tooling only.

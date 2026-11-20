@@ -245,8 +245,11 @@ def validate_feedback(
 
 MAX_ANALYSIS_CANDIDATES = 24
 _ANALYSIS_FIELDS = frozenset(
-    {"detectorVersion", "inventoryVersion", "speechSeconds", "candidates"}
+    {"detectorVersion", "inventoryVersion", "speechSeconds", "candidates",
+     "transcript", "scorecard"}
 )
+# Whole-payload backstop: 2000 transcript words (~120 KiB) + a 64 KiB card.
+MAX_ANALYSIS_BYTES = 256 * 1024
 _CANDIDATE_FIELDS = frozenset(
     {"word", "expected", "actual", "atMs", "detectorConfidence", "tier", "catchTrial"}
 )
@@ -333,6 +336,72 @@ def coerce_grounded_analysis(value: Any) -> dict[str, Any] | None:
             item["catchTrial"] = catch
         items.append(item)
     out["candidates"] = items
+
+    # Speaking redesign transport: Whisper transcript + score-first scorecard.
+    transcript = value.get("transcript")
+    if transcript is not None:
+        if not isinstance(transcript, (list, tuple)) or len(transcript) > 2000:
+            raise ContentRuleError("invalid_grounded_analysis", "transcript must be an array of <=2000 words")
+        words: list[dict[str, Any]] = []
+        for w in transcript:
+            if not isinstance(w, Mapping):
+                raise ContentRuleError("invalid_grounded_analysis", "transcript word must be an object")
+            word = w.get("word")
+            if not isinstance(word, str) or not word.strip() or len(word) > 80:
+                raise ContentRuleError("invalid_grounded_analysis", "transcript word invalid")
+            start, end, prob = w.get("start"), w.get("end"), w.get("probability")
+            for name, v in (("start", start), ("end", end)):
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= float(v) <= 10800:
+                    raise ContentRuleError("invalid_grounded_analysis", f"transcript {name} out of range")
+            if float(end) < float(start):
+                raise ContentRuleError("invalid_grounded_analysis", "transcript end before start")
+            if isinstance(prob, bool) or not isinstance(prob, (int, float)) or not 0 <= float(prob) <= 1:
+                raise ContentRuleError("invalid_grounded_analysis", "transcript probability out of range")
+            words.append({"word": word, "start": float(start), "end": float(end), "probability": float(prob)})
+        out["transcript"] = words
+    card = value.get("scorecard")
+    if card is not None:
+        if not isinstance(card, Mapping):
+            raise ContentRuleError("invalid_grounded_analysis", "scorecard must be an object")
+        if card.get("schema") != "bandroom-speaking-scorecard-v1":
+            raise ContentRuleError("invalid_grounded_analysis", "unknown scorecard schema")
+        overall = card.get("overall")
+        if not isinstance(overall, Mapping):
+            raise ContentRuleError("invalid_grounded_analysis", "scorecard overall must be an object")
+        if not isinstance(overall.get("status"), str) or not isinstance(overall.get("disclosure_zh"), str):
+            raise ContentRuleError("invalid_grounded_analysis", "scorecard overall needs status and disclosure_zh")
+        criteria = card.get("criteria")
+        if not isinstance(criteria, (list, tuple)) or not 1 <= len(criteria) <= 6:
+            raise ContentRuleError("invalid_grounded_analysis", "scorecard criteria must be 1-6 cards")
+        for c in criteria:
+            if not isinstance(c, Mapping) or not isinstance(c.get("key"), str):
+                raise ContentRuleError("invalid_grounded_analysis", "scorecard card needs a key")
+            # Mirror the Zod schema so a malformed card fails locally, before
+            # the paid model call's payload reaches the server.
+            for field in ("label_zh", "status", "disclosure_zh"):
+                if not isinstance(c.get(field), str) or not c.get(field).strip():
+                    raise ContentRuleError(
+                        "invalid_grounded_analysis", f"scorecard card missing {field}"
+                    )
+            band = c.get("band")
+            if band is not None:
+                if isinstance(band, bool) or not isinstance(band, (int, float)) or not 0 <= float(band) <= 9:
+                    raise ContentRuleError("invalid_grounded_analysis", "scorecard band out of range")
+            if c.get("key") == "pronunciation" and band is not None:
+                raise ContentRuleError(
+                    "invalid_grounded_analysis",
+                    "pronunciation band forbidden while assertion gates are unmet",
+                )
+        if len(json.dumps(card, ensure_ascii=False)) > 65536:
+            raise ContentRuleError("invalid_grounded_analysis", "scorecard exceeds 64 KiB")
+        out["scorecard"] = dict(card)
+    # Backstop against future shape bugs: the whole analysis (transcript +
+    # card) must stay bounded even though each part is individually capped.
+    if len(json.dumps(out, ensure_ascii=False)) > MAX_ANALYSIS_BYTES:
+        raise ContentRuleError(
+            "invalid_grounded_analysis",
+            f"groundedAnalysis exceeds {MAX_ANALYSIS_BYTES} bytes",
+        )
     return out
 
 

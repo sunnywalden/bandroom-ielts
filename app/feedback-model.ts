@@ -7,6 +7,24 @@ export type PronunciationError = {
   startMs?: number; endMs?: number; anchorMs?: number;
   probability?: number; suggestion?: string;
 };
+// Speaking redesign (docs/speaking-redesign-2026-11-19.md): score-first
+// feedback. Every band is a disclosed reference estimate; pronunciation is
+// never scored while phoneme assertion gates are unmet (band === null).
+export type TranscriptWord = {word:string;start:number;end:number;probability:number};
+export type ScorecardIssue = {quote:string;fix?:string;suggestion?:string;reason_zh?:string;severity?:'major'|'minor'};
+export type ScorecardCriterion = {
+  key:string;label_zh:string;band:number|null;status:string;disclosure_zh:string;
+  evidence?:Record<string,unknown>&{issues?:ScorecardIssue[]};
+};
+export type SpeakingDrill = {quote:string;improved:string;focus_zh:string;contrast_audio?:{url?:string;status?:string}};
+export type SpeakingScorecardData = {
+  schema:string;
+  overall:{band:number|null;status:string;disclosure_zh:string;basis_zh:string};
+  criteria:ScorecardCriterion[];
+  transcript?:{source:string;status:string;words?:TranscriptWord[]}|null;
+  drills?:SpeakingDrill[];
+  llm_status?:string;
+};
 export type CoachAnalysis = {
   analysisVersion?: string; recordingSha256?: string;
   errors?: PronunciationError[];
@@ -20,6 +38,10 @@ export type CoachAnalysis = {
   profile?: unknown;
   progress?: unknown;
   prosody?: unknown;
+  // v2 transport: ASR transcript + scorecard (validated server-side).
+  transcript?: TranscriptWord[];
+  scorecard?: SpeakingScorecardData;
+  items?: Array<{candidateId?:string;word?:string;atMs?:number;priorVerdict?:string;answeredVerdict?:string;verdict?:string;isCatchTrial?:boolean}>;
 };
 export type CoachFeedback = {id:string;day:number;stage:string;attempt:string;evidence:string;feedback:string;createdAt:string;analysis?:CoachAnalysis};
 export type ReviewAttempt = {

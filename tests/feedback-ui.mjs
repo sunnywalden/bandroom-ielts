@@ -345,6 +345,113 @@ test('hidden pronunciation hints do not mount a recording player',async()=>{
  assert.equal(puts().length,0);
 });
 
+test('score-first scorecard renders bands, honest statuses, transcript and drills',async()=>{
+ const audioId='44444444-4444-4444-8444-444444444444';
+ state.stage='speak';
+ state.entries[12]={speakingPhase:'review',speakingComplete:'yes',
+  speakingPart2:JSON.stringify([{at:'2026-11-09T01:00:00Z',text:'Fixture Part 2',spoken:true,audio:audioId}]),
+  speakingFollowup:JSON.stringify([{at:'2026-11-09T01:02:00Z',text:'Fixture follow-up',spoken:true}])};
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='speakingPart2');
+ assert.ok(source);
+ const words=[{word:"I've",start:2.8,end:4.2,probability:.62},{word:'seen',start:4.2,end:4.5,probability:.99},{word:'a',start:4.5,end:6.1,probability:.96},{word:'short',start:6.1,end:7.1,probability:.88},{word:'video',start:7.1,end:7.8,probability:.99}];
+ const scorecard={schema:'bandroom-speaking-scorecard-v1',
+  overall:{band:6.0,status:'reference',disclosure_zh:'参考估计：非官方雅思评分。',basis_zh:'四科参考估计均值'},
+  criteria:[
+   {key:'fluency_coherence',label_zh:'流利度与连贯性',band:6.5,status:'reference',disclosure_zh:'参考估计',evidence:{speech_ratio:.57,pause_count:22,pace_wpm:99,metrics_status:'calibrated'}},
+   {key:'lexical_resource',label_zh:'词汇',band:6.0,status:'reference',disclosure_zh:'参考估计',evidence:{word_count:5,issues:[]}},
+   {key:'grammar',label_zh:'语法',band:6.0,status:'reference',disclosure_zh:'参考估计',evidence:{error_count:1,issues:[{quote:"I've seen",fix:'I saw',reason_zh:'过去时',severity:'major'}]}},
+   {key:'pronunciation',label_zh:'发音',band:null,status:'suggestive',disclosure_zh:'建议性反馈，不给发音分数',evidence:{self_listen_candidates:1}}],
+  transcript:{source:'whisper-large-v3-turbo',status:'asr',words},
+  drills:[{quote:"I've seen a short video",improved:'I watched a short clip.',focus_zh:'过去时'}],
+  llm_status:'ok'};
+ feedback=[{id:'fb-scorecard',day:12,stage:'speak',attempt:source.id,evidence:'Scorecard fixture',feedback:'一、评估：整体不错。',createdAt:'2026-11-09T01:00:00Z',analysis:{schema:'bandroom-grounded-analysis-v2',speechSeconds:33.4,items:[{candidateId:'cand-seen',word:'seen',expected:'N',actual:'NG',atMs:4570,detectorConfidence:.94,tier:'T3'}],transcript:words,scorecard}}];
+ await mount();
+ const section=document.querySelector('[aria-label="口语 Part 2 · 首次回答反馈"]');
+ assert.ok(section);
+ const card=section.querySelector('.ss-card');
+ assert.ok(card);
+ assert.match(card.textContent,/参考估计/);
+ assert.match(card.textContent,/不评分/);
+ assert.match(card.textContent,/I saw/);
+ assert.match(card.textContent,/I watched a short clip\./);
+ const wordButtons=card.querySelectorAll('.ss-word');
+ assert.equal(wordButtons.length,5);
+ assert.ok(card.querySelector('.ss-w-suggested'));
+ assert.ok(card.querySelector('audio'));
+ await act(async()=>{wordButtons[1].click();});
+ assert.ok(card.querySelector('.ss-w-active'));
+ // Self-listen verdict updates the transcript color in-session (red=confirmed).
+ assert.ok(card.querySelector('.ss-w-suggested'));
+ await act(async()=>{await button('确实读错').click();await flush();});
+ assert.ok(card.querySelector('.ss-w-confirmed'),'transcript turns red after 确实读错');
+ assert.ok(!card.querySelector('.ss-w-suggested'),'amber suggestion is replaced by the verdict');
+ assert.equal(mcpCalls.at(-1).params.name,'record_pronunciation_verdict');
+ assert.equal(puts().length,0);
+});
+
+test('drill replay locates the FULL quote, not a first-word prefix',async()=>{
+ const audioId='55555555-5555-4555-8555-555555555555';
+ state.stage='speak';
+ state.entries[12]={speakingPhase:'review',speakingComplete:'yes',
+  speakingPart2:JSON.stringify([{at:'2026-11-09T01:00:00Z',text:'Fixture Part 2',spoken:true,audio:audioId}]),
+  speakingFollowup:JSON.stringify([{at:'2026-11-09T01:02:00Z',text:'Fixture follow-up',spoken:true}])};
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='speakingPart2');
+ assert.ok(source);
+ // "is" appears before "I went": a prefix match would play the wrong segment.
+ const words=[{word:'is',start:.5,end:.8,probability:.9},{word:'a',start:.9,end:1.1,probability:.9},
+  {word:'short',start:1.2,end:1.6,probability:.9},{word:'video',start:1.7,end:2.1,probability:.9},
+  {word:'I',start:4.0,end:4.2,probability:.9},{word:'went',start:4.3,end:4.8,probability:.9},
+  {word:'there',start:4.9,end:5.3,probability:.9},{word:'last',start:5.4,end:5.7,probability:.9}];
+ const scorecard={schema:'bandroom-speaking-scorecard-v1',
+  overall:{band:6,status:'reference',disclosure_zh:'参考估计',basis_zh:'流利度与连贯性参考估计均值'},
+  criteria:[{key:'fluency_coherence',label_zh:'流利度与连贯性',band:6,status:'reference',disclosure_zh:'参考估计',evidence:{}}],
+  drills:[{quote:'I went there',improved:'I went there last year.',focus_zh:'过去时',
+    contrast_audio:{status:'ok',url:'https://tts.example/expired.mp3'}}],llm_status:'ok'};
+ feedback=[{id:'fb-drill',day:12,stage:'speak',attempt:source.id,evidence:'Drill fixture',feedback:'一、评估：继续。',createdAt:'2026-11-09T01:00:00Z',
+  analysis:{schema:'bandroom-grounded-analysis-v2',speechSeconds:10,items:[],transcript:words,scorecard}}];
+ await mount();
+ const section=document.querySelector('[aria-label="口语 Part 2 · 首次回答反馈"]');
+ const drill=section.querySelector('.ss-drill');
+ assert.ok(drill);
+ // Clip player window: start-500ms .. end+500ms of words[4..6] = 3.5–5.8s.
+ assert.match(drill.textContent,/第 3\.5–5\.8 秒/);
+ // An expired TTS link must degrade to the fallback, not a broken player.
+ const tts=drill.querySelector('audio');
+ assert.ok(tts);
+ tts.dispatchEvent(new dom.window.Event('error'));
+ await flush();
+ assert.match(drill.textContent,/示范音频暂不可用/);
+});
+
+test('a superseded word play does not show an error hint',async()=>{
+ const audioId='66666666-6666-4666-8666-666666666666';
+ state.stage='speak';
+ state.entries[12]={speakingPhase:'review',speakingComplete:'yes',
+  speakingPart2:JSON.stringify([{at:'2026-11-09T01:00:00Z',text:'Fixture Part 2',spoken:true,audio:audioId}]),
+  speakingFollowup:JSON.stringify([{at:'2026-11-09T01:02:00Z',text:'Fixture follow-up',spoken:true}])};
+ const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='speakingPart2');
+ assert.ok(source);
+ const words=[{word:'one',start:1,end:1.4,probability:.9},{word:'two',start:1.5,end:1.9,probability:.9}];
+ const scorecard={schema:'bandroom-speaking-scorecard-v1',
+  overall:{band:6,status:'reference',disclosure_zh:'参考估计',basis_zh:'流利度与连贯性参考估计均值'},
+  criteria:[{key:'fluency_coherence',label_zh:'流利度与连贯性',band:6,status:'reference',disclosure_zh:'参考估计',evidence:{}}],
+  drills:[],llm_status:'ok'};
+ feedback=[{id:'fb-play',day:12,stage:'speak',attempt:source.id,evidence:'Play fixture',feedback:'一、评估：继续。',createdAt:'2026-11-09T01:00:00Z',
+  analysis:{schema:'bandroom-grounded-analysis-v2',speechSeconds:5,items:[],transcript:words,scorecard}}];
+ const realPlay=dom.window.HTMLMediaElement.prototype.play;
+ dom.window.HTMLMediaElement.prototype.play=async()=>{const error=new Error('superseded');error.name='AbortError';throw error;};
+ try{
+  await mount();
+  const card=document.querySelector('[aria-label="口语 Part 2 · 首次回答反馈"] .ss-card');
+  assert.ok(card);
+  const buttons=card.querySelectorAll('.ss-word');
+  await act(async()=>{buttons[0].click();});
+  await act(async()=>{buttons[1].click();});
+  await flush();
+  assert.doesNotMatch(card.textContent,/原录音暂时无法播放/);
+ }finally{dom.window.HTMLMediaElement.prototype.play=realPlay;}
+});
+
 test('additions are hidden by the precision-first display',async()=>{
  const audioId='33333333-3333-4333-8333-333333333333';
  state.stage='speak';

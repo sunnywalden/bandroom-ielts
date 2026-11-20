@@ -4,6 +4,7 @@ import {feedbackFor,reviewAttempts,reviewRequest,type AutomationStatus,type Coac
 import {displayPronunciationErrors} from './pronunciation-display';
 import RecordingClipPlayer from './recording-clip-player';
 import {PronunciationCoach,TieredFeedbackProse} from './pronunciation-coach';
+import SpeakingScorecard from './speaking-scorecard';
 import './feedback.css';
 
 type Context = {attempts:ReviewAttempt[];feedback:CoachFeedback[];tasks:ReviewTaskStatus[];automation?:AutomationStatus;error:boolean;refresh:()=>void;ready:boolean;identificationFailed:boolean;retry:()=>void};
@@ -86,6 +87,21 @@ function PronunciationErrors({analysis,recordingId}:{analysis:NonNullable<CoachF
     })}
   </div>;
 }
+// One reviewed answer. The verdict state is lifted here so the scorecard
+// transcript (红=确实读错 / 绿=其实没错) updates the moment the learner answers
+// the self-listen card below it, instead of only after a reload.
+function ReviewRow({row,recordingId}:{row:CoachFeedback;recordingId?:string}) {
+  const [verdicts,setVerdicts]=useState<Record<string,string>>({});
+  return <article className="af-review">
+    {row.analysis?.scorecard&&<SpeakingScorecard analysis={row.analysis} recordingId={recordingId} verdicts={verdicts}/>}
+    <TieredFeedbackProse feedback={row.feedback}/>
+    {row.analysis&&<PronunciationErrors analysis={row.analysis} recordingId={recordingId}/>}
+    {row.analysis&&<PronunciationCoach analysis={row.analysis} recordingId={recordingId} feedbackText={row.feedback}
+      onVerdict={(candidateId,verdict)=>setVerdicts(current=>current[candidateId]?current:{...current,[candidateId]:verdict})}/>}
+    <details><summary>批改依据与时间</summary><p>{row.evidence}</p><time dateTime={row.createdAt}>{new Date(row.createdAt).toLocaleString('zh-CN')}</time></details>
+  </article>;
+}
+
 export default function AttemptFeedback({field,index=0}:{field:string;index?:number}) {
   const {attempts,feedback,tasks,automation,error,refresh}=useContext(FeedbackContext);
   const attempt=attempts.find(a=>a.field===field&&a.index===index);
@@ -120,12 +136,7 @@ export default function AttemptFeedback({field,index=0}:{field:string;index?:num
     {!rows.length&&<QuickCheck attempt={attempt}/>}
     {!rows.length&&!task&&linked&&<p className="af-hint" role="status">已保存，正在核对批改队列…</p>}
     {!rows.length&&task&&<TaskState task={task} automation={automation} refresh={refresh}/>}
-    <div aria-live="polite" aria-relevant="additions text">{rows.map(row=><article className="af-review" key={row.id}>
-      <TieredFeedbackProse feedback={row.feedback}/>
-      {row.analysis&&<PronunciationErrors analysis={row.analysis} recordingId={attempt.recordingId}/>}
-      {row.analysis&&<PronunciationCoach analysis={row.analysis} recordingId={attempt.recordingId} feedbackText={row.feedback}/>}
-      <details><summary>批改依据与时间</summary><p>{row.evidence}</p><time dateTime={row.createdAt}>{new Date(row.createdAt).toLocaleString('zh-CN')}</time></details>
-    </article>)}</div>
+    <div aria-live="polite" aria-relevant="additions text">{rows.map(row=><ReviewRow key={row.id} row={row} recordingId={attempt.recordingId}/>)}</div>
     {!rows.length&&(!task||task.state!=='completed')&&<><p className="af-hint">{task?'自动批改未返回？复制本题请求，粘贴到 Work 会话并发送；手动批改会成为本次作答的唯一结果。':'复制本题请求，粘贴到 Work 会话并发送。Work 写回后，留在这里或稍后重新打开本题都能看到结果。'}</p>
       <button type="button" className="secondary" disabled={takingOver} onClick={()=>void copyManualRequest()}>{takingOver?'正在接管…':'复制本题批改请求'}</button>
       {fallback&&<label className="af-copy">本题批改请求<textarea readOnly value={request} onFocus={e=>e.target.select()}/></label>}

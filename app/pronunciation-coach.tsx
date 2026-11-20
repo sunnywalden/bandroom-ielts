@@ -187,10 +187,12 @@ export function TieredFeedbackProse({feedback}:{feedback:string}) {
   </div>;
 }
 
-export function PronunciationCoach({analysis,recordingId,feedbackText}:{
+export function PronunciationCoach({analysis,recordingId,feedbackText,onVerdict}:{
   analysis:unknown;
   recordingId?:string;
   feedbackText?:string;
+  /** Notifies the parent so the scorecard transcript colors update in-session. */
+  onVerdict?:(candidateId:string,verdict:Verdict)=>void;
 }) {
   const data=extractPronunciation(analysis);
   const proseParts=feedbackText?splitDeterministicSections(feedbackText):null;
@@ -211,6 +213,7 @@ export function PronunciationCoach({analysis,recordingId,feedbackText}:{
     try{
       await recordPronunciationVerdict(candidateId,verdict);
       setLocal(current=>({...current,[candidateId]:verdict}));
+      onVerdict?.(candidateId,verdict);
     }catch{
       setErrors(current=>({...current,[candidateId]:'暂时无法保存，请重试。'}));
     }finally{

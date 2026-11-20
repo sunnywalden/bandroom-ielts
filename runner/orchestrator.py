@@ -27,6 +27,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 import tomllib
@@ -104,6 +105,33 @@ RETRYABLE_TOOL_CODES = frozenset(
         "transfer_storage_unavailable",
     }
 )
+
+# Server messages that indicate a transient write race (the learner submitted
+# again between our session read and the writeback). The next run re-reads the
+# session, so these must not block the attempt. Exact strings from
+# lib/coach.ts add_coach_feedback.
+TRANSIENT_TOOL_MESSAGES = (
+    "Read study_session again and use the new exact attempt ID.",
+    "Another writer kept taking this review.",
+)
+
+# Provider/transport exceptions can embed request headers or key fragments.
+# Error details are persisted (state) and written to logs, so redact common
+# secret shapes before either sink.
+_SECRET_PATTERN = re.compile(
+    r"(?i)(authorization|bearer|api[_-]?key|access[_-]?token|refresh[_-]?token"
+    r"|token|secret|password|passphrase)\s*[:=]?\s*\S+"
+)
+
+
+def redact_error_detail(text: str, limit: int = 300) -> str:
+    """Redact secret-looking substrings and bound the detail length."""
+    # "Bearer <token>" first: the generic pattern only consumes one token and
+    # would leave the credential behind.
+    cleaned = re.sub(r"(?i)\bbearer\s+\S+", "Bearer [REDACTED]", str(text))
+    cleaned = _SECRET_PATTERN.sub(r"\1: [REDACTED]", cleaned)
+    return cleaned[-limit:]
+
 
 # Queue-path speaking completion contract gap (iteration-30, owner decision A).
 # complete_review_task gates speaking completions on a RELEASED analysis version
@@ -732,6 +760,12 @@ class CoachRunner:
         if isinstance(exc, ToolError):
             if exc.code in RETRYABLE_TOOL_CODES:
                 return False
+            # Transient write conflicts (the learner submitted again between
+            # our session read and the writeback) are self-healing on the next
+            # run, which re-reads the session. Blocking them would strand a
+            # perfectly reviewable attempt, as happened on 2026-11-20.
+            if any(fragment in str(exc) for fragment in TRANSIENT_TOOL_MESSAGES):
+                return False
             return not exc.retryable
         if isinstance(exc, TransportError):
             return False
@@ -921,6 +955,7 @@ class CoachRunner:
                 model=self.model,
                 workdir=Path(directory),
                 logger=self._logger,
+                reserve_scorecard=lambda: self._reserve("text"),
                 tenant_user_id=tenant_user_id,
             )
         self._log(
@@ -1013,8 +1048,9 @@ class CoachRunner:
                 max_attempts=self.config.max_attempts,
             )
             report.failed += 1
+            detail = redact_error_detail(str(exc))
             report.errors.append(
-                {"attempt": attempt_id, "code": code, "blocked": blocked}
+                {"attempt": attempt_id, "code": code, "blocked": blocked, "detail": detail}
             )
             self._log(
                 "attempt_failed",
@@ -1022,6 +1058,9 @@ class CoachRunner:
                 code=code,
                 retryable=not permanent,
                 blocked=blocked,
+                # Without the message a failed writeback is undiagnosable; the
+                # 2026-11-19 toolerror had to be reproduced by hand.
+                detail=detail,
             )
             return "failed"
 
