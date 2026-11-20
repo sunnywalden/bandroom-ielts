@@ -57,7 +57,12 @@ export function evaluateUserScope(
   options: { write?: boolean } = {},
 ): OwnerScopeResult {
   if (!context.user) return json({ error: "sign_in_required" }, 401);
-  if (context.scope !== "owner" && context.scope !== "learner") return json({ error: "owner_scope_required" }, 403);
+  // MT-2: admin also owns its own learner data (own userId). breakglass is
+  // read-only and target-bound — it must NOT pass the generic user guard for
+  // writes; use evaluateBreakglassScope for read-only target access.
+  if (context.scope !== "owner" && context.scope !== "learner" && context.scope !== "admin") {
+    return json({ error: "owner_scope_required" }, 403);
+  }
   if (options.write && readOnlyMode()) return json({ error: "read_only" }, 403);
   return { user: context.user };
 }
@@ -66,6 +71,37 @@ export async function requireUserScope(
   options: { write?: boolean } = {},
 ): Promise<OwnerScopeResult> {
   return evaluateUserScope(await currentAuthContext(), options);
+}
+
+// MT-2 (S10.1): admin management gate. Only owner or admin may reach the
+// /api/admin/* aggregate routes. Admin is content-blind by default; cross-tenant
+// content requires an explicit break-glass grant (evaluateBreakglassScope).
+export function evaluateAdminScope(context: AuthContext): OwnerScopeResult {
+  if (!context.user) return json({ error: "sign_in_required" }, 401);
+  if (context.scope !== "owner" && context.scope !== "admin") {
+    return json({ error: "admin_scope_required" }, 403);
+  }
+  return { user: context.user };
+}
+
+export async function requireAdminScope(): Promise<OwnerScopeResult> {
+  return evaluateAdminScope(await currentAuthContext());
+}
+
+// MT-2 (S10.1): break-glass is a distinct READ-ONLY, target-bound scope. It is
+// rejected on every write/global route. The grant {targetUid, ops, exp, reason}
+// is validated per request and audited synchronously before content returns.
+// This function only authorises the scope shape; the grant check + audit live
+// in lib/breakglass.ts and are enforced by the admin read route.
+export function evaluateBreakglassScope(
+  context: AuthContext,
+  options: { write?: boolean } = {},
+): OwnerScopeResult {
+  if (!context.user) return json({ error: "sign_in_required" }, 401);
+  if (context.scope !== "breakglass") return json({ error: "breakglass_scope_required" }, 403);
+  if (options.write) return json({ error: "breakglass_read_only" }, 403);
+  if (readOnlyMode()) return json({ error: "read_only" }, 403);
+  return { user: context.user };
 }
 
 // Grant routes must be reached on the configured canonical origin. A request

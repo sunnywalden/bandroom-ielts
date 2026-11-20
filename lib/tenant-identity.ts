@@ -62,10 +62,20 @@ export async function resolveTenant(
   if (!db || !email || !iss || !sub) return null;
 
   const existing = await db
-    .prepare("SELECT user_id, role, status FROM users WHERE idp_iss=? AND idp_sub=?")
+    .prepare("SELECT user_id, role, status, email_normalized FROM users WHERE idp_iss=? AND idp_sub=?")
     .bind(iss, sub)
-    .first<TenantRow>();
+    .first<TenantRow & { email_normalized?: string }>();
   if (existing) {
+    // G15 (MT-2): email is a mutable verified attribute, not the identity key.
+    // If the IdP reports a new email, update it best-effort. A unique conflict
+    // (another tenant already uses that email) must NOT break login or mint a new
+    // tenant — keep the stored email; surface the conflict via an explicit change API.
+    if (existing.email_normalized && existing.email_normalized !== email) {
+      try {
+        await db.prepare("UPDATE users SET email_normalized=?, updated_at=? WHERE user_id=? AND email_normalized=?")
+          .bind(email, now, existing.user_id, existing.email_normalized).run();
+      } catch { /* email_in_use: keep stored email; do not fail login */ }
+    }
     return { userId: existing.user_id, role: asTenantRole(existing.role), status: existing.status };
   }
 

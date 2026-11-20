@@ -118,7 +118,10 @@ async function applyMigrations(db){
   const files=(await readdir(join(root,'drizzle'))).filter(file=>file.endsWith('.sql')).sort();
   for(const file of files){
     const body=await readFile(join(root,'drizzle',file),'utf8');
-    for(const query of body.split(';').map(part=>part.replaceAll('--> statement-breakpoint','').trim()).filter(Boolean)){
+    // Strip line comments before splitting on ';': migration prose may contain
+    // semicolons, and a comment-only fragment is not a runnable statement.
+    const sqlText=body.split('\n').map(line=>{const at=line.indexOf('--');return at<0?line:line.slice(0,at);}).join('\n');
+    for(const query of sqlText.split(';').map(part=>part.trim()).filter(Boolean)){
       await db.prepare(query).run();
     }
   }
@@ -188,9 +191,9 @@ try{
   equal(plan.config.d1_databases[0].migrations_dir,join(root,'drizzle'));
   equal(plan.config.r2_buckets[0].bucket_name,'r2-test');
   equal(plan.config.routes[0].pattern,'bandroom.test');
-  equal(plan.migrations.length,11);
+  equal(plan.migrations.length,13);
   equal(plan.migrations[0],'0000_left_logan.sql');
-  equal(plan.migrations.at(-1),'0010_claim_any_index.sql');
+  equal(plan.migrations.at(-1),'0012_users_email_nullable.sql');
   ok(plan.configPath.startsWith(join(deployFixture,'server')));
   ok(existsSync(plan.configPath));
   equal(JSON.parse(await readFile(plan.configPath,'utf8')).workers_dev,false);
@@ -207,7 +210,7 @@ try{
   const target=await createRuntime();
   await applyMigrations(source.db);
   const migrationFiles=await applyMigrations(target.db);
-  equal(migrationFiles.length,11);
+  equal(migrationFiles.length,13);
 
   const uid='fixture-owner';
   const completedJobId='v2:'+crypto.randomUUID();

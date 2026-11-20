@@ -26,6 +26,9 @@ export const teacherFeedback = sqliteTable("teacher_feedback", {
   // Automatic review task receipt binding. Null for historic/manual reviews.
   reviewTaskId: text("review_task_id"),
   analysisJson: text("analysis_json", { mode: "json" }).$type<Record<string, unknown>>(),
+  // S3.1 (MT-2): author provenance. 'learner-note' | 'coach' | 'coach-runner'.
+  // Learner self-notes cannot carry pronunciation/analysis/candidates.
+  authorScope: text("author_scope").notNull().default("coach"),
   createdAt: text("created_at").notNull(),
 }, table => [
   index("teacher_feedback_user_day").on(table.userId, table.day),
@@ -214,7 +217,9 @@ export const users = sqliteTable("users", {
   userId: text("user_id").primaryKey(),
   idpIss: text("idp_iss").notNull(),
   idpSub: text("idp_sub").notNull(),
-  emailNormalized: text("email_normalized").notNull(),
+  // Nullable: revocation tombstones clear direct PII (MT-2 S9.3). The IdP
+  // (iss, sub) pair remains the permanent identity key.
+  emailNormalized: text("email_normalized"),
   displayName: text("display_name"),
   role: text("role").notNull().default("learner"), // 'learner' | 'admin'
   status: text("status").notNull().default("pending"), // pending|active|suspended|revoked
@@ -257,4 +262,49 @@ export const calibrationEvents = sqliteTable("calibration_events", {
 }, table => [
   uniqueIndex("calibration_events_candidate").on(table.userId, table.attemptId, table.candidateId),
   index("calibration_events_profile").on(table.userId, table.expected, table.actual),
+]);
+
+// MT-2 (design rev3.1 §4.6): append-only admin action log. Never stores learner
+// content. break-glass reads are logged synchronously before content returns.
+export const adminAudit = sqliteTable("admin_audit", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  at: integer("at").notNull(),
+  actorUserId: text("actor_user_id").notNull(),
+  action: text("action").notNull(),
+  targetUserId: text("target_user_id"),
+  reason: text("reason"),
+  expiresAt: integer("expires_at"),
+  metadataJson: text("metadata_json", { mode: "json" }).$type<Record<string, unknown>>(),
+}, table => [
+  index("admin_audit_actor").on(table.actorUserId, table.at),
+  index("admin_audit_target").on(table.targetUserId, table.at),
+]);
+
+// MT-2: invite codes for the approval gate. code stored hashed.
+export const invites = sqliteTable("invites", {
+  id: text("id").primaryKey(),
+  codeHash: text("code_hash").notNull(),
+  email: text("email"),
+  role: text("role").notNull().default("learner"),
+  expiresAt: integer("expires_at").notNull(),
+  createdBy: text("created_by").notNull(),
+  usedAt: integer("used_at"),
+  usedBy: text("used_by"),
+}, table => [
+  uniqueIndex("invites_code_hash").on(table.codeHash),
+]);
+
+// MT-2: personal access tokens for learner MCP connectors (MVP; OAuth later).
+// Stored hashed; revocable; bound to one tenant.
+export const userTokens = sqliteTable("user_tokens", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  tokenHash: text("token_hash").notNull(),
+  label: text("label"),
+  createdAt: integer("created_at").notNull(),
+  lastUsedAt: integer("last_used_at"),
+  revokedAt: integer("revoked_at"),
+}, table => [
+  uniqueIndex("user_tokens_hash").on(table.tokenHash),
+  index("user_tokens_user").on(table.userId),
 ]);

@@ -4,13 +4,14 @@
 import { env as cloudflareEnv } from "cloudflare:workers";
 import { headers } from "next/headers";
 import { resolveTenant, splitList, type TenantDb } from "./tenant-identity";
+import { bearerToken, resolvePatFromBinding, TOKEN_PREFIX } from "./pat";
 
-export type AuthScope = "owner" | "learner" | "coach" | "coach-runner";
+export type AuthScope = "owner" | "learner" | "admin" | "breakglass" | "coach" | "coach-runner";
 export type AuthUser = { userId: string; displayName: string; email: string; fullName: string | null };
 export type AuthContext = {
   user: AuthUser | null;
   scope: AuthScope | null;
-  identityType: "mock" | "access-jwt" | null;
+  identityType: "mock" | "access-jwt" | "pat" | null;
 };
 export type AuthEnv = {
   CF_ACCESS_TEAM_DOMAIN?: string;
@@ -210,7 +211,10 @@ async function resolveIdentity(
     Date.now(),
   );
   if (!tenant || tenant.status !== "active") return null;
-  return { scope: "learner", user: { userId: tenant.userId, displayName: email, email, fullName: null } };
+  // MT-2 (H18): admin role resolves to the admin scope (aggregate-only management),
+  // not learner. Admins still own their own learner data via requireUserScope.
+  const scope: AuthScope = tenant.role === "admin" ? "admin" : "learner";
+  return { scope, user: { userId: tenant.userId, displayName: email, email, fullName: null } };
 }
 
 async function accessJwtContext(
@@ -300,12 +304,39 @@ export async function resolveAuthContext(
   const mock = mockContext(requestHeaders, production);
   if (mock) return mock;
 
+  // MT-2: a PAT request carries `Authorization: Bearer brpat_...` and never a
+  // CF Access JWT. Resolve it BEFORE the Access assertion. Any DB/validation
+  // failure falls through to the normal auth path (fail-closed → anonymous).
+  const pat = await patContext(requestHeaders, authEnv);
+  if (pat) return pat;
+
   const assertion = requestHeaders.get(ACCESS_JWT_HEADER);
   if (!assertion) return anonymous();
   try {
     return (await accessJwtContext(assertion, authEnv, options)) ?? anonymous();
   } catch {
     return anonymous();
+  }
+}
+
+// Personal access tokens are learner-scoped and bound to one tenant. A PAT can
+// never resolve to owner/admin: connector access must not gain aggregate reach.
+async function patContext(
+  requestHeaders: HeadersLike,
+  authEnv: AuthEnv,
+): Promise<AuthContext | null> {
+  const token = bearerToken(requestHeaders.get("authorization"));
+  if (!token || !token.startsWith(TOKEN_PREFIX)) return null;
+  try {
+    const resolved = await resolvePatFromBinding(authEnv.DB ?? null, token);
+    if (!resolved) return null;
+    return {
+      user: { userId: resolved.userId, displayName: "PAT", email: "", fullName: null },
+      scope: "learner",
+      identityType: "pat",
+    };
+  } catch {
+    return null;
   }
 }
 

@@ -1,6 +1,6 @@
 import { getAuthContext } from "@/app/chatgpt-auth";
 import { callCoach, coachTools } from "@/lib/coach";
-import { mcpToolAllowed } from "@/lib/mcp-scope";
+import { mcpToolAllowed, mcpToolsForScope } from "@/lib/mcp-scope";
 import { auditServiceCall } from "@/lib/service-audit";
 import { env } from "cloudflare:workers";
 import { crossOrigin, json, limitedBody } from "../api/shared";
@@ -20,7 +20,13 @@ export async function POST(request:Request) {
   // Discovery exposes static interface metadata so the Sites plugin can register the tools.
   switch(message.method) {
     case "server/discover": return reply({supportedVersions:[protocolVersion], capabilities:{tools:{}}});
-    case "tools/list": return reply({tools:coachTools});
+    case "tools/list": {
+      // MT-2 (G-MCP-2): filter the tool inventory by the caller's scope.
+      // Unknown/anonymous scope gets an empty list (no metadata leak).
+      const listAuth=await getAuthContext();
+      const allowed=new Set(mcpToolsForScope(listAuth.scope));
+      return reply({tools:coachTools.filter(tool=>allowed.has(tool.name))});
+    }
     case "ping": return reply({});
     case "tools/call": {
       if(typeof message.params?.name!=="string") return err(-32602,"Tool name required");

@@ -113,6 +113,16 @@ const feedbackSpec = z.strictObject({
   }).optional().describe("Grounded speaking evidence only. Requires stage=speak and recordingId. Omit for text reviews."),
 });
 const publishSpec = z.strictObject({ day: z.number().int().min(17).max(62), lesson: lessonSpec });
+// MT-2 (S3.1): learner self-note. Deliberately has NO pronunciation, NO
+// groundedAnalysis, NO recordingId, NO scorecard — a learner cannot forge
+// coach/detector output or issue calibration candidates. Content rules still
+// forbid overall-band claims. Stored with author_scope='learner-note'.
+const learnerNoteSpec = z.strictObject({
+  day: dayNumber, stage: stageName,
+  attempt: text(160, "The exact reviewAttempts[].id this note refers to."),
+  feedback: text(6000, "Your own reflection or self-assessment note. Not a coach rating."),
+  evidence: text(2000, "Optional: what you observed in your own answer.").optional(),
+});
 const recordingSpec = z.strictObject({
   day:dayNumber, recordingId:z.uuidv4().describe("Submitted remote audio ID shown in the learner’s saved answer."),
   mode:z.enum(["audio","metadata","bytes"]).optional().describe("audio returns an audible block where supported; metadata gives exact byte count and MIME; bytes returns a small base64 range for private local audio decoding when the client omits audio blocks."),
@@ -124,6 +134,7 @@ const recordingSpec = z.strictObject({
 const coachingTools = [
   {name:"read_study_session",description:"Read canonical reviewAttempts IDs, question context and pending reviews, plus the learner's checkpoint and selected day's saved answers and available original/revised writing, historical results, coach feedback and current small task. Audio references require read_speaking_recording. Never start or complete a day.",schema:readSpec,readOnly:true},
   {name:"add_coach_feedback",description:"Append a private, evidence-based review using its exact reviewAttempts[].id; the page automatically displays it beside that answer. Review one identified attempt for a started day. First use read_study_session or inspect the learner's actual submitted evidence. Never infer pronunciation from a transcript. Existing attempts and scores remain intact; identical retries are deduplicated.",schema:feedbackSpec,readOnly:false},
+  {name:"add_learner_note",description:"Save your own reflection or self-assessment note for one submitted attempt. This is a learner note, not a coach rating: it cannot carry a pronunciation band, scorecard, or calibration candidates. Use the exact reviewAttempts[].id from read_study_session.",schema:learnerNoteSpec,readOnly:false},
   {name:"publish_lesson",description:"Add one complete new lesson to this learner's private catalogue for Day 17–62. Verify the British Council source audio, transcript and q/a; use original reading material. Match the learner's exam pathway and budget. Use only after the learner requests preparation or expansion; this does not start the day. A published day cannot be replaced.",schema:publishSpec,readOnly:false},
   {name:"read_recording_bytes",description:"Code-capable clients: retrieve one bounded byte range of the learner's submitted recording, before decoding audio locally. Never display base64. Supply offset=0 for the first block and use nextOffset until null. Use this when an older read_speaking_recording schema lacks bytes mode.",schema:z.strictObject({day:dayNumber,recordingId:z.uuidv4(),offset:z.number().int().min(0).max(12*1024*1024),length:z.number().int().min(1).max(24576).optional()}),readOnly:true},
   {name:"read_speaking_recording",description:"Read a submitted recording. Use audio mode first. If the client omits the sound, retrieve metadata then bytes and reconstruct privately in a supported audio decoder. Technical verification or text alone cannot justify pronunciation or fluency ratings. Device-only recordings can be played in the recording browser.",schema:recordingSpec,readOnly:true},
@@ -135,7 +146,7 @@ const reviewToolNames = new Set(reviewTools.map(tool => tool.name));
 export const coachTools = [...coachingTools, ...reviewTools, ...calibrationTools];
 
 const feedbackColumns = {id:teacherFeedback.id,day:teacherFeedback.day,stage:teacherFeedback.stage,
-  feedback:teacherFeedback.feedback,evidence:teacherFeedback.evidence,pronunciation:teacherFeedback.pronunciation,analysisJson:teacherFeedback.analysisJson,attempt:teacherFeedback.attempt,createdAt:teacherFeedback.createdAt};
+  feedback:teacherFeedback.feedback,evidence:teacherFeedback.evidence,pronunciation:teacherFeedback.pronunciation,analysisJson:teacherFeedback.analysisJson,attempt:teacherFeedback.attempt,authorScope:teacherFeedback.authorScope,createdAt:teacherFeedback.createdAt};
 
 async function reviews(userId:string, day?:number) {
   const rows=await getDb().select(feedbackColumns).from(teacherFeedback)
@@ -434,8 +445,26 @@ export async function callCoach(userId:string, name:string, args:unknown, option
         // persist the enriched analysis too, or the UI gets no candidateIds and
         // the calibration loop is inert for every pre-v2 submission (Day 12).
         await getDb().insert(teacherFeedback).values({...values,id,userId,pronunciation:rating,
+          authorScope:"coach",
           ...(storedAnalysis?{analysisJson:storedAnalysis}:{}),createdAt:new Date().toISOString()}).onConflictDoNothing();
         return content({saved:true,id,day:values.day,attempt:values.attempt});
+      }
+      case "add_learner_note": {
+        // MT-2 (S3.1): learner self-note. No pronunciation/analysis/candidates.
+        const values=learnerNoteSpec.parse(args);
+        const violation=coachingContentViolation({feedback:values.feedback,evidence:values.evidence??"",attempt:values.attempt,
+          hasStructuredPronunciation:false});
+        if(violation)throw new CoachError(violation.message);
+        const {ledger}=await checkpoint(userId);
+        requireStarted(values.day,ledger);
+        const hash=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify([userId,"learner-note",values])));
+        const id="ln:"+Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,"0")).join("");
+        await getDb().insert(teacherFeedback).values({
+          id,userId,day:values.day,stage:values.stage,attempt:values.attempt,
+          evidence:values.evidence??"",feedback:values.feedback,
+          authorScope:"learner-note",createdAt:new Date().toISOString(),
+        }).onConflictDoNothing();
+        return content({saved:true,id,day:values.day,attempt:values.attempt,author:"learner-note"});
       }
       case "publish_lesson": {
         const {day,lesson:input}=publishSpec.parse(compatibleLesson(args));
