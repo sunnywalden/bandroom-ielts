@@ -48,7 +48,6 @@ registerHooks({resolve(specifier,context,next){
   return next(specifier,context);
 }});
 const {callReviewTool}=await import('../lib/review-tools.ts');
-const {PUT:transferPut,GET:transferGet}=await import('../app/api/review-transfer/route.ts');
 const owner='grounded-owner',other='grounded-other';
 let checks=0;
 const eq=(a,e,l)=>{assert.deepEqual(a,e,l);checks++};
@@ -67,24 +66,15 @@ function insertSpeakingJob({recordingId=randomUUID(),analysisVersion='grounded-p
   return {taskId,jobId,recordingId,snapshot};
 }
 // Claim (fence 1) then commit a decoded PCM checkpoint via the binary transfer.
-async function commitDecode(job,{analysisVersion='grounded-prosody-v1',sampleCount=16000}={}){
+// A2 integrity (recordingSha256-only): completion needs no decoded-PCM
+// checkpoint, so the helper just claims the task and returns the fence. The
+// decoded-checkpoint transfer (A1) is unavailable on .workers.dev
+// (isCanonicalOrigin rejects it) — see CONTRACT_GATE.md.
+async function claimTask(job){
   const claimed=text(await callReviewTool(owner,'claim_review_tasks',{limit:1}));
-  const fence=claimed.tasks[0].fence;
-  const pcm=Buffer.alloc(sampleCount*2);
-  const manifest={format:'bandroom-decode-v1',analysisVersion,inputSha256:source.sha256,inputBytes:source.bytes,
-    container:'webm',codec:'opus',sourceRateHz:48000,sourceChannels:1,containerDurationMs:1000,primingMs:null,
-    pcm:{encoding:'s16le',rateHz:16000,channels:1,sampleCount,sha256:digest(pcm)},
-    mediaTime:{originMs:0,samplesPerSecond:16000}};
-  const json=Buffer.from(JSON.stringify(manifest));const len=Buffer.alloc(4);len.writeUInt32BE(json.length);
-  const body=Buffer.concat([len,json,pcm]);
-  const saveGrant=text(await callReviewTool(owner,'get_review_transfer',{taskId:job.taskId,fence,action:'save_decode',artifactSha256:digest(body),bytes:body.length}));
-  const putRes=await transferPut(new Request(saveGrant.url,{method:'PUT',body,headers:{Authorization:saveGrant.authorization}}));
-  assert.ok([200,201].includes(putRes.status),'save_decode PUT '+putRes.status);
-  const readGrant=text(await callReviewTool(owner,'get_review_transfer',{taskId:job.taskId,fence,action:'read_decode'}));
-  const getRes=await transferGet(new Request(readGrant.url,{method:'GET',headers:{Authorization:readGrant.authorization}}));
-  assert.equal(getRes.status,200,'read_decode GET');
-  return fence;
+  return claimed.tasks[0].fence;
 }
+const commitDecode = claimTask;
 const wireAnalysis=(candidates=[],extra={})=>({schema:'bandroom-grounded-analysis-v1',analysisVersion:'grounded-prosody-v1',
   detectorVersion:'det-v1',inventoryVersion:'inv-v1',speechSeconds:3.0,candidates,
   reliability:{pauseCount:2},calibrated_prosody:{pause_count:2,pause_seconds:1.8,speech_ratio:0.79},...extra});
@@ -217,5 +207,19 @@ reset();
   eq(candidateRows(job).map(r=>r.candidate_id),rowsBefore,'no new candidate rows from altered replay');
   eq(profileRow().n_shown,shownBefore,'n_shown not inflated by altered replay');
   eq(sql.prepare('SELECT COUNT(*) n FROM calibration_candidates WHERE attempt_id=?').get(job.jobId).n,1,'still exactly one candidate row');
+}
+// ⑪ fail-closed: snapshot lacking recording digest -> recording_unbound (no skip).
+reset();
+{
+  const job=insertSpeakingJob();
+  const fence=await commitDecode(job);
+  // strip the recording identity from the frozen snapshot
+  const row=sql.prepare('SELECT snapshot FROM review_jobs WHERE id=?').get(job.jobId);
+  const snap=JSON.parse(row.snapshot); delete snap.recording;
+  sql.prepare('UPDATE review_jobs SET snapshot=? WHERE id=?').run(JSON.stringify(snap), job.jobId);
+  const res=await callReviewTool(owner,'complete_review_task',completeArgs(job,fence,wireAnalysis([cand()])));
+  eq(res.isError,true,'absent snapshot recording rejected');
+  eq(text(res).error,'recording_unbound','recording_unbound code');
+  eq(sql.prepare('SELECT COUNT(*) n FROM calibration_candidates WHERE attempt_id=?').get(job.jobId).n,0,'no candidate rows on unbound snapshot');
 }
 console.log(JSON.stringify({suite:'grounded-completion',checks,passed:true}));

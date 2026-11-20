@@ -38,7 +38,6 @@ from typing import Any, Callable, Mapping
 
 from . import audio as audio_module
 from . import grounded_audio
-from . import review_transfer
 from .audio import AudioError, PreparedAudio
 from .content_rules import (
     PROMPT_VERSION,
@@ -1173,22 +1172,14 @@ class CoachRunner:
             produced = self._produce_grounded(
                 attempt, day, raw, tenant_user_id=user_id
             )
-            # Bind the analysis to a verified decoded input (rev3 A1): commit the
-            # 16 kHz PCM checkpoint under the current lease before completing. The
-            # manifest version must equal the completion analysisVersion.
+            # A2 integrity: recordingSha256 <-> R2 digest <-> snapshot is enforced
+            # server-side; no decoded-PCM checkpoint (the transfer endpoint is
+            # blocked on .workers.dev by isCanonicalOrigin — controlled-verification
+            # finding). Keep review_transfer for a future custom-domain/A1 path.
             grounded_version = self.config.grounded_analysis_version
             if produced.queue_analysis is not None:
                 grounded_version = str(
                     produced.queue_analysis.get("analysisVersion") or grounded_version
-                )
-            with tempfile.TemporaryDirectory(prefix="bandroom-transfer-") as directory:
-                review_transfer.commit_decoded_checkpoint(
-                    self.client, task_id, fence, raw,
-                    analysis_version=grounded_version,
-                    workdir=Path(directory),
-                    run_id=run_id,
-                    ffmpeg=getattr(self.config.grounded, "ffmpeg", None),
-                    logger=self._logger,
                 )
             arguments = produced.complete_args(
                 task_id, fence, analysis_version=grounded_version

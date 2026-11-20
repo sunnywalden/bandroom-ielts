@@ -291,9 +291,21 @@ export async function callReviewTool(userId: string, name: string, args: unknown
           if (!metadata || !digest) throw new ReviewTaskError("recording_digest_unavailable", "The original recording digest is unavailable.");
           if (digest !== input.recordingSha256)
             throw new ReviewTaskError("recording_mismatch", "The recording digest differs from the original object.");
+          // Snapshot recording binding — enforced UNCONDITIONALLY (review: the
+          // previous `snapRecording?.sha256 &&` form was fail-open when the
+          // snapshot carried no digest). A2 (owner-decided, Z-2): the decoded-PCM
+          // checkpoint (A1) is unavailable on .workers.dev (isCanonicalOrigin
+          // rejects it), so integrity here is recordingSha256 <-> R2 digest <->
+          // snapshot.recording — the SAME level the shipped owner path
+          // (add_coach_feedback / submittedRecording) already relies on. This is a
+          // disclosed reduction vs A1, not a silent skip; see CONTRACT_GATE.md.
+          const snapRecording = (snapshot as { recording?: { sha256?: unknown } }).recording;
+          if (!snapRecording?.sha256)
+            throw new ReviewTaskError("recording_unbound", "The submission snapshot is missing its recording digest.");
+          if (snapRecording.sha256 !== input.recordingSha256)
+            throw new ReviewTaskError("recording_mismatch", "The recording digest differs from the submission snapshot.");
           // Replay of an already-completed task: return the stored receipt WITHOUT
-          // re-issuing candidates or re-running the decoded-input proof (the lease
-          // is cleared on completion). This prevents a rejected/altered replay from
+          // re-issuing candidates. This prevents a rejected/altered replay from
           // mutating calibration state before completeReviewTask could reject it
           // (security review: fail-open integrity bypass). The committed receipt is
           // the source of truth; no new write occurs here.
@@ -308,12 +320,9 @@ export async function callReviewTool(userId: string, name: string, args: unknown
           }
           try {
             const grounded = validateGroundedAnalysis(input.analysis);
-            // First completion: enforce the decoded-input proof unconditionally
-            // (a live lease is required and present). Candidate issuance is
-            // idempotent + deterministic, so a retry after a partial failure reuses
-            // the same IDs without duplicating rows or inflating n_shown.
-            await requireDecodedInput(db, userId, task.id, input.fence,
-              { sha256: digest, bytes: metadata.size }, analysisVersion);
+            // Candidate issuance is idempotent + deterministic, so a retry after a
+            // partial failure reuses the same IDs without duplicating rows or
+            // inflating n_shown. (A2: no decoded-PCM checkpoint proof.)
             if (grounded.candidates.length) {
               const issued = await issueCalibrationCandidatesIdempotent(
                 reviewTaskDb(), userId,
