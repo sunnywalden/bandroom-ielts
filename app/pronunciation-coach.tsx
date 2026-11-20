@@ -11,6 +11,7 @@ import {
   type ReliabilitySummary, type Verdict,
 } from './pronunciation-review';
 import {readPronunciationProfile, recordPronunciationVerdict, resetPronunciationProfile} from './pronunciation-coach-client';
+import {CONTRAST_UNAVAILABLE_HINT, dictionaryUrlFor, referenceAudioFor} from './pronunciation-reference';
 import './pronunciation-coach.css';
 
 const SERIES_COLORS = ['#2a78d6', '#eb6834', '#1baf7a'];
@@ -96,7 +97,11 @@ function ClassProgressRow({row}:{row:ClassProgress}) {
 function CanonicalContrastPlayer({word,url}:{word:string;url?:string}) {
   const audio=useRef<HTMLAudioElement>(null);
   const [status,setStatus]=useState<'idle'|'loading'|'playing'|'error'>('idle');
-  if(!url) return <p className="pc-hint">标准发音对比暂不可用，仍可回听原录音。</p>;
+  // The chain depends only on word + runner URL, so catch trials resolve the
+  // same reference as real candidates and stay indistinguishable.
+  const reference=referenceAudioFor(word,url);
+  const dictionaryUrl=dictionaryUrlFor(word);
+  if(!reference) return <p className="pc-hint">{CONTRAST_UNAVAILABLE_HINT}</p>;
   async function play(rate:number){
     const element=audio.current;
     if(!element)return;
@@ -112,16 +117,27 @@ function CanonicalContrastPlayer({word,url}:{word:string;url?:string}) {
     }
   }
   return <div className="pc-canonical">
-    <audio ref={audio} src={url} preload="none" onEnded={()=>setStatus('idle')} onError={()=>setStatus('error')}/>
-    <button type="button" className="secondary" aria-label={`播放 ${word} 的标准发音`} onClick={()=>void play(1)}>
-      播放标准发音
+    <audio ref={audio} src={reference.url} preload="none" onEnded={()=>setStatus('idle')} onError={()=>setStatus('error')}/>
+    <button type="button" className="secondary" aria-label={`播放 ${word} 的${reference.noun}`} onClick={()=>void play(1)}>
+      播放{reference.noun}
     </button>
-    <button type="button" className="secondary" aria-label={`用 0.75 倍速对比 ${word} 的标准发音`} onClick={()=>void play(0.75)}>
+    <button type="button" className="secondary" aria-label={`用 0.75 倍速对比 ${word} 的${reference.noun}`} onClick={()=>void play(0.75)}>
       0.75× 慢速对比
     </button>
+    {reference.ipa&&reference.ipaSource&&<a className="pc-canonical-ipa" href={reference.ipaSource}
+      target="_blank" rel="noopener noreferrer" title="美式音标来源：剑桥词典（新窗口）"
+      aria-label={`${word} 的美式音标 ${reference.ipa}，来源：剑桥词典（新窗口）`}>
+      <span lang="en-US">{reference.ipa}</span>
+    </a>}
+    {reference.sourceUrl&&<a className="pc-canonical-source" href={reference.sourceUrl} target="_blank"
+      rel="noopener noreferrer" aria-label={`${word} 发音来源：${reference.sourceLabel}（新窗口）`}>
+      {reference.sourceLabel} ↗
+    </a>}
     <span role="status" className="pc-hint">
-      {status==='error'?'标准发音暂时无法播放，可以重试。':status==='loading'?'正在加载标准发音…':status==='playing'?'正在播放标准发音。':'标准发音用于对照，不是评分依据。'}
+      {status==='error'?reference.status.error:status==='loading'?reference.status.loading:status==='playing'?reference.status.playing:reference.hint}
     </span>
+    {status==='error'&&reference.kind!=='recording'&&dictionaryUrl&&<a className="pc-canonical-source"
+      href={dictionaryUrl} target="_blank" rel="noopener noreferrer">查词典美音 ↗</a>}
   </div>;
 }
 
@@ -232,7 +248,7 @@ export function PronunciationCoach({analysis,recordingId,feedbackText,onVerdict}
     </section>)}
     {data.items.length>0&&<section className="pc-confirm" aria-label="自听确认">
       <h4>自听确认</h4>
-      <p className="pc-hint">先回听原录音，再对照标准发音。每条只需回答一次。</p>
+      <p className="pc-hint">先回听原录音，再对照参考发音。每条只需回答一次。</p>
       {data.items.map(item=><ConfirmationCard key={item.candidateId} item={item} recordingId={recordingId}
         state={{recorded:recorded(item.candidateId,item.priorVerdict),busy:Boolean(busy[item.candidateId]),error:errors[item.candidateId]??''}}
         onAnswer={(candidateId,verdict)=>void answer(candidateId,verdict)}/>)}
