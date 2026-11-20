@@ -177,9 +177,15 @@ export async function claimReviewTasks(db: D1Like, userId: string, options: {
 // user_id); the caller's identity never selects it, preserving the "no
 // client-supplied userId" invariant. Fence + lease_until + task.userId are the
 // bound lease that every downstream queue call must present.
+//
+// rev3.1 F5 fix: markExhaustedGlobal ensures tasks that hit MAX_ATTEMPTS or
+// MAX_AGE are moved to needs_attention (visible in UI + alertable). Previously
+// only the per-user claimReviewTasks called markExhausted; the cross-tenant
+// path never did, so exhausted tasks stranded in retry_wait forever.
 export async function claimNextReviewTask(db: D1Like, options: { now?: number; clientRunId?: string } = {}) {
   const now = options.now ?? Date.now();
   const clientRunId = options.clientRunId ?? "unknown";
+  await markExhaustedGlobal(db, now);
   const row = await db.prepare(`UPDATE review_tasks
     SET state='running', fence=fence+1, attempts=attempts+1, lease_until=?, updated_at=?,
         claimed_by=?, claim_kind='auto', manual_grant_sha256=NULL, claimed_client_run_id=?
@@ -194,6 +200,36 @@ export async function claimNextReviewTask(db: D1Like, options: { now?: number; c
     .bind(now + LEASE_MS, now, clientRunId, clientRunId, now, now, MAX_ATTEMPTS, now - MAX_AGE_MS)
     .first<Record<string, unknown>>();
   return toTask(row);
+}
+
+// F5: global exhaustion sweep for the cross-tenant claim path. Unlike
+// markExhausted (per-user), this does not filter by user_id because the
+// cross-tenant claim selects across all tenants.
+async function markExhaustedGlobal(db: D1Like, now: number) {
+  await db.prepare(`UPDATE review_tasks
+    SET state='needs_attention', last_error='processing_budget_exhausted', lease_until=NULL, updated_at=?
+    WHERE (
+      (state IN ('queued','retry_wait') AND (attempts >= ? OR created_at <= ?))
+      OR (state='running' AND lease_until <= ? AND (attempts >= ? OR created_at <= ?))
+    )`)
+    .bind(now, MAX_ATTEMPTS, now - MAX_AGE_MS, now, MAX_ATTEMPTS, now - MAX_AGE_MS).run();
+}
+
+// F5: check whether any OTHER tenant has a due task. The runner uses this to
+// decide whether yielding is meaningful (fairness) or harmful (stranding the
+// only active tenant's backlog). Returns true if at least one other user has
+// a claimable task right now.
+export async function hasOtherDueTasks(db: D1Like, excludeUserId: string, options: { now?: number } = {}) {
+  const now = options.now ?? Date.now();
+  const row = await db.prepare(`SELECT 1 AS ok FROM review_tasks
+    WHERE user_id<>?
+      AND ((state IN ('queued','retry_wait') AND next_at<=?)
+        OR (state='running' AND lease_until<=?))
+      AND attempts < ? AND created_at > ?
+    LIMIT 1`)
+    .bind(excludeUserId, now, now, MAX_ATTEMPTS, now - MAX_AGE_MS)
+    .first<{ ok: number }>();
+  return Boolean(row);
 }
 
 export async function renewReviewLease(db: D1Like, userId: string, taskId: string, fence: number, options: {

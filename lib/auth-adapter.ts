@@ -183,7 +183,22 @@ async function resolveIdentity(
   if (!email) return null;
   const ownerEmail = authEnv.BANDROOM_OWNER_EMAIL?.trim();
   if (ownerEmail && email.toLowerCase() === ownerEmail.toLowerCase()) {
-    return userId ? { scope: "owner", user: { userId, displayName: email, email, fullName: null } } : null;
+    if (!userId) return null;
+    // H14: seed the owner's users row so the future lease validator (which
+    // checks users.status/revocation_epoch) does not break the owner queue.
+    // Best-effort: if DB is unavailable the env owner path still works.
+    const db = (authEnv.DB ?? null) as TenantDb | null;
+    if (db) {
+      try {
+        const now = Date.now();
+        await db.prepare(
+          "INSERT INTO users (user_id, idp_iss, idp_sub, email_normalized, role, status, created_at, updated_at) " +
+          "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET status='active', updated_at=?",
+        ).bind(userId, String(claims.iss ?? "env-owner"), String(claims.sub ?? userId),
+          email.toLowerCase(), "admin", "active", now, now, now).run();
+      } catch { /* best-effort seed; env owner auth does not depend on it */ }
+    }
+    return { scope: "owner", user: { userId, displayName: email, email, fullName: null } };
   }
   const tenant = await resolveTenant(
     (authEnv.DB ?? null) as TenantDb | null,

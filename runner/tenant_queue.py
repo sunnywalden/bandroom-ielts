@@ -227,6 +227,10 @@ def run_one(
     fence = task.get("fence")
     if not user_id or not task_id or not fence:
         return "failed"
+    # F5: server tells us whether other tenants have due tasks. The processor
+    # uses this to skip yielding when this is the only active tenant.
+    if isinstance(task, dict):
+        task["_otherTenantsDue"] = bool((result or {}).get("otherTenantsDue", False))
     if budget.paused(user_id):
         # Defer to the next UTC budget reset so a capped tenant's task is not
         # re-claimed (and attempt-burned) every run while the cap holds.
