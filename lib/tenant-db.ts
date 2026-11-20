@@ -22,6 +22,7 @@ export const TENANT_TABLES = new Set([
   "review_tasks", "review_receipts", "analysis_events", "automation_heartbeats",
   "personal_calibration", "calibration_candidates", "calibration_events",
   "users", "user_cost_ledger", "user_tokens", "consent_events", "dsr_jobs",
+  "user_usage_daily", "tenant_metrics_daily",
 ]);
 // Indirectly isolated: protected by joining review_tasks on user_id.
 const INDIRECT_TABLES = new Set(["analysis_artifacts"]);

@@ -349,3 +349,57 @@ export const retentionPolicy = sqliteTable("retention_policy", {
   action: text("action").notNull(), // 'delete' | 'anonymize'
   updatedAt: integer("updated_at").notNull(),
 });
+
+// MT-4 (B6/S12): per-tenant daily usage counters for quotas.
+export const userUsageDaily = sqliteTable("user_usage_daily", {
+  userId: text("user_id").notNull(),
+  utcDay: text("utc_day").notNull(),
+  submissions: integer("submissions").notNull().default(0),
+  audioBytes: integer("audio_bytes").notNull().default(0),
+  modelCalls: integer("model_calls").notNull().default(0),
+  updatedAt: integer("updated_at").notNull(),
+}, table => [
+  primaryKey({ columns: [table.userId, table.utcDay] }),
+]);
+
+// MT-4 (S12): per-IP/domain anonymous throttle buckets.
+export const rateLimitBuckets = sqliteTable("rate_limit_buckets", {
+  bucketKey: text("bucket_key").primaryKey(),
+  hits: integer("hits").notNull().default(0),
+  windowStart: integer("window_start").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+// MT-4 (G9/F9): per-tenant daily metrics (counts/timings only, no content).
+export const tenantMetricsDaily = sqliteTable("tenant_metrics_daily", {
+  userId: text("user_id").notNull(),
+  utcDay: text("utc_day").notNull(),
+  queued: integer("queued").notNull().default(0),
+  completed: integer("completed").notNull().default(0),
+  failed: integer("failed").notNull().default(0),
+  blocked: integer("blocked").notNull().default(0),
+  needsAttention: integer("needs_attention").notNull().default(0),
+  costMicroCny: integer("cost_micro_cny").notNull().default(0),
+  audioBytes: integer("audio_bytes").notNull().default(0),
+  oldestQueuedAt: integer("oldest_queued_at"),
+  lastActiveAt: integer("last_active_at"),
+  updatedAt: integer("updated_at").notNull(),
+}, table => [
+  primaryKey({ columns: [table.userId, table.utcDay] }),
+  index("tenant_metrics_day").on(table.utcDay),
+]);
+
+// MT-4 (S19): service-level runner heartbeat (not attributed to one tenant).
+export const serviceHeartbeats = sqliteTable("service_heartbeats", {
+  serviceId: text("service_id").primaryKey(),
+  generation: integer("generation").notNull().default(0),
+  clientRunId: text("client_run_id"),
+  startedAt: integer("started_at"),
+  finishedAt: integer("finished_at"),
+  lastSuccessAt: integer("last_success_at"),
+  nextExpectedAt: integer("next_expected_at"),
+  status: text("status").notNull(),
+  detail: text("detail"),
+  processed: integer("processed").notNull().default(0),
+  updatedAt: integer("updated_at").notNull(),
+});

@@ -191,9 +191,9 @@ try{
   equal(plan.config.d1_databases[0].migrations_dir,join(root,'drizzle'));
   equal(plan.config.r2_buckets[0].bucket_name,'r2-test');
   equal(plan.config.routes[0].pattern,'bandroom.test');
-  equal(plan.migrations.length,14);
+  equal(plan.migrations.length,16);
   equal(plan.migrations[0],'0000_left_logan.sql');
-  equal(plan.migrations.at(-1),'0013_mt3_consent_dsr_retention.sql');
+  equal(plan.migrations.at(-1),'0015_mt4_tenant_metrics.sql');
   ok(plan.configPath.startsWith(join(deployFixture,'server')));
   ok(existsSync(plan.configPath));
   equal(JSON.parse(await readFile(plan.configPath,'utf8')).workers_dev,false);
@@ -210,7 +210,7 @@ try{
   const target=await createRuntime();
   await applyMigrations(source.db);
   const migrationFiles=await applyMigrations(target.db);
-  equal(migrationFiles.length,14);
+  equal(migrationFiles.length,16);
 
   const uid='fixture-owner';
   const completedJobId='v2:'+crypto.randomUUID();

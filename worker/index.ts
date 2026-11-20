@@ -2,6 +2,7 @@ import handler from "vinext/server/fetch-handler";
 import { runWithConnectorBinding } from "../lib/connector-context";
 import type { ConnectorBinding } from "../lib/connector-contract.mjs";
 import { runRetention } from "../lib/retention";
+import { aggregateTenantMetrics } from "@/lib/metrics";
 
 const worker = {
   fetch(request: Request, env: Cloudflare.Env, ctx: ExecutionContext<{ CONNECTORS?: ConnectorBinding }>) {
@@ -33,13 +34,25 @@ const worker = {
   scheduled(_controller: ScheduledController, env: Cloudflare.Env, ctx: ExecutionContext) {
     if (!env.DB || !env.BUCKET) {
       console.error("retention: DB or BUCKET binding unavailable; skipping purge");
-      return;
+    } else {
+      ctx.waitUntil(
+        runRetention(env.DB, env.BUCKET, Date.now()).catch(error => {
+          console.error("retention: scheduled purge failed", error);
+        }),
+      );
     }
-    ctx.waitUntil(
-      runRetention(env.DB, env.BUCKET, Date.now()).catch(error => {
-        console.error("retention: scheduled purge failed", error);
-      }),
-    );
+
+    // MT-4: per-tenant metrics aggregation runs alongside retention. It only
+    // needs D1, so it still runs when the R2 binding is absent.
+    if (env.DB) {
+      ctx.waitUntil(
+        aggregateTenantMetrics(env.DB, Date.now()).catch(error => {
+          console.error("metrics: scheduled aggregation failed", error);
+        }),
+      );
+    } else {
+      console.error("metrics: DB binding unavailable; skipping aggregation");
+    }
   },
 };
 
