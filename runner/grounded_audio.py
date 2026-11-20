@@ -439,19 +439,48 @@ def analyze_calibrated(
     invalid values through ``prosody.analyze_wav``.
     """
     module = _prosody_module()
-    try:
+
+    def _run(mode: str) -> tuple[dict[str, Any], dict[str, Any]]:
         document = module.analyze_wav(
             str(wav_path),
             words=None,
             transcript=None,
             word_source="none",
             transcript_source="none",
-            pause_mode=pause_mode,
+            pause_mode=mode,
             include_contour=False,
             pause_low_noise_multiplier=float(pause_low_noise_multiplier),
         )
         module.validate_output_schema(document)
-        calibrated = module.calibrated_measurements(document)
+        return document, module.calibrated_measurements(document)
+
+    fallback_reason: str | None = None
+    try:
+        document, calibrated = _run(pause_mode)
+        # Degenerate-output guard (2026-11-19 outage): a broken VAD asset or
+        # calling convention yields an all-zero speech timeline that looks
+        # "calibrated". If the learned VAD sees no speech in a multi-second
+        # recording but the calibrated energy detector does, the VAD result is
+        # instrument failure, not a silent learner. Fall back to the
+        # waveform-only timeline and disclose the substitution in provenance.
+        if pause_mode == "vad":
+            fluency = document.get("fluency", {})
+            speech_env = fluency.get("speech_duration_seconds") or {}
+            total_env = fluency.get("total_duration_seconds") or {}
+            speech = float(speech_env.get("value") or 0.0)
+            total = float(total_env.get("value") or 0.0)
+            if total > 3.0 and speech <= 0.0:
+                wf_document, wf_calibrated = _run("waveform_only")
+                wf_speech = float(
+                    (wf_document.get("fluency", {}).get("speech_duration_seconds") or {}).get("value")
+                    or 0.0
+                )
+                if wf_speech > 0.0:
+                    document, calibrated = wf_document, wf_calibrated
+                    fallback_reason = (
+                        "vad_degenerate: learned VAD reported zero speech on a "
+                        f"{total:.1f}s recording; waveform-only timeline used instead"
+                    )
     except Exception as exc:  # noqa: BLE001 - re-raised as a fail-closed error
         raise AudioError(
             "prosody_failed", f"calibrated prosody analysis failed: {exc}", retryable=True
@@ -499,6 +528,7 @@ def analyze_calibrated(
         "pause_low_noise_multiplier": round(float(pause_low_noise_multiplier), 4),
         "calibrated": surfaced,
         "pause_list_truncated": truncated,
+        "pause_mode_fallback": fallback_reason,
         "policy": (
             "Only metrics whose envelope is status=calibrated are surfaced. "
             "Pitch is consistency_checked, WPM/fillers are uncalibrated with "
@@ -564,6 +594,7 @@ def build_evidence_document(
                 "acoustic construct is presented as a measurement."
             ),
             "pause_list_truncated": bool(analysis.get("pause_list_truncated")),
+            "pause_mode_fallback": analysis.get("pause_mode_fallback"),
         },
         "self_listen_suggestions": suggestions,
         "self_listen_policy": (
@@ -1964,10 +1995,15 @@ def _pause_state_for_attempt(
     config: Any,
     grounded: GroundedConfig,
     supplied: PauseCalibrationState | None,
+    *,
+    tenant_user_id: str | None = None,
 ) -> PauseCalibrationState:
     if supplied is not None:
         return supplied
-    user_id = str(attempt.get("userId") or attempt.get("user_id") or "owner")
+    # Multi-tenant (rev2 §7): the runner passes the claimed task's tenant
+    # explicitly. Fall back to an attempt field for legacy single-owner
+    # snapshots, then "owner" only for backward compatibility.
+    user_id = str(tenant_user_id or attempt.get("userId") or attempt.get("user_id") or "owner")
     verdicts = (
         attempt.get("pauseConfirmations")
         or attempt.get("pauseVerdicts")
@@ -2001,6 +2037,7 @@ def review_speaking_grounded(
     prosody_analyzer: Callable[..., dict[str, Any]] = analyze_calibrated,
     logger: logging.Logger | None = None,
     pause_calibration: PauseCalibrationState | None = None,
+    tenant_user_id: str | None = None,
 ) -> Feedback:
     """Produce a validated grounded speaking review.
 
@@ -2038,7 +2075,7 @@ def review_speaking_grounded(
     # Per-user pause calibration: default 1.6 until enough confirmations exist;
     # never below the measured collapse point.
     calibration = _pause_state_for_attempt(
-        attempt, config, grounded, pause_calibration
+        attempt, config, grounded, pause_calibration, tenant_user_id=tenant_user_id
     )
     multiplier = calibration.multiplier
     analysis = _run_analyzer(
