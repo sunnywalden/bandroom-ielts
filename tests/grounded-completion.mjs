@@ -208,4 +208,18 @@ reset();
   eq(profileRow().n_shown,shownBefore,'n_shown not inflated by altered replay');
   eq(sql.prepare('SELECT COUNT(*) n FROM calibration_candidates WHERE attempt_id=?').get(job.jobId).n,1,'still exactly one candidate row');
 }
+// ⑪ fail-closed: snapshot lacking recording digest -> recording_unbound (no skip).
+reset();
+{
+  const job=insertSpeakingJob();
+  const fence=await commitDecode(job);
+  // strip the recording identity from the frozen snapshot
+  const row=sql.prepare('SELECT snapshot FROM review_jobs WHERE id=?').get(job.jobId);
+  const snap=JSON.parse(row.snapshot); delete snap.recording;
+  sql.prepare('UPDATE review_jobs SET snapshot=? WHERE id=?').run(JSON.stringify(snap), job.jobId);
+  const res=await callReviewTool(owner,'complete_review_task',completeArgs(job,fence,wireAnalysis([cand()])));
+  eq(res.isError,true,'absent snapshot recording rejected');
+  eq(text(res).error,'recording_unbound','recording_unbound code');
+  eq(sql.prepare('SELECT COUNT(*) n FROM calibration_candidates WHERE attempt_id=?').get(job.jobId).n,0,'no candidate rows on unbound snapshot');
+}
 console.log(JSON.stringify({suite:'grounded-completion',checks,passed:true}));
