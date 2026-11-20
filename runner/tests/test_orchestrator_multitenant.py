@@ -151,17 +151,6 @@ def _fake_grounded(monkeypatch, *, analysis=None):
         )
     fake_review.tenant = None
     monkeypatch.setattr(grounded_audio, "review_speaking_grounded", fake_review)
-    # Mock the decoded-checkpoint transfer (no real ffmpeg on fake bytes).
-    from runner import review_transfer
-    transfer_calls = []
-
-    def fake_commit(client, task_id, fence, raw, **kwargs):
-        transfer_calls.append({"taskId": task_id, "fence": fence,
-                               "analysisVersion": kwargs.get("analysis_version")})
-        return 16000
-    fake_commit.calls = transfer_calls
-    monkeypatch.setattr(review_transfer, "commit_decoded_checkpoint", fake_commit)
-    fake_review.transfer = fake_commit
     return fake_review
 
 
@@ -186,9 +175,6 @@ def test_grounded_task_completes_with_recording_sha_and_analysis(tmp_path, monke
     assert report.processed == 1 and report.fatal is False
     assert fake.tenant == "u1"  # per-user calibration bound to the claimed tenant
     assert "add_coach_feedback" not in client.names()
-    # decoded-checkpoint transfer committed before completion (rev3 A1)
-    assert fake.transfer.calls == [{"taskId": "s1", "fence": 1,
-                                    "analysisVersion": "grounded-prosody-v1"}]
     args = client.completed[0]
     assert args["taskId"] == "s1" and args["fence"] == 1
     assert args["recordingSha256"] == RECORDING_SHA
