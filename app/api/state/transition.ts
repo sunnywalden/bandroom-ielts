@@ -3,6 +3,7 @@ import { dayStamp, initial, labels, oldOrder, sampleEpoch, stages, type Entry, t
 
 import { getExercises, type Lesson } from "../../curriculum";
 import { periods } from "../../period";
+import { parseSession } from "../../speaking-session";
 
 const date = z.string().date();
 const skill = z.enum(["Listening","Reading","Writing","Speaking"]);
@@ -30,10 +31,51 @@ export const snapshotSchema = z.object({
   fullTests:z.array(fullTest).optional(),reports:z.record(z.string().regex(/^W[1-9]\d*$/),report).optional(),
 }).strict();
 const attempt = z.object({ at:z.string().datetime(), text:z.string(), spoken:z.literal(true),
-  audio:z.string().uuid().optional(), local:z.string().uuid().optional() }).strict();
+  audio:z.string().uuid().optional(), local:z.string().uuid().optional(),
+  // Session-era fields (docs §7.1). Legacy rows omit them and keep parsing.
+  sessionId:z.string().trim().min(1).max(80).optional(),
+  part:z.union([z.literal(1),z.literal(2),z.literal(3)]).optional(),
+  questionId:z.string().trim().min(1).max(96).optional(),
+  seq:z.number().int().min(0).max(99).optional(),
+  mode:z.enum(["daily","full","mock"]).optional(),
+  notes:z.string().max(2048).optional(),
+  reviewed:z.boolean().optional(),
+}).strict();
 
 function attempts(raw?:string) {
   try { return z.array(attempt).parse(JSON.parse(raw ?? "[]")); } catch { return null; }
+}
+type Attempt = z.infer<typeof attempt>;
+
+function textBytes(value:string|undefined){return value===undefined?0:new TextEncoder().encode(value).length}
+const PART1_CAP=40,PART2_CAP=40,PART3_CAP=40,MOCK_CAP=30,DRILL_CAP=12,NOTES_BYTES=2048,SESSION_BYTES=4096,FOCUS_BYTES=8192,DRILL_BYTES=32768;
+const MUTABLE_SPEAK=new Set(["speakingPhase","speakingSession","speakingMockSession","speakingFocus","speakingDrillTakes","notes","speakingMockComplete"]);
+
+function drillTakesValid(raw:string|undefined){
+  if(raw===undefined||!raw.trim())return true;
+  try {
+    const value=JSON.parse(raw) as {takes?:unknown};
+    if(!value||!Array.isArray(value.takes)||value.takes.length>DRILL_CAP)return false;
+    return value.takes.every(take=>Boolean(take)&&typeof take==="object"
+      &&typeof (take as Record<string,unknown>).attemptId==="string");
+  } catch {return false}
+}
+function sessionsValid(after:Entry){
+  const session=after.speakingSession?.trim()?parseSession(after.speakingSession):null;
+  if(after.speakingSession?.trim()&&(!session||session.mode==="mock"))return false;
+  const mock=after.speakingMockSession?.trim()?parseSession(after.speakingMockSession):null;
+  if(after.speakingMockSession?.trim()&&(!mock||mock.mode!=="mock"))return false;
+  return textBytes(after.speakingSession)<=SESSION_BYTES&&textBytes(after.speakingMockSession)<=SESSION_BYTES;
+}
+function newRows(after:Attempt[],prior:Attempt[],cap:number,check:(row:Attempt)=>boolean){
+  if(!after.length||after.length>cap||!check(after[after.length-1]))return false;
+  const append=after.length===prior.length+1;
+  // A full field evicts its oldest row before appending, matching the client
+  // cap. Without eviction the 41st answer would be rejected instead of saved.
+  const evict=after.length===cap&&prior.length>=cap;
+  if(!append&&!evict)return false;
+  const kept=after.slice(0,-1),drop=prior.length-kept.length;
+  return drop>=0&&kept.every((row,index)=>same(row,prior[index+drop]));
 }
 
 export function same(a:unknown,b:unknown):boolean {
@@ -43,7 +85,7 @@ export function same(a:unknown,b:unknown):boolean {
   return Object.keys(one).length===Object.keys(two).length && Object.keys(one).every(k=>Object.hasOwn(two,k)&&same(one[k],two[k]));
 }
 const byStage:Record<Stage,RegExp>={
-  speak:/^speaking(Part2|Followup)(Draft)?$|^speaking(Phase|Review|Complete)$/,
+  speak:/^speaking(Part1|Part2|Followup|Mock|MockSession|MockComplete|Session|Focus|DrillTakes)(Draft)?$|^speaking(Phase|Review|Complete)$|^notes$/,
   vocab:/^vocab(Recall(Correct|Draft)?|Use(Draft)?|Batch|Done)$/,
   listen:/^listen(Q[01](Correct)?|Mode[01]|Batch|Done)$/,
   read:/^read(Q[01](Correct)?|Evidence[01]|Batch|Done)$/,
@@ -52,7 +94,9 @@ const byStage:Record<Stage,RegExp>={
 function ready(day:number, stage:Stage, e:Entry) {
   if(day===11 && stage!=="speak" && stage!=="review") return true;
   switch(stage){
-    case "speak": return e.speakingComplete==="yes" && !!e.speakingReview?.trim()
+    // A finished session may freeze a focus instead of free text; the legacy
+    // self-review still counts when present. Neither may be an empty string.
+    case "speak": return e.speakingComplete==="yes" && (!!e.speakingReview?.trim() || !!e.speakingFocus?.trim())
       && !!attempts(e.speakingFollowup)?.length && (day===11 || !!attempts(e.speakingPart2)?.length);
     case "vocab": return e.vocabDone==="1" && !!e.vocabRecall?.trim() && !!e.vocabUse?.trim();
     case "listen":case "read": return e[stage+"Done"]==="1" && [0,1].every(i=>
@@ -74,13 +118,44 @@ function validEntry(day:number, stage:Stage, before:Entry, after:Entry, lesson?:
       continue;
     }
     if(!byStage[stage].test(k))return false;
-    if(k==="speakingPart2" || k==="speakingFollowup"){
+    if(k==="speakingPart1" || k==="speakingPart2" || k==="speakingFollowup" || k==="speakingMock"){
       const prior=attempts(before[k]), next=attempts(after[k]);
-      if(!prior || !next || next.length!==prior.length+1 || !prior.every((a,i)=>same(a,next[i])))return false;
+      if(!prior || !next)return false;
+      const cap=k==="speakingPart1"?PART1_CAP:k==="speakingPart2"?PART2_CAP:k==="speakingFollowup"?PART3_CAP:MOCK_CAP;
+      const rowValid=(row:Attempt)=>{
+        if(k==="speakingPart1")return row.part===1&&row.reviewed===false;
+        if(k==="speakingPart2")return row.part===undefined||row.part===2;
+        if(k==="speakingFollowup")return row.part===undefined||row.part===3;
+        return row.mode==="mock";
+      };
+      if(!newRows(next,prior,cap,rowValid))return false;
       if(k==="speakingFollowup" && day!==11 && !attempts(before.speakingPart2)?.length)return false;
-    } else if(before[k]!==undefined && !(k.endsWith("Draft") || k==="speakingPhase"))return false;
+    } else if(before[k]!==undefined && !MUTABLE_SPEAK.has(k) && !k.endsWith("Draft"))return false;
   }
-  if(stage==="speak" && changed.some(k=>k==="speakingPart2" || k==="speakingFollowup" || k==="speakingPhase")){
+  if(stage==="speak"){
+    if(changed.includes("speakingPhase") && !["part1","part2","followup","review"].includes(after.speakingPhase??""))return false;
+    // A mock is a separate exercise: it may be marked complete on its own but
+    // can never complete the day or borrow the daily review flag.
+    if(changed.includes("speakingMockComplete")
+      &&(after.speakingMockComplete!=="yes"||!attempts(after.speakingMock)?.length))return false;
+    if(changed.includes("speakingComplete")
+      &&changed.some(k=>k==="speakingMock"||k==="speakingMockComplete"||k==="speakingMockSession"))return false;
+    if(!sessionsValid(after))return false;
+    if(textBytes(after.notes)>NOTES_BYTES||textBytes(after.speakingFocus)>FOCUS_BYTES
+      ||textBytes(after.speakingDrillTakes)>DRILL_BYTES)return false;
+    if(!drillTakesValid(after.speakingDrillTakes))return false;
+    if(after.speakingFocus?.trim()){
+      try {
+        const focus=JSON.parse(after.speakingFocus) as {history?:unknown};
+        if(!focus||typeof focus!=="object"||(Array.isArray(focus.history)&&focus.history.length>5))return false;
+      } catch {return false}
+    }
+  }
+  // Legacy two-question flow keeps mirroring speakingPhase. Once a session
+  // object exists the session reducer is authoritative and the mirror is only
+  // a display hint.
+  if(stage==="speak" && !after.speakingSession?.trim()
+    && changed.some(k=>k==="speakingPart2" || k==="speakingFollowup" || k==="speakingPhase")){
     const hasFollowup=Boolean(attempts(after.speakingFollowup)?.length);
     const hasPart2=Boolean(attempts(after.speakingPart2)?.length);
     const expectedPhase=hasFollowup?"review":day===11||hasPart2?"followup":"part2";

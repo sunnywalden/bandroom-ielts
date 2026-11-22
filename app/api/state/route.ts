@@ -81,10 +81,10 @@ export async function PUT(request: Request) {
   if (!validTransition(prior?.state,state,lesson)) return json({error:"invalid_transition"},422);
   const previous=prior?.state as typeof state|undefined, refs:{id:string;phase:string}[]=[];
   const entry=state.entries[state.day]??{}, old=previous?.entries?.[state.day]??{};
-  for (const key of ["speakingPart2","speakingFollowup"]) {
+  for (const key of ["speakingPart1","speakingPart2","speakingFollowup","speakingMock"]) {
     if (entry[key]===old[key]||!entry[key]) continue;
     const last=JSON.parse(entry[key]).at(-1);
-    if (last?.audio) refs.push({id:last.audio,phase:key==="speakingPart2"?"part2":"followup"});
+    if (last?.audio) refs.push({id:last.audio,phase:key==="speakingPart1"?"part1":key==="speakingPart2"?"part2":key==="speakingMock"?"mock":"followup"});
   }
   if ((state.fullTests?.length??0)>(previous?.fullTests?.length??0) && state.fullTests.at(-1)?.audio)
     refs.push({id:state.fullTests.at(-1).audio,phase:"assessment"});
@@ -108,8 +108,10 @@ export async function PUT(request: Request) {
     linked.add(id);
   }
   if (submissionKey) {
-    const before = await reviewAttempts(state.day, old);
-    const after = await reviewAttempts(state.day, entry);
+    // Mock attempts are a separate exercise and never count as the one new
+    // subjective answer a review submission must carry.
+    const before = (await reviewAttempts(state.day, old)).filter(a => a.field !== "speakingMock");
+    const after = (await reviewAttempts(state.day, entry)).filter(a => a.field !== "speakingMock");
     const submitted = after.filter(a => a.kind === "subjective" && !before.some(b => a.id === b.id));
     if (submitted.length !== 1 || state.finished || state.stage !== submitted[0].stage)
       return json({ error: "invalid_review_submission" }, 422);

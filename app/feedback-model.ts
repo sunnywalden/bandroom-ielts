@@ -48,6 +48,10 @@ export type ReviewAttempt = {
   id:string; day:number; field:string; index:number; stage:'speak'|'vocab'|'listen'|'read'|'write'|'review';
   title:string; kind:'objective'|'subjective'; response:string; conditions:string;
   evidence:string; recordingId?:string; at?:string; localOnly?:boolean;
+  // v2 identity fields (docs/speaking-ux-optimization-2026-11-22.md §7.2).
+  // They enter the hash only when the saved row carries them, so legacy
+  // attempt ids stay byte-identical.
+  questionId?:string; part?:1|2|3; seq?:number; mode?:'daily'|'full'|'mock';
 };
 export type ReviewLink = { id: string; sourceId: string; day: number };
 export type ReviewTaskStatus = {
@@ -58,21 +62,76 @@ export type AutomationStatus = {
   connected: boolean; lastSuccessAt: number|null; nextExpectedAt: number|null; status: string|null;
 };
 type Candidate = Omit<ReviewAttempt,'id'>;
+type SavedRow = {at?:unknown;text?:unknown;audio?:unknown;local?:unknown;part?:unknown;questionId?:unknown;seq?:unknown;mode?:unknown;reviewed?:unknown};
+
+type SavedRowMeta={part?:1|2|3;questionId?:string;seq:number;mode?:'daily'|'full'|'mock'};
+function rowMeta(row:SavedRow,index:number):SavedRowMeta {
+  const part=row.part===1||row.part===2||row.part===3?row.part:undefined;
+  const questionId=typeof row.questionId==='string'&&row.questionId.trim()?row.questionId.trim():undefined;
+  const seq=Number.isSafeInteger(row.seq)&&(row.seq as number)>=0?row.seq as number:index;
+  const mode=row.mode==='daily'||row.mode==='full'||row.mode==='mock'?row.mode:undefined;
+  return {part,questionId,seq,mode};
+}
+
+function speakTitle(field:string,index:number,meta:ReturnType<typeof rowMeta>):string {
+  // Part 2 stays the single answer it always was; only Part 3 practice draws
+  // numbered titles from its question sequence.
+  if(field==='speakingPart2')return '口语 Part 2 · '+(index===0?'首次回答':'重答 '+index);
+  if(meta.questionId||meta.part===3)
+    return `口语 Part 3 · 第 ${meta.seq+1} 题`;
+  return '口语 Part 3 · '+(index===0?'首次回答':'重答 '+index);
+}
+
+// Explicit allowlist, frozen key order (docs §7.2). Never spread the candidate:
+// adding a presentation or mutable field must not move historical ids.
+function identityOf(candidate:Candidate):Record<string,unknown> {
+  const identity:Record<string,unknown>={
+    day:candidate.day,field:candidate.field,index:candidate.index,stage:candidate.stage,
+    response:candidate.response,conditions:candidate.conditions,evidence:candidate.evidence,
+  };
+  // v2 fields sit at a fixed position after `evidence` and before optional
+  // recording keys. `seq`, `mode`, `notes`, `reviewed` and `sessionId` never
+  // enter the hash.
+  if(Object.hasOwn(candidate,'questionId'))identity.questionId=candidate.questionId;
+  if(Object.hasOwn(candidate,'part'))identity.part=candidate.part;
+  if(Object.hasOwn(candidate,'recordingId'))identity.recordingId=candidate.recordingId;
+  if(Object.hasOwn(candidate,'at'))identity.at=candidate.at;
+  if(Object.hasOwn(candidate,'localOnly'))identity.localOnly=candidate.localOnly;
+  return identity;
+}
+
 export async function reviewAttempts(day:number, entry:Record<string,string>):Promise<ReviewAttempt[]> {
   const candidates:Candidate[]=[];
   const add=(field:string,stage:Candidate['stage'],title:string,kind:Candidate['kind']='subjective',conditions='',evidence='')=>{
     if(entry[field]?.trim())candidates.push({day,field,index:0,stage,title,kind,response:entry[field],conditions,evidence});
   };
-  for(const field of ['speakingPart2','speakingFollowup']) {
-    let rows:unknown; try{rows=JSON.parse(entry[field]||'[]')}catch{continue}
-    if(!Array.isArray(rows))continue;
-    rows.forEach((row,index)=>{
-      if(!row||typeof row.at!=='string'||typeof row.text!=='string')return;
-      candidates.push({day,field,index,stage:'speak',title:(field==='speakingPart2'?'口语 Part 2':'口语 Part 3')+' · '+(index===0?'首次回答':'重答 '+index),
-        kind:'subjective',response:row.text,conditions:row.audio?'已提交录音':row.local?'录音仅在原浏览器':'自报口练；无可核听录音',evidence:'',
-        ...(typeof row.audio==='string'?{recordingId:row.audio}:{}),at:row.at,localOnly:!!row.local});
+  const speakRows=(field:string,raw:string|undefined,kindField:'legacy'|'mock')=>{
+    let rows:unknown;try{rows=JSON.parse(raw||'[]')}catch{return}
+    if(!Array.isArray(rows))return;
+    rows.forEach((rawRow,index)=>{
+      const row=(rawRow||{}) as SavedRow;
+      if(typeof row.at!=='string'||typeof row.text!=='string')return;
+      // Part 3 practice questions can be marked unreviewed (daily mode only
+      // reviews the first one); legacy rows have no flag and stay reviewable.
+      if(field==='speakingFollowup'&&row.reviewed===false)return;
+      const meta=rowMeta(row,index);
+      const title=kindField==='mock'
+        ?`练习模考 · Part ${meta.part??2} · 第 ${meta.seq+1} 题`
+        :speakTitle(field,index,meta);
+      candidates.push({day,field,index,stage:'speak',title,kind:'subjective',response:row.text,
+        conditions:row.audio?'已提交录音':row.local?'录音仅在原浏览器':'自报口练；无可核听录音',evidence:'',
+        ...(typeof row.audio==='string'?{recordingId:row.audio}:{}),at:row.at,localOnly:!!row.local,
+        ...(meta.questionId?{questionId:meta.questionId}:{}),
+        ...(meta.part?{part:meta.part}:{}),
+        ...(meta.mode?{mode:meta.mode}:{}),
+        ...(Number.isSafeInteger(row.seq)?{seq:meta.seq}:{}),
+      });
     });
-  }
+  };
+  for(const field of ['speakingPart2','speakingFollowup'])speakRows(field,entry[field],'legacy');
+  // Part 1 warm-ups never become review tasks: the field is intentionally not
+  // enumerated here even though it is persisted for session resumes.
+  if(entry.speakingMockComplete==='yes')speakRows('speakingMock',entry.speakingMock,'mock');
   add('speakingReview','speak','口语自评');
   add('vocabRecall','vocab','词汇回忆','objective');
   add('vocabUse','vocab','词汇造句');
@@ -83,8 +142,7 @@ export async function reviewAttempts(day:number, entry:Record<string,string>):Pr
   add('reviewMemo','review','本课复盘');
   return Promise.all(candidates.map(async candidate=>{
     // Presentation labels may change without invalidating saved feedback.
-    const identity:Partial<Candidate>={...candidate};delete identity.title;delete identity.kind;
-    const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(identity)));
+    const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(identityOf(candidate))));
     const digest=Array.from(new Uint8Array(hash),x=>x.toString(16).padStart(2,'0')).join('');
     return {...candidate,id:`v1:${candidate.field}:${candidate.index}:${digest}`};
   }));

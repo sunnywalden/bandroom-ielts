@@ -56,6 +56,7 @@ beforeEach(()=>{
     if(url==='/api/coach')return coachFault?coachFault():response(200,{account:'fixture-learner',extras:{},feedback:[]});
     if(url==='/api/state'&&!init.method)return response(200,{account:'fixture-learner',revision,state:structuredClone(state)});
     if(url==='/api/audio')return audioFault?audioFault(init):response(201,{id:init.headers['X-Bandroom-Attempt']});
+    if(url==='/api/speaking/progress')return response(200,{points:[],legacyCount:0,truncated:false,windowDays:180,generatedAt:'2026-11-22T00:00:00.000Z',metricCounts:{speechRatio:0,longPauseRatio:0,grammarIssues:0,selfListenWords:0}});
     if(url==='/api/state'){
       if(stateFault)return stateFault(init);
       const payload=JSON.parse(init.body);state=payload.state;revision=payload.revision+1;return receipt(payload);

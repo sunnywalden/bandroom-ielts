@@ -1,6 +1,13 @@
 import {requestJSON} from './request-json';
 export type QuestionPhase = 'part2' | 'followup';
-export type Answer = { at:string; text:string; spoken:boolean; audio?:string; local?:string };
+// New sessions record Part 1 and mock answers too. Part 3 keeps the historical
+// `followup` phase so existing recordings and state stay valid.
+export type AudioPhase = 'part1' | 'part2' | 'followup' | 'mock';
+export type Answer = {
+  at:string; text:string; spoken:boolean; audio?:string; local?:string;
+  sessionId?:string; part?:1|2|3; questionId?:string; seq?:number;
+  mode?:'daily'|'full'|'mock'; notes?:string; reviewed?:boolean;
+};
 export type RecordingDraft = { id:string; at:string; blob?:Blob; audio?:string };
 
 export {newClientId,newClientId as newRecordingId} from './client-id';
@@ -17,8 +24,10 @@ export function currentPhase(day:number,entry:Record<string,string>):QuestionPha
   return day===11||answers(entry.speakingPart2).length?'followup':'part2';
 }
 
-export function draftKey(account:string,day:number,phase:QuestionPhase){
-  return JSON.stringify(['speaking-draft-v1',account,day,phase]);
+// `tag` scopes a draft to one question inside a session. Omitted, the key is
+// byte-identical to the legacy two-question key so old drafts still resume.
+export function draftKey(account:string,day:number,phase:AudioPhase,tag?:string){
+  return JSON.stringify(tag?['speaking-draft-v1',account,day,phase,tag]:['speaking-draft-v1',account,day,phase]);
 }
 
 export function submitted(draft:RecordingDraft,items:Answer[]){
@@ -92,20 +101,34 @@ export function clearLocalClips():Promise<boolean> {
   });
 }
 
-export async function uploadDraft(draft:RecordingDraft,account:string,day:number,phase:QuestionPhase):Promise<string> {
+function uploadError(status:number,type:ResponseType){
+  if(status===401||status===403||status===428||type==='opaqueredirect')
+    return Error('请重新登录本账号，再提交本题录音。');
+  if(status===413||status===415)return Error('服务器未能接收这段音频。请下载保留原件。');
+  if(status===409)return Error('录音标识与已上传内容冲突。请下载保留录音，再读取最新进度。');
+  return Error(`音频上传失败（${status}），录音仍可试听。恢复连接后请再次提交。`);
+}
+
+export async function uploadDraft(draft:RecordingDraft,account:string,day:number,phase:AudioPhase):Promise<string> {
   if(draft.audio)return draft.audio;
   if(!draft.blob)throw Error('找不到可提交的录音，请重新打开本题草稿。');
   const {response:res,data:result}=await requestJSON<{id?:string}>('/api/audio',{method:'POST',redirect:'manual',headers:{
     'Content-Type':draft.blob.type||'audio/webm','X-Bandroom-Account':account,
     'X-Bandroom-Day':String(day),'X-Bandroom-Phase':phase,'X-Bandroom-Attempt':draft.id
   },body:draft.blob},45_000);
-  if(!res.ok){
-    if(res.status===401||res.status===403||res.status===428||res.type==='opaqueredirect')
-      throw Error('请重新登录本账号，再提交本题录音。');
-    if(res.status===413||res.status===415)throw Error('服务器未能接收这段音频。请下载保留原件。');
-    if(res.status===409)throw Error('录音标识与已上传内容冲突。请下载保留录音，再读取最新进度。');
-    throw Error(`音频上传失败（${res.status}），录音仍可试听。恢复连接后请再次提交。`);
-  }
+  if(!res.ok)throw uploadError(res.status,res.type);
   if(!result||result.id!==draft.id)throw Error('上传结果尚未确认。请再次提交同一份录音。');
+  return result.id;
+}
+
+// Drill takes and mic checks carry no lesson context: the generic path lets the
+// server mint an id, so a 15-second drill retry never claims to be a Part 2
+// attempt. The caller stores the returned id with the take.
+export async function uploadRecording(blob:Blob,account:string):Promise<string> {
+  const {response:res,data:result}=await requestJSON<{id?:string}>('/api/audio',{method:'POST',redirect:'manual',headers:{
+    'Content-Type':blob.type||'audio/webm','X-Bandroom-Account':account
+  },body:blob},45_000);
+  if(!res.ok)throw uploadError(res.status,res.type);
+  if(!result?.id)throw Error('上传结果尚未确认。请再次提交同一份录音。');
   return result.id;
 }
