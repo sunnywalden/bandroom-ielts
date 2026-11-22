@@ -67,7 +67,7 @@ registerHooks({
     if (specifier === "cloudflare:workers")
       return { url: "data:text/javascript,export const env=globalThis.__leaseEnv", shortCircuit: true };
     if (specifier === "@/db")
-      return { url: "data:text/javascript,export function getDb(){return globalThis.testDb}", shortCircuit: true };
+      return { url: "data:text/javascript,export function getDb(){return globalThis.testDb};export function getTenantDb(){return globalThis.testDb};export function drizzleFromBinding(binding){return globalThis.__leaseDrizzle(binding)}", shortCircuit: true };
     if (specifier.startsWith("@/"))
       return { url: new URL("../" + specifier.slice(2) + ".ts", import.meta.url).href, shortCircuit: true };
     if ((specifier.startsWith("./") || specifier.startsWith("../")) && !specifier.endsWith(".ts") && context.parentURL?.endsWith(".ts"))
@@ -75,6 +75,13 @@ registerHooks({
     return next(specifier, context);
   },
 });
+
+// drizzleFromBinding() must build a real Drizzle client over the binding it is
+// handed (entitlement lookups); returning globalThis.testDb would route the
+// lookup through the deliberately-throwing audit mock.
+const { drizzle } = await import("drizzle-orm/d1");
+const schema = await import("../db/schema.ts");
+globalThis.__leaseDrizzle = binding => drizzle(binding, { schema });
 
 const { callReviewTool } = await import("../lib/review-tools.ts");
 const { auditServiceCall } = await import("../lib/service-audit.ts");

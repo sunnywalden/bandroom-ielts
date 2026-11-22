@@ -8,8 +8,32 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { asTenantId, assertTenantPredicate } = await import("../lib/tenant-db.ts");
+const { asTenantId, assertTenantPredicate, tenantD1 } = await import("../lib/tenant-db.ts");
 const { scopedTenantDb, tenantPrepare } = await import("../lib/tenant-repository.ts");
+const { eq } = await import("drizzle-orm");
+const { drizzle } = await import("drizzle-orm/d1");
+const schema = await import("../db/schema.ts");
+
+/** A D1-shaped binding that records the SQL it is asked to prepare. */
+function recordingD1() {
+  const prepared = [];
+  return {
+    prepared,
+    prepare(sql) {
+      prepared.push(sql);
+      return {
+        bind() { return this; },
+        async first() { return null; },
+        async all() { return { results: [] }; },
+        async raw() { return []; },
+        async run() { return { meta: { changes: 0 } }; },
+      };
+    },
+    async batch(statements) {
+      return statements.map(() => ({ results: [] }));
+    },
+  };
+}
 
 test("bypass: user_id compared to itself is rejected", () => {
   const cases = [
@@ -18,6 +42,10 @@ test("bypass: user_id compared to itself is rejected", () => {
     "SELECT * FROM review_tasks t WHERE t.user_id = t.user_id",
     "UPDATE review_tasks SET state='blocked' WHERE user_id = user_id",
     "DELETE FROM learner_states WHERE learner_states.user_id=learner_states.user_id",
+    // Drizzle emits quoted, schema-qualified identifiers; the guard must still
+    // normalise them before comparing.
+    'SELECT * FROM "review_tasks" WHERE "review_tasks"."user_id" = "review_tasks"."user_id"',
+    'UPDATE "learner_states" SET "state"=? WHERE "learner_states"."user_id" = "learner_states"."user_id"',
   ];
   for (const sql of cases) {
     assert.throws(() => assertTenantPredicate(sql), /tenant_query_tautology/, sql);
@@ -75,6 +103,12 @@ test("legitimate scoped queries still pass", () => {
     // Cross-alias joins are not self-comparisons and must not be misread.
     "SELECT 1 FROM review_tasks t JOIN user_cost_ledger l ON l.user_id=t.user_id WHERE t.user_id=?",
     "SELECT 1 FROM review_tasks t JOIN users u ON u.user_id=t.user_id WHERE t.user_id=? AND u.status='active'",
+    // Actual Drizzle query-builder shapes (quoted, schema-qualified columns).
+    'select "user_id", "revision" from "learner_states" where "learner_states"."user_id" = ?',
+    'update "review_tasks" set "state" = ? where ("review_tasks"."id" = ? and "review_tasks"."user_id" = ?)',
+    'delete from "consent_events" where "consent_events"."user_id" = ?',
+    // Attribution by INSERT target column list is accepted at runtime too.
+    'insert into "teacher_feedback" ("id", "user_id", "day") values (?, ?, ?)',
   ];
   for (const sql of cases) {
     assert.doesNotThrow(() => assertTenantPredicate(sql), sql);
@@ -130,4 +164,67 @@ test("tenantPrepare asserts the statement and validates the tenant", () => {
     /invalid_tenant_id/,
   );
   assert.equal(calls, 1, "raw db never reached for unsafe inputs");
+});
+
+// --- Runtime wiring: Drizzle over tenantD1 (db/index.ts getTenantDb) --------
+// These pin the S4 closure: the tripwire must see the SQL the Drizzle query
+// builder actually prepares, not just hand-written raw SQL in tests.
+
+test("tenantD1 guards the SQL Drizzle prepares for a scoped query", async () => {
+  const binding = recordingD1();
+  const db = drizzle(tenantD1(binding, asTenantId("u-1")), { schema });
+  await db
+    .select({ userId: schema.learnerStates.userId })
+    .from(schema.learnerStates)
+    .where(eq(schema.learnerStates.userId, "u-1"))
+    .all();
+  assert.equal(binding.prepared.length, 1);
+  assert.match(binding.prepared[0], /from "learner_states"/);
+  assert.match(binding.prepared[0], /"learner_states"\."user_id" = \?/);
+});
+
+test("tenantD1 rejects an unscoped Drizzle query before SQLite is reached", async () => {
+  const binding = recordingD1();
+  const db = drizzle(tenantD1(binding, asTenantId("u-1")), { schema });
+  // Drizzle prepares synchronously, so the tripwire throws from `.all()`.
+  assert.throws(
+    () => db.select().from(schema.learnerStates).all(),
+    /tenant_query_missing_user_id/,
+  );
+  assert.deepEqual(binding.prepared, [], "no statement may reach the raw binding");
+});
+
+test("tenantD1 rejects a tautological Drizzle predicate", async () => {
+  const binding = recordingD1();
+  const db = drizzle(tenantD1(binding, asTenantId("u-1")), { schema });
+  const column = schema.reviewTasks.userId;
+  assert.throws(
+    () => db.select().from(schema.reviewTasks).where(eq(column, column)).all(),
+    /tenant_query_tautology/,
+  );
+  assert.deepEqual(binding.prepared, []);
+});
+
+test("tenantD1 guards every statement in a D1 batch", async () => {
+  const binding = recordingD1();
+  const db = drizzle(tenantD1(binding, asTenantId("u-1")), { schema });
+  const scoped = db
+    .select()
+    .from(schema.learnerStates)
+    .where(eq(schema.learnerStates.userId, "u-1"));
+  const unscoped = db.select().from(schema.learnerStates);
+  await assert.rejects(db.batch([scoped, unscoped]), /tenant_query_missing_user_id/);
+});
+
+test("tenantD1 forwards non-prepare members bound to the original binding", () => {
+  const binding = {
+    marker: "raw",
+    prepare(sql) { return { sql }; },
+    async batch(statements) { return statements; },
+    whoami() { return this.marker; },
+  };
+  const guarded = tenantD1(binding, asTenantId("u-1"));
+  assert.equal(guarded.marker, "raw");
+  assert.equal(guarded.whoami(), "raw");
+  return guarded.batch([1]).then(result => assert.deepEqual(result, [1]));
 });

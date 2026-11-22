@@ -14,7 +14,7 @@ registerHooks({
       return { url: "data:text/javascript,export const env={};", shortCircuit: true };
     }
     if (specifier === "@/db") {
-      return { url: "data:text/javascript,export function getDb(){throw new Error('not used')}", shortCircuit: true };
+      return { url: "data:text/javascript,export function getDb(){throw new Error('not used')};export function getTenantDb(){throw new Error('not used')};export function drizzleFromBinding(){throw new Error('not used')}", shortCircuit: true };
     }
     if (specifier.startsWith("@/")) {
       return { url: new URL("../" + specifier.slice(2) + ".ts", import.meta.url).href, shortCircuit: true };

@@ -10,6 +10,9 @@ registerHooks({
     if (specifier === "cloudflare:workers") return mock("export const env=globalThis.__authEnv??{}");
     if (specifier === "next/headers") return mock("export async function headers(){return new Headers(globalThis.__authHeaders??{})}");
     // MT-2: the adapter imports lib/pat, which uses the @/db schema alias.
+    // db/index.ts is a directory module, so the generic @/ mapping (which would
+    // look for db.ts) must not see it.
+    if (specifier === "@/db") return {url: new URL("../db/index.ts", import.meta.url).href, shortCircuit: true};
     if (specifier.startsWith("@/")) return {url: new URL("../" + specifier.slice(2) + ".ts", import.meta.url).href, shortCircuit: true};
     // Node's type-stripping loader requires an extension; the app build resolves
     // extensionless relative imports. Mirror that here (e.g. ./tenant-identity).

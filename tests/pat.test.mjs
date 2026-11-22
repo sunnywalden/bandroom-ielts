@@ -49,6 +49,11 @@ registerHooks({
     if (specifier === "next/headers") {
       return { url: "data:text/javascript,export async function headers(){return new Headers()}", shortCircuit: true };
     }
+    // lib/pat.ts constructs its Drizzle client through db/index.ts, which is a
+    // directory module; the generic @/ alias mapping below would look for db.ts.
+    if (specifier === "@/db") {
+      return { url: new URL("../db/index.ts", import.meta.url).href, shortCircuit: true };
+    }
     if (specifier.startsWith("@/")) {
       return { url: new URL("../" + specifier.slice(2) + ".ts", import.meta.url).href, shortCircuit: true };
     }

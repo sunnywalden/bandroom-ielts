@@ -15,10 +15,14 @@
 // authoritative controls remain the write-side cross-tenant matrix
 // (tests/tenant-isolation) and code review.
 //
-// Existing Drizzle query-builder code is NOT wired through this module: it is
-// guarded by review plus the cross-tenant matrix. Do not wrap getDb() or
-// reviewTaskDb() — the live runner queue intentionally claims across tenants
-// (claimNextReviewTask), which needs an explicit allowlist design beyond MT-5.
+// Drizzle query-builder code reaches D1 through getTenantDb(userId) (db/index.ts),
+// which wraps the binding so every prepared statement — including each entry of
+// $client.batch(...) — runs the same tripwire (MT-5 S4 closure). Files that keep
+// the unscoped getDb() client are reviewed service/cross-tenant paths listed in
+// scripts/tenant-db-allowlist.mjs and enforced by ESLint plus the static guard
+// test. reviewTaskDb() deliberately stays unwrapped: the live runner queue
+// claims across tenants (claimNextReviewTask) and derives the tenant from the
+// claimed row.
 
 import { asTenantId, assertTenantPredicate, type TenantId } from "./tenant-db.ts";
 

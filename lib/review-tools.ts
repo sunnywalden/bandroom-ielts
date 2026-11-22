@@ -17,8 +17,7 @@ import {
 import { signLease, leaseEnabled, verifyLease, type LeasePayload } from "./lease";
 import { assertConsent, ConsentError } from "./consent";
 import { hasEntitlement } from "./entitlement";
-import { drizzle } from "drizzle-orm/d1";
-import * as schema from "@/db/schema";
+import { drizzleFromBinding } from "@/db";
 
 const taskId = z.string().trim().min(1).max(200).describe("Exact review task ID returned by claim_review_tasks.");
 // B1: server-issued capability returned by claim_next_review_task. When present
@@ -213,7 +212,7 @@ function effectiveScope(
 // tenant's recording). Builds a Drizzle handle from the raw queue D1 client.
 async function assertVoiceConsent(rawDb: unknown, tenantUserId: string): Promise<void> {
   try {
-    await assertConsent(drizzle(rawDb as never, { schema }), tenantUserId);
+    await assertConsent(drizzleFromBinding(rawDb), tenantUserId);
   } catch (error) {
     if (error instanceof ConsentError) throw new ReviewTaskError("consent_required", error.message);
     throw error;
@@ -291,7 +290,7 @@ export async function callReviewTool(
         });
         // MT-5 (G4): carry the task tenant's model entitlements so the runner
         // gates the NC detector / commercial TTS per tenant (fail-closed default).
-        const entDb = drizzle(db as never, { schema });
+        const entDb = drizzleFromBinding(db);
         const entitlements = {
           detector_self_listen: await hasEntitlement(entDb, task.userId, "detector_self_listen"),
           contrast_tts: await hasEntitlement(entDb, task.userId, "contrast_tts"),

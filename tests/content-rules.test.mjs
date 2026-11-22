@@ -48,7 +48,7 @@ const mock = source => ({url: "data:text/javascript," + encodeURIComponent(sourc
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier === "cloudflare:workers") return mock("export const env=globalThis.__contentEnv");
-    if (specifier === "@/db") return mock("export function getDb(){return globalThis.__contentDb}");
+    if (specifier === "@/db") return mock("export function getDb(){return globalThis.__contentDb};export function getTenantDb(){return globalThis.__contentDb};export function drizzleFromBinding(){return globalThis.__contentDb}");
     if (specifier.startsWith("@/")) return {url: new URL(specifier.slice(2) + ".ts", root).href, shortCircuit: true};
     if ((specifier.startsWith("./") || specifier.startsWith("../"))
       && !specifier.endsWith(".ts") && context.parentURL?.startsWith(root.href)

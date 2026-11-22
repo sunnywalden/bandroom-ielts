@@ -21,6 +21,8 @@ import { join, relative, sep } from "node:path";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const { assertTenantPredicate, referencedTenantTables, stripSql, TENANT_TABLES } =
   await import("../lib/tenant-db.ts");
+const { TENANT_DB_ALLOWLIST, TENANT_DB_ALLOWLIST_FILES } =
+  await import("../scripts/tenant-db-allowlist.mjs");
 
 // Reviewed service / cross-tenant exceptions. Keep this list small; each entry
 // must correspond to the rationale in the lib/tenant-db.ts header.
@@ -290,6 +292,74 @@ function sourceFiles() {
   const api = listFiles(join(root, "app/api"));
   return [...lib, ...api];
 }
+
+/** True when the source has a value (non-type-only) `@/db` import of `name`. */
+function importsValue(src, specifier, name) {
+  // `[^;{}]*` keeps the clause inside ONE import statement; without it the
+  // non-greedy match can start at an earlier `import {` and swallow several
+  // statements before reaching the target specifier.
+  const escaped = specifier.replace(/[/\\]/g, "\\$&");
+  const pattern = new RegExp(
+    String.raw`import\s+(?!type\b)\{([^;{}]*?)\}\s+from\s+["']${escaped}["']`,
+    "g",
+  );
+  for (const match of src.matchAll(pattern)) {
+    const names = match[1]
+      .split(",")
+      .map(part => part.trim().replace(/^type\s+/, ""))
+      .filter(Boolean);
+    if (names.includes(name)) return true;
+  }
+  return false;
+}
+
+/** True when the source imports any runtime value from `specifier`. */
+function importsAnyValue(src, specifier) {
+  const pattern = new RegExp(
+    String.raw`import\s+([^;]+?)\s+from\s+["']${specifier.replace(/[/\\]/g, "\\$&")}["']`,
+    "g",
+  );
+  for (const match of src.matchAll(pattern)) {
+    const clause = match[1].trim();
+    if (/^type\b/.test(clause)) continue; // `import type {...}`
+    const braces = clause.match(/\{([^}]*)\}/);
+    if (braces) {
+      const parts = braces[1].split(",").map(part => part.trim()).filter(Boolean);
+      if (parts.length > 0 && parts.every(part => /^type\s+/.test(part))) continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+test("only reviewed files import the unscoped getDb client", () => {
+  const importers = sourceFiles()
+    .filter(path => importsValue(readFileSync(path, "utf8"), "@/db", "getDb"))
+    .map(path => toPosix(relative(root, path)))
+    .sort();
+  assert.deepEqual(
+    importers,
+    [...TENANT_DB_ALLOWLIST_FILES].sort(),
+    "learner-facing files must use getTenantDb(userId); add a reviewed entry to scripts/tenant-db-allowlist.mjs only for a service/cross-tenant path",
+  );
+  assert.equal(
+    TENANT_DB_ALLOWLIST.length,
+    TENANT_DB_ALLOWLIST_FILES.size,
+    "allowlist must not contain duplicate entries",
+  );
+});
+
+test("Drizzle clients are constructed only in db/index.ts", () => {
+  const offenders = sourceFiles()
+    .filter(path => importsAnyValue(readFileSync(path, "utf8"), "drizzle-orm/d1"))
+    .map(path => toPosix(relative(root, path)))
+    .sort();
+  assert.deepEqual(
+    offenders,
+    [],
+    "construct Drizzle clients only in db/index.ts; learner code must call getTenantDb(userId)",
+  );
+});
 
 test("guard scanner detects a synthetic unscoped tenant query", () => {
   const offenders = scanSource(

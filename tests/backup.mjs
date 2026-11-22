@@ -68,7 +68,7 @@ try{
  if(mf){
    const {saveReviewCheckpoint}=await bundled('lib/review-tasks.ts',[{name:'isolated-db',setup(build){
      build.onResolve({filter:/^@\/db$/},()=>({path:'db',namespace:'isolated-db'}));
-     build.onLoad({filter:/^db$/,namespace:'isolated-db'},()=>({contents:"export function getDb(){throw new Error('Use the explicit test binding')}"}));
+     build.onLoad({filter:/^db$/,namespace:'isolated-db'},()=>({contents:"export function getDb(){throw new Error('Use the explicit test binding')};export function getTenantDb(){throw new Error('Use the explicit test binding')};export function drizzleFromBinding(){throw new Error('Use the explicit test binding')}"}));
    }}]);
    await run('INSERT INTO review_jobs(id,user_id,day,submission_key,request_hash,revision,snapshot,created_at) VALUES (?,?,?,?,?,?,?,?)','checkpoint-job','checkpoint-owner',12,'fixture','fixture',1,'{}','fixture');
    await run(`INSERT INTO review_tasks(id,review_job_id,user_id,kind,attempt_id,day,attempt_revision,stage,state,fence,attempts,lease_until,next_at,created_at,updated_at)
