@@ -11,8 +11,11 @@
 // dynamic SQL assembled at runtime, and a determined author can write novel SQL
 // that still slips through. The substantive controls remain the write-side
 // cross-tenant integration tests (tests/tenant-isolation) plus code review.
-// New data-access code should go through tenantScoped() / scopedTenantDb()
-// (lib/tenant-repository.ts) so the tripwire at least runs.
+// New data-access code should go through getTenantDb() (db/index.ts) for Drizzle
+// access, or tenantScoped() / scopedTenantDb() (lib/tenant-repository.ts) for
+// raw D1 access, so the tripwire runs before any statement reaches SQLite.
+// Files that intentionally keep the unscoped client are listed in
+// scripts/tenant-db-allowlist.mjs and enforced by ESLint + the static guard test.
 //
 // REVIEWED CROSS-TENANT / SERVICE EXCEPTIONS (intentionally NOT tripwire
 // failures; keep this list small and reviewed):
@@ -92,23 +95,46 @@ export function stripSql(sql: string): string {
 const IDENT = String.raw`(?:\w+\.)?(?:"[^"]+"|` + "`[^`]+`" + String.raw`|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*)`;
 const TABLE_REF = new RegExp(String.raw`\b(?:from|join|into|update)\s+(${IDENT})`, "gi");
 const FROM_LIST = /\bfrom\s+([^;]*?)(?=\bwhere\b|\bgroup\b|\border\b|\blimit\b|\bjoin\b|\bon\b|$)/gi;
-const HAS_TENANT_PREDICATE = /\b(?:\w+\.)?user_id\b\s*(?:=|\bin\b|\blike\b)/i;
+// A single identifier that may qualify a column (`t`, `"review_tasks"`, ...).
+const QUALIFIED_IDENT = String.raw`(?:\w+|"[^"]+"|` + "`[^`]+`" + String.raw`|\[[^\]]+\])`;
+const USER_ID_COL = String.raw`(?:"user_id"|` + "`user_id`" + String.raw`|\[user_id\]|\buser_id\b)`;
+// Accepts plain (`t.user_id = ?`) and quoted forms. Drizzle emits
+// `"learner_states"."user_id" = ?`, so quoted identifiers must count as a
+// predicate or the runtime tripwire (db/index.ts getTenantDb) would reject
+// every legitimate query-builder read.
+const HAS_TENANT_PREDICATE = new RegExp(
+  String.raw`(?:(?:${QUALIFIED_IDENT})\s*\.\s*)?${USER_ID_COL}\s*(?:=|\bin\b|\blike\b)`,
+  "i",
+);
 // Server-side attribution: an INSERT that derives user_id from the referenced
 // task, e.g. `(SELECT user_id FROM review_tasks WHERE id=?)`.
-const HAS_TENANT_SUBQUERY = /\(\s*select\s+user_id\s+from\s+review_tasks\b/i;
+const HAS_TENANT_SUBQUERY = new RegExp(
+  String.raw`\(\s*select\s+(?:(?:${QUALIFIED_IDENT})\s*\.\s*)?${USER_ID_COL}\s+from\s+(?:review_tasks|"review_tasks")\b`,
+  "i",
+);
+// `INSERT INTO t (id, user_id, ...)`: the target column list attributes the row
+// to a tenant explicitly. Mirrors tests/tenant-access-guard.test.mjs so the
+// same writes accepted statically are accepted by the runtime tripwire.
+const INSERT_COLUMNS = new RegExp(
+  String.raw`\binsert\s+(?:or\s+\w+\s+)?into\s+(${IDENT})\s*\(([^)]*)\)`,
+  "i",
+);
+const USER_ID_COLUMN = new RegExp(
+  String.raw`(?:^|,)\s*${USER_ID_COL}\s*(?:,|$)`,
+  "i",
+);
 
 // --- Heuristic bypass guards -------------------------------------------------
 // These are patterns, not a SQL parser. They close the shapes a security review
 // demonstrated (`user_id=user_id`, `OR 1=1`, `ON 1=1`, `UNION ... SELECT`), but
 // a novel statement can still evade them. See the module header.
-const USER_ID_COL = String.raw`(?:"user_id"|` + "`user_id`" + String.raw`|\[user_id\]|\buser_id\b)`;
 // `user_id=user_id` or `t.user_id = t.user_id` compares a column to itself and
 // is always true. Cross-alias joins such as `l.user_id = t.user_id` are NOT
-// tautologies (the qualifiers differ), so they are left alone.
-const SELF_COMPARISON = new RegExp(
-  String.raw`(?:(\w+)\.)?${USER_ID_COL}\s*=\s*(?:(\w+)\.)?${USER_ID_COL}`,
-  "gi",
-);
+// tautologies (the qualifiers differ), so they are left alone. Quoted
+// identifiers are normalised first so Drizzle's
+// `"review_tasks"."user_id" = "review_tasks"."user_id"` is caught too.
+const COLUMN_REF = String.raw`(?:(?:${QUALIFIED_IDENT})\s*\.\s*)?${USER_ID_COL}`;
+const SELF_COMPARISON = new RegExp(String.raw`(${COLUMN_REF})\s*=\s*(${COLUMN_REF})`, "gi");
 // `OR TRUE`, `OR 1=1`, `OR '1'='1'` (stripSql folds string literals to `''`),
 // `OR NULL IS NULL`: an always-true disjunct defeats the tenant predicate.
 const ALWAYS_TRUE_DISJUNCTION =
@@ -120,11 +146,23 @@ const ALWAYS_TRUE_JOIN = /\bon\b\s*\(?\s*(?:1\s*=\s*1\b|true\b|''\s*=\s*'')\s*\)
 // does not scope the others.
 const SET_OPERATION = /\b(?:union(?:\s+all)?|intersect|except)\b/i;
 
+function normalizeColumnRef(ref: string): string {
+  return ref.replace(/["`\[\]\s]/g, "").toLowerCase();
+}
+
 function hasSelfComparison(sql: string): boolean {
   for (const match of sql.matchAll(SELF_COMPARISON)) {
-    if ((match[1] ?? "").toLowerCase() === (match[2] ?? "").toLowerCase()) return true;
+    if (normalizeColumnRef(match[1] ?? "") === normalizeColumnRef(match[2] ?? "")) return true;
   }
   return false;
+}
+
+/** True when an INSERT names user_id in the target column list. */
+function isAttributedInsert(sql: string): boolean {
+  const match = sql.match(INSERT_COLUMNS);
+  if (!match) return false;
+  if (!TENANT_TABLES.has(unquoteId(match[1]))) return false;
+  return USER_ID_COLUMN.test(match[2]);
 }
 
 function unquoteId(token: string): string {
@@ -192,7 +230,7 @@ export function assertTenantPredicate(sql: string): void {
   }
   const hasClause = /\b(where|on)\b/i.test(s);
   const scoped = hasClause && (HAS_TENANT_PREDICATE.test(s) || HAS_TENANT_SUBQUERY.test(s));
-  if (direct.length && !scoped) {
+  if (direct.length && !scoped && !isAttributedInsert(s)) {
     throw new Error(`tenant_query_missing_user_id: ${direct.join(",")} :: ${sql.slice(0, 120)}`);
   }
   if (indirect.length && (!/\breview_tasks\b/i.test(s) || !scoped)) {
@@ -225,4 +263,38 @@ export function tenantScoped(db: RawDb, tenant: TenantId): {
       return db.prepare(sql);
     },
   };
+}
+
+/**
+ * Wrap a D1 binding so every statement Drizzle prepares (including each entry
+ * of a batch()) runs the tripwire first, and raw exec() is checked too. Other
+ * members are forwarded bound to the original binding.
+ *
+ * drizzle-orm/d1 calls `client.prepare(query.sql)` for queries and for every
+ * statement in `client.batch(...)`, so this covers the Drizzle query builder and
+ * `$client.batch`. It is still a heuristic guard (see the module header).
+ */
+export function tenantD1<T extends { prepare(sql: string): unknown }>(
+  binding: T,
+  tenant: TenantId,
+): T {
+  asTenantId(tenant);
+  return new Proxy(binding, {
+    get(target, prop) {
+      if (prop === "prepare") {
+        return (sql: string, ...rest: unknown[]) => {
+          assertTenantPredicate(sql);
+          return (target.prepare as (...args: unknown[]) => unknown)(sql, ...rest);
+        };
+      }
+      if (prop === "exec" && typeof (target as { exec?: unknown }).exec === "function") {
+        return (sql: string, ...rest: unknown[]) => {
+          assertTenantPredicate(sql);
+          return ((target as unknown as { exec: (...args: unknown[]) => unknown }).exec)(sql, ...rest);
+        };
+      }
+      const value = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as T;
 }

@@ -24,7 +24,7 @@ registerHooks({
       "export const getAuthContext=async()=>globalThis.__secCtx;"
       + "export const getChatGPTUser=async()=>globalThis.__secCtx.user",
     );
-    if (specifier === "@/db") return mock("export function getDb(){throw new Error('db_must_not_be_reached')}");
+    if (specifier === "@/db") return mock("export function getDb(){throw new Error('db_must_not_be_reached')};export function getTenantDb(){throw new Error('db_must_not_be_reached')};export function drizzleFromBinding(){throw new Error('db_must_not_be_reached')}");
     if (specifier.startsWith("@/")) return {url: new URL(specifier.slice(2) + ".ts", root).href, shortCircuit: true};
     if ((specifier.startsWith("./") || specifier.startsWith("../"))
       && !specifier.endsWith(".ts") && context.parentURL?.startsWith(root.href)

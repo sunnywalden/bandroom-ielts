@@ -7,7 +7,7 @@ import {registerHooks} from 'node:module';
 import {randomUUID} from 'node:crypto';
 
 registerHooks({resolve(specifier,context,next){
-  if(specifier==='@/db')return {url:'data:text/javascript,export function getDb(){throw new Error("not used")}',shortCircuit:true};
+  if(specifier==='@/db')return {url:'data:text/javascript,export function getDb(){throw new Error("not used")};export function getTenantDb(){throw new Error("not used")};export function drizzleFromBinding(){throw new Error("not used")}',shortCircuit:true};
   return next(specifier,context);
 }});
 

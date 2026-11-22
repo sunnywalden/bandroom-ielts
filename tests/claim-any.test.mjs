@@ -6,7 +6,7 @@ import {readFileSync,readdirSync} from "node:fs";
 import {registerHooks} from "node:module";
 import {randomUUID} from "node:crypto";
 
-registerHooks({resolve(s,ctx,next){if(s==='@/db')return {url:'data:text/javascript,export function getDb(){throw new Error("not used")}',shortCircuit:true};return next(s,ctx)}});
+registerHooks({resolve(s,ctx,next){if(s==='@/db')return {url:'data:text/javascript,export function getDb(){throw new Error("not used")};export function getTenantDb(){throw new Error("not used")};export function drizzleFromBinding(){throw new Error("not used")}',shortCircuit:true};return next(s,ctx)}});
 const sql=new DatabaseSync(':memory:');
 for(const f of readdirSync('drizzle').filter(f=>f.endsWith('.sql')).sort())sql.exec(readFileSync('drizzle/'+f,'utf8'));
 function stmt(q,a=[]){return{bind:(...v)=>stmt(q,[...a,...v]),async first(){const r=sql.prepare(q).all(...a)[0];return r?{...r}:null},async all(){return{results:sql.prepare(q).all(...a).map(r=>({...r}))}},run(){sql.prepare(q).all(...a);return{meta:{changes:Number(sql.prepare('SELECT changes() n').get().n)}}}}}

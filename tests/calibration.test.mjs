@@ -408,7 +408,7 @@ try{
       }},
       {name:"mock-db",setup(build){
         build.onResolve({filter:/^@\/db$/},()=>({path:"db",namespace:"db-mock"}));
-        build.onLoad({filter:/.*/,namespace:"db-mock"},()=>({contents:"export function getDb(){return globalThis.__calDrizzle}"}));
+        build.onLoad({filter:/.*/,namespace:"db-mock"},()=>({contents:"export function getDb(){return globalThis.__calDrizzle};export function getTenantDb(){return globalThis.__calDrizzle};export function drizzleFromBinding(){return globalThis.__calDrizzle}"}));
       }},
     ]});
   const coach=await import(pathToFileURL(coachOut).href);

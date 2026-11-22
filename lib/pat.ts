@@ -5,7 +5,8 @@
 // token is bound to one userId and is revocable. Admin/aggregate operations are
 // deliberately NOT reachable with a PAT (scope resolves to "learner").
 import { and, desc, eq, isNull } from "drizzle-orm";
-import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
+import type { DrizzleD1Database } from "drizzle-orm/d1";
+import { drizzleFromBinding } from "@/db";
 import { userTokens, users } from "@/db/schema";
 import * as schema from "@/db/schema";
 
@@ -123,7 +124,7 @@ export async function resolvePatFromBinding(
   token: string,
 ): Promise<{ userId: string } | null> {
   if (!binding || typeof (binding as { prepare?: unknown }).prepare !== "function") return null;
-  const db = drizzle(binding as never, { schema }) as unknown as PatDb;
+  const db = drizzleFromBinding(binding) as unknown as PatDb;
   return resolvePat(db, token);
 }
 

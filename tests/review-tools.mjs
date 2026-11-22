@@ -38,7 +38,7 @@ globalThis.testBucket={
 };
 globalThis.testEnv={BUCKET:globalThis.testBucket,ANALYSIS_SIGNING_KEY:'s'.repeat(32),ANALYSIS_BUNDLE_VERSION:'v1',ANALYSIS_RELEASED_VERSIONS:'analysis-v1',BANDROOM_PUBLIC_ORIGIN:'https://fixture.example',BANDROOM_CONSENT_GATE:'off'};
 registerHooks({resolve(specifier,context,next){
-  if(specifier==='@/db')return {url:'data:text/javascript,export function getDb(){return globalThis.testDb}',shortCircuit:true};
+  if(specifier==='@/db')return {url:'data:text/javascript,export function getDb(){return globalThis.testDb};export function getTenantDb(){return globalThis.testDb};export function drizzleFromBinding(){return globalThis.testDb}',shortCircuit:true};
   if(specifier==='cloudflare:workers')return {url:'data:text/javascript,export const env=globalThis.testEnv',shortCircuit:true};
   if(specifier==='@/app/chatgpt-auth')return {url:'data:text/javascript,export async function getChatGPTUser(){return globalThis.testUser}',shortCircuit:true};
   if(specifier.startsWith('@/'))return {url:new URL('../'+specifier.slice(2)+'.ts',import.meta.url).href,shortCircuit:true};

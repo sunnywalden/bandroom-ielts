@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import type { ReviewAttempt } from "@/app/feedback-model";
-import { getDb } from "@/db";
+import { getTenantDb } from "@/db";
 import { reviewJobs } from "@/db/schema";
 import type { reviewContext } from "./review-context";
 import { createReviewTaskStatement, type ReviewTaskDb } from "./review-tasks";
@@ -13,13 +13,13 @@ export type FrozenReview = {
 };
 
 export async function findSubmission(userId: string, submissionKey: string) {
-  return getDb().select({
+  return getTenantDb(userId).select({
     id: reviewJobs.id, revision: reviewJobs.revision, requestHash: reviewJobs.requestHash, snapshot: reviewJobs.snapshot,
   }).from(reviewJobs).where(and(eq(reviewJobs.userId, userId), eq(reviewJobs.submissionKey, submissionKey))).get();
 }
 
 export async function frozenReviews(userId: string, day?: number) {
-  return getDb().select({ id: reviewJobs.id, day: reviewJobs.day, revision: reviewJobs.revision, snapshot: reviewJobs.snapshot })
+  return getTenantDb(userId).select({ id: reviewJobs.id, day: reviewJobs.day, revision: reviewJobs.revision, snapshot: reviewJobs.snapshot })
     .from(reviewJobs).where(day === undefined ? eq(reviewJobs.userId, userId)
       : and(eq(reviewJobs.userId, userId), eq(reviewJobs.day, day))).all();
 }
@@ -29,7 +29,7 @@ export async function submitReview(
   state: Record<string, unknown>, snapshot: FrozenReview,
   analysisVersion?: string,
 ) {
-  const db = getDb().$client;
+  const db = getTenantDb(userId).$client;
   const id = snapshot.attempt.id;
   const encoded = JSON.stringify(state);
   const now = Date.now();

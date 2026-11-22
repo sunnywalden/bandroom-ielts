@@ -2,7 +2,7 @@ import { reviewAttempts, feedbackFor } from "@/app/feedback-model";
 import { env } from "cloudflare:workers";
 import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod/v4";
-import { getDb } from "@/db";
+import { getTenantDb } from "@/db";
 import { automationHeartbeats, learnerStates, reviewTasks, teacherFeedback, teacherLessons } from "@/db/schema";
 import { getExercises, type Lesson } from "@/app/curriculum";
 import { targets, overallTarget } from "@/app/goals";
@@ -150,7 +150,7 @@ const feedbackColumns = {id:teacherFeedback.id,day:teacherFeedback.day,stage:tea
   feedback:teacherFeedback.feedback,evidence:teacherFeedback.evidence,pronunciation:teacherFeedback.pronunciation,analysisJson:teacherFeedback.analysisJson,attempt:teacherFeedback.attempt,authorScope:teacherFeedback.authorScope,createdAt:teacherFeedback.createdAt};
 
 async function reviews(userId:string, day?:number) {
-  const rows=await getDb().select(feedbackColumns).from(teacherFeedback)
+  const rows=await getTenantDb(userId).select(feedbackColumns).from(teacherFeedback)
     .where(day === undefined ? eq(teacherFeedback.userId,userId)
       : and(eq(teacherFeedback.userId,userId),eq(teacherFeedback.day,day)))
     .orderBy(desc(teacherFeedback.createdAt),desc(teacherFeedback.id));
@@ -184,14 +184,14 @@ async function reviews(userId:string, day?:number) {
 }
 export async function coachData(userId:string) {
   const [lessons,feedback,jobs,tasks,heartbeats] = await Promise.all([
-    getDb().select({day:teacherLessons.day,lesson:teacherLessons.lesson}).from(teacherLessons).where(eq(teacherLessons.userId,userId)), reviews(userId), frozenReviews(userId),
-    getDb().select({
+    getTenantDb(userId).select({day:teacherLessons.day,lesson:teacherLessons.lesson}).from(teacherLessons).where(eq(teacherLessons.userId,userId)), reviews(userId), frozenReviews(userId),
+    getTenantDb(userId).select({
       id:reviewTasks.id, attemptId:reviewTasks.attemptId, kind:reviewTasks.kind, state:reviewTasks.state,
       stage:reviewTasks.stage, nextAt:reviewTasks.nextAt, lastError:reviewTasks.lastError, updatedAt:reviewTasks.updatedAt,
     }).from(reviewTasks).where(eq(reviewTasks.userId,userId)).orderBy(desc(reviewTasks.updatedAt)).limit(50),
     // A rolling deploy may reach this code before migration 0006 lands; treat
     // a missing table as "no connected automation" instead of failing /coach.
-    Promise.resolve(getDb().select({
+    Promise.resolve(getTenantDb(userId).select({
       startedAt:automationHeartbeats.startedAt,lastSuccessAt:automationHeartbeats.lastSuccessAt,
       nextExpectedAt:automationHeartbeats.nextExpectedAt,status:automationHeartbeats.status,
     }).from(automationHeartbeats).where(eq(automationHeartbeats.userId,userId))
@@ -213,7 +213,7 @@ export async function coachData(userId:string) {
 
 class CoachError extends Error {}
 async function checkpoint(userId:string) {
-  const row = await getDb().select().from(learnerStates).where(eq(learnerStates.userId,userId)).get();
+  const row = await getTenantDb(userId).select().from(learnerStates).where(eq(learnerStates.userId,userId)).get();
   const seed = initial();
   if (!row) return {revision:0,ledger:seed};
   const ledger = {...seed,...row.state} as Ledger;
@@ -255,7 +255,7 @@ async function studySession(userId:string, selected?:number, inspect=false, atte
   const day = selected ?? ledger.day;
   requireStarted(day,ledger);
   const lessonFor=async (d:number)=>getExercises(d) ??
-    (await getDb().select({lesson:teacherLessons.lesson}).from(teacherLessons)
+    (await getTenantDb(userId).select({lesson:teacherLessons.lesson}).from(teacherLessons)
       .where(and(eq(teacherLessons.userId,userId),eq(teacherLessons.day,d))).get())?.lesson;
   const lesson=await lessonFor(day), currentLesson=day===ledger.day?lesson:await lessonFor(ledger.day);
   const feedback=await reviews(userId,day);
@@ -445,7 +445,7 @@ export async function callCoach(userId:string, name:string, args:unknown, option
         // Legacy v1 attempts have no review task, so they take this path. It must
         // persist the enriched analysis too, or the UI gets no candidateIds and
         // the calibration loop is inert for every pre-v2 submission (Day 12).
-        await getDb().insert(teacherFeedback).values({...values,id,userId,pronunciation:rating,
+        await getTenantDb(userId).insert(teacherFeedback).values({...values,id,userId,pronunciation:rating,
           authorScope:"coach",
           ...(storedAnalysis?{analysisJson:storedAnalysis}:{}),createdAt:new Date().toISOString()}).onConflictDoNothing();
         return content({saved:true,id,day:values.day,attempt:values.attempt});
@@ -460,7 +460,7 @@ export async function callCoach(userId:string, name:string, args:unknown, option
         requireStarted(values.day,ledger);
         const hash=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify([userId,"learner-note",values])));
         const id="ln:"+Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,"0")).join("");
-        await getDb().insert(teacherFeedback).values({
+        await getTenantDb(userId).insert(teacherFeedback).values({
           id,userId,day:values.day,stage:values.stage,attempt:values.attempt,
           evidence:values.evidence??"",feedback:values.feedback,
           authorScope:"learner-note",createdAt:new Date().toISOString(),
@@ -472,10 +472,10 @@ export async function callCoach(userId:string, name:string, args:unknown, option
         const values={day,lesson:toLesson(input)};
         if ([...values.lesson.listening,...values.lesson.reading].some(q=>new Set(q.choices.map(c=>c.toLowerCase())).size!==3))
           throw new CoachError("Provide three distinct options in every multiple-choice question.");
-        const row=await getDb().insert(teacherLessons).values({userId,...values}).onConflictDoNothing()
+        const row=await getTenantDb(userId).insert(teacherLessons).values({userId,...values}).onConflictDoNothing()
           .returning({day:teacherLessons.day}).get();
         if (!row){
-          const existing=await getDb().select({lesson:teacherLessons.lesson}).from(teacherLessons)
+          const existing=await getTenantDb(userId).select({lesson:teacherLessons.lesson}).from(teacherLessons)
             .where(and(eq(teacherLessons.userId,userId),eq(teacherLessons.day,day))).get();
           if(JSON.stringify(existing?.lesson)!==JSON.stringify(values.lesson))throw new CoachError("A different lesson already exists for this day.");
           return content({published:true,day,theme:values.lesson.theme,alreadySaved:true});
@@ -485,7 +485,7 @@ export async function callCoach(userId:string, name:string, args:unknown, option
       case "read_recording_bytes":
       case "read_speaking_recording": {
         // MT-3 (S8.1): reading learner voice requires active consent.
-        try { await assertConsent(getDb(), userId); }
+        try { await assertConsent(getTenantDb(userId), userId); }
         catch (error) { if (error instanceof ConsentError) throw new CoachError(error.message); throw error; }
         const options=recordingSpec.parse(args);
         const {day,recordingId,offset=0,length=12288}=options;

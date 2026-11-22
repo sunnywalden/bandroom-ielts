@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { requireUserScope } from "@/lib/route-guard";
-import { getDb } from "@/db";
+import { getTenantDb } from "@/db";
 import { learnerStates, teacherLessons } from "@/db/schema";
 import { hash, uuid } from "@/lib/backup-format";
 import { findSubmission, submitReview } from "@/lib/review-jobs";
@@ -20,7 +20,7 @@ export async function GET() {
   const auth = await requireUserScope();
   if (auth instanceof Response) return auth;
   const user = auth.user;
-  const result = await getDb().select({ revision: learnerStates.revision, state: learnerStates.state })
+  const result = await getTenantDb(user.userId).select({ revision: learnerStates.revision, state: learnerStates.state })
     .from(learnerStates).where(eq(learnerStates.userId, user.userId)).get();
   return json({ account:user.userId, displayName:user.displayName, ...(result ?? { revision: 0, state: null }) });
 }
@@ -60,7 +60,7 @@ export async function PUT(request: Request) {
     const saved = await findSubmission(user.userId, submissionKey);
     if (saved) return receipt(saved);
   }
-  const db = getDb();
+  const db = getTenantDb(user.userId);
   const read = () => db.select({ revision: learnerStates.revision, state: learnerStates.state })
     .from(learnerStates).where(eq(learnerStates.userId, user.userId)).get();
   const prior=await read();
