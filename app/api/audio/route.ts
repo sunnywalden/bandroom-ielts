@@ -45,7 +45,11 @@ export async function POST(request: Request) {
   }
   const day=request.headers.get("X-Bandroom-Day"),phase=request.headers.get("X-Bandroom-Phase"),attempt=request.headers.get("X-Bandroom-Attempt");
   if(day!==null||phase!==null||attempt!==null){
-    if(!day||!/^\d{2}$/.test(day)||Number(day)<11||Number(day)>62||(phase!=="part2"&&phase!=="followup")||!attempt||!uuid.test(attempt))
+    // Part 3 keeps the historical `followup` phase; Part 1 and mock sessions
+    // are new context values. Anything else is rejected.
+    if(!day||!/^\d{2}$/.test(day)||Number(day)<11||Number(day)>62
+      ||(phase!=="part1"&&phase!=="part2"&&phase!=="followup"&&phase!=="mock")
+      ||!attempt||!uuid.test(attempt))
       return json({error:"invalid_recording_context"},400);
     const digest=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",bytes)),x=>x.toString(16).padStart(2,"0")).join("");
     const key=audioKey(user.userId,attempt);

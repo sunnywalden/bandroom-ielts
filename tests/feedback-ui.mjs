@@ -19,12 +19,21 @@ dom.window.HTMLMediaElement.prototype.load=()=>{};
 dom.window.HTMLMediaElement.prototype.play=async()=>{};
 const {createElement,act}=await import('react'),{createRoot}=await import('react-dom/client');
 const {default:Studio}=await import('../.sites-runtime/tests/feedback-studio.mjs');
-const realInterval=globalThis.setInterval,realClear=globalThis.clearInterval;
+// P0-1 polls with a backoff setTimeout chain (3s…300s), not a fixed interval.
+// Capture those scheduled wake-ups so tests can drive one tick at a time.
+const realSetTimeout=globalThis.setTimeout,realClearTimeout=globalThis.clearTimeout;
+const POLL_DELAYS=[3000,5000,10000,30000,60000,300000],pollToken={};
 let poll;
-globalThis.setInterval=(fn,ms,...args)=>[3000,15000].includes(ms)?(poll=fn,'feedback-poll'):realInterval(fn,ms,...args);
-globalThis.clearInterval=id=>id==='feedback-poll'?poll=undefined:realClear(id);
+globalThis.setTimeout=(fn,ms,...args)=>{
+ if(POLL_DELAYS.includes(ms)){poll=fn;return pollToken}
+ return realSetTimeout(fn,ms,...args);
+};
+globalThis.clearTimeout=id=>{
+ if(id===pollToken){poll=undefined;return}
+ realClearTimeout(id);
+};
 const response=(status,data)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}});
-let root,state,revision,feedback,reviewLinks,reviewTasks,automation,calls,coachFault,stateFault,mcpCalls;
+let root,state,revision,feedback,reviewLinks,reviewTasks,automation,calls,coachFault,stateFault,mcpCalls,progressFixture;
 async function receipt(payload){
  if(!payload.submissionKey)return response(200,{revision});
  const id='v2:'+payload.submissionKey;
@@ -54,7 +63,7 @@ async function row(field,message){
  return {id:crypto.randomUUID(),day:12,stage:attempt.stage,attempt:reviewLinks.find(link=>link.sourceId===attempt.id)?.id??attempt.id,evidence:'Synthetic submitted evidence',feedback:message,createdAt:'2026-11-09T01:00:00Z'};
 }
 beforeEach(()=>{
- localStorage.clear();calls=[];mcpCalls=[];feedback=[];reviewLinks=[];reviewTasks=[];automation=undefined;coachFault=stateFault=null;revision=21;
+ localStorage.clear();calls=[];mcpCalls=[];feedback=[];reviewLinks=[];reviewTasks=[];automation=undefined;coachFault=stateFault=null;revision=21;progressFixture={points:[],legacyCount:0,truncated:false,windowDays:180,generatedAt:'2026-11-22T00:00:00.000Z',metricCounts:{speechRatio:0,longPauseRatio:0,grammarIssues:0,selfListenWords:0}};
  state={version:1,day:12,stage:'write',finished:false,completed:Array.from({length:11},(_,i)=>i+1),checked:{11:'2026-11-09'},started:{11:'2026-11-02',12:'2026-11-09'},exam:'未选择',practice:{},entries:{11:{speakingReview:'Preserved older feedback'},12:{writeOriginal:'Independent original answer.',writeCondition:'独立 · 未计时'}}};
  globalThis.fetch=async(url,init={})=>{
   calls.push([url,init]);
@@ -65,6 +74,7 @@ beforeEach(()=>{
   if(url==='/api/review-tasks/takeover')return response(200,{claimed:true,taskId:'task-queued',fence:2,state:'running'});
   if(url==='/api/coach')return coachFault?coachFault(init):response(200,{account:'fixture-feedback-ui',extras:{},feedback:structuredClone(feedback),reviewLinks:structuredClone(reviewLinks),reviewTasks:structuredClone(reviewTasks),automation});
   if(url==='/api/state'&&!init.method)return response(200,{account:'fixture-feedback-ui',revision,state:structuredClone(state)});
+  if(url==='/api/speaking/progress')return response(200,structuredClone(progressFixture));
   if(url==='/api/state'){
    if(stateFault)return stateFault(init);
    const payload=JSON.parse(init.body);state=payload.state;revision=payload.revision+1;return receipt(payload);
@@ -73,8 +83,8 @@ beforeEach(()=>{
  };
 });
 afterEach(async()=>{await unmount()});
-test('delayed Work review arrives by polling at the original and preserves the revision draft',async()=>{
- await mount();assert.match(text(),/待在 Work 中发起/);
+test('delayed coach review arrives by polling at the original and preserves the revision draft',async()=>{
+ await mount();assert.match(text(),/交给教练批改/);
  await write('Unsaved revision that must survive feedback refresh.');
  feedback=[await row('writeOriginal','Return fixture correction for the original.')];
  await tick();
@@ -215,7 +225,9 @@ test('speaking self-review freezes while saving and stays for feedback until the
   speakingFollowup:JSON.stringify([{at:'2026-11-09T01:02:00Z',text:'Fixture Part 3',spoken:true}])};
  const part2=state.entries[12].speakingPart2;
  await mount();
- await act(async()=>document.querySelector('input[type="radio"]').click());await flush();
+ // The free-text focus is optional; typing one keeps the legacy speakingReview
+ // field populated so its feedback binding stays testable.
+ await write('让时态前后一致');
  let resolve,payload;stateFault=init=>{payload=JSON.parse(init.body);return new Promise(r=>{resolve=r})};
  await click(button('保存自评，查看反馈'));
  assert.equal(document.querySelector('fieldset.sp-focus').disabled,true);
@@ -242,7 +254,7 @@ test('failed feedback identification is explicit, retryable and never mislabels 
  assert.ok(!text().includes('暂时无法定位对应练习的反馈'));assert.equal(puts().length,0);
 });
 
-test('queued task shows honest Work status and keeps the manual fallback',async()=>{
+test('queued task shows honest queue status and keeps the manual fallback',async()=>{
  state.entries[12].writeOriginal='Independent answer waiting for the queue.';
  const source=(await reviewAttempts(12,state.entries[12])).find(a=>a.field==='writeOriginal');
  assert.ok(source);
@@ -252,18 +264,18 @@ test('queued task shows honest Work status and keeps the manual fallback',async(
  await mount();
  const section=()=>document.querySelector('[aria-label="写作首稿反馈"]');
  assert.ok(section());
- assert.match(section().textContent,/等待 Work 领取/);
+ assert.match(section().textContent,/等待批改服务领取/);
  assert.ok(!section().textContent.includes('可以关闭页面'));
- assert.ok(section().textContent.includes('复制本题批改请求'));
- await click(button('复制本题批改请求'));
+ assert.ok(section().textContent.includes('交给教练批改'));
+ await click(button('交给教练批改（接管本次）'));
  assert.ok(calls.some(([url])=>url==='/api/review-tasks/takeover'),'manual copy revokes the automatic claim');
- assert.match(section().textContent,/已接管/);
+ assert.match(section().textContent,/自动批改不会再领取/);
  reviewTasks=[{...reviewTasks[0],state:'completed'}];
  feedback=[{id:'task-feedback',day:12,stage:'write',attempt:link.id,evidence:'Automatic task evidence',feedback:'Automatic task correction',createdAt:'2026-11-09T01:00:00Z'}];
  await tick();
  assert.match(section().textContent,/Automatic task correction/);
  assert.match(section().textContent,/批改已返回/);
- assert.ok(!section().textContent.includes('复制本题批改请求'));
+ assert.ok(!section().textContent.includes('交给教练批改'));
 });
 
 test('stale automation is labeled as disconnected in the queue',async()=>{
@@ -277,8 +289,8 @@ test('stale automation is labeled as disconnected in the queue',async()=>{
  await mount();
  const section=document.querySelector('[aria-label="写作首稿反馈"]');
  assert.ok(section);
- assert.match(section.textContent,/自动批改当前未连接/);
- assert.ok(section.textContent.includes('复制本题批改请求'));
+ assert.match(section.textContent,/批改服务当前未连接/);
+ assert.ok(section.textContent.includes('交给教练批改'));
 });
 test('a dead running task is not shown as actively analyzing',async()=>{
  state.entries[12].writeOriginal='Independent answer left running by a dead worker.';
@@ -292,7 +304,7 @@ test('a dead running task is not shown as actively analyzing',async()=>{
  const section=document.querySelector('[aria-label="写作首稿反馈"]');
  assert.ok(section);
  assert.match(section.textContent,/连接已断开/);
- assert.ok(!section.textContent.includes('Work 正在分析'));
+ assert.ok(!section.textContent.includes('教练正在分析'));
 });
 test('a completed task without feedback keeps reading and offers refresh',async()=>{
  state.entries[12].writeOriginal='Independent answer completed before feedback arrived.';
@@ -509,4 +521,24 @@ test('tiered pronunciation evidence renders confirmation and submits one verdict
  assert.deepEqual(mcpCalls[0].params.arguments,{candidateId:'c-tier',verdict:'unsure'});
  assert.match(card.textContent,/已记录：不确定（不计入画像）/);
  assert.equal(puts().length,0);
+});
+
+test('report shows only status-labelled speaking evidence with sample sizes',async()=>{
+ progressFixture={points:[{attemptId:'v2:fixture',day:12,createdAt:'2026-11-20T00:00:00.000Z',speechRatio:0.61,longPauseRatio:0.09,grammarIssues:2,selfListenWords:3,statuses:{speechRatio:'calibrated',longPauseRatio:'calibrated',grammarIssues:'reference',selfListenWords:'suggestive'}}],legacyCount:1,truncated:true,windowDays:180,generatedAt:'2026-11-22T00:00:00.000Z',metricCounts:{speechRatio:1,longPauseRatio:1,grammarIssues:1,selfListenWords:1}};
+ await mount();
+ await click(button('阶段评估'));
+ const panel=document.querySelector('.sp-progress');
+ assert.ok(panel);
+ assert.match(panel.textContent,/口语纵向证据/);
+ assert.match(panel.textContent,/没有综合分/);
+ assert.match(panel.textContent,/历史反馈无指标/);
+ assert.match(panel.textContent,/样本超过 200 条/);
+ assert.equal(panel.querySelectorAll('.sp-status-calibrated').length,1);
+ assert.match(panel.querySelector('.sp-progress-latest').textContent,/61%/);
+ await click(button(/语法问题数/));
+ assert.match(panel.querySelector('.sp-progress-chart').textContent,/参考指标/);
+ assert.match(panel.querySelector('.sp-progress-latest').textContent,/最近值 2/);
+ await click(button(/建议回听词数/));
+ assert.match(panel.querySelector('.sp-progress-chart').textContent,/提示性/);
+ assert.match(panel.querySelector('.sp-progress-chart').textContent,/提示性：已确认自听的词/);
 });

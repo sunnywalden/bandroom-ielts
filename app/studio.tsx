@@ -1,6 +1,6 @@
 'use client'
 import {useEffect,useRef,useState} from 'react'
-import {Activity,ArrowLeft,ArrowRight,ArrowUpRight,AudioLines,BookOpen,Check,CheckCheck,ChevronDown,ChevronRight,Clock3,Cloud,CloudOff,Disc3,FileText,Flag,Layers3,LayoutDashboard,NotebookPen,RefreshCw,SlidersHorizontal,Target} from 'lucide-react'
+import {Activity,ArrowLeft,ArrowRight,ArrowUpRight,AudioLines,BookOpen,Check,CheckCheck,ChevronDown,ChevronRight,Clock3,Cloud,CloudOff,Disc3,FileText,Flag,Inbox,Layers3,LayoutDashboard,NotebookPen,RefreshCw,SlidersHorizontal,Target} from 'lucide-react'
 import {FieldArt,Mark} from './art'
 import {targets,overallTarget} from './goals'
 import {brief,budgets,dayStamp,english,initial,labels,notes,oldOrder,oldResults,part3,stages,writings,type Entry,type Ledger,type Stage} from './ledger'
@@ -11,11 +11,13 @@ import EntryHistory from './entry-history'
 import ReviewRequest from './review-request'
 import BackupPanel from './backup-panel'
 import Reports, { type ReportState } from './reports'
-import AttemptFeedback,{FeedbackProvider,UnmatchedFeedback,FeedbackIdentificationStatus} from './attempt-feedback'
+import AttemptFeedback,{FeedbackProvider,UnmatchedFeedback,FeedbackIdentificationStatus,taskReason} from './attempt-feedback'
 import {PronunciationProfilePanel} from './pronunciation-coach'
+import {SpeakingProgressPanel,WeeklySpeakingCard} from './speaking-progress-panel'
 import {requestJSON} from './request-json'
 import {newClientId} from './client-id'
 import {clearLocalClips} from './speaking-draft'
+import {clearUploadQueue} from './speaking-queue'
 import type {AutomationStatus,CoachFeedback,ReviewLink,ReviewTaskStatus} from './feedback-model'
 import {useDraft} from './use-draft'
 
@@ -27,7 +29,9 @@ type Snapshot=ReportState
 type Checkpoint={account:string;displayName?:string;revision:number;state:Snapshot|null}
 const initialsOf=(name:string)=>{const parts=name.trim().split(/\s+/).filter(Boolean);if(!parts.length)return 'L';if(parts.length===1)return parts[0].slice(0,2).toUpperCase();return (parts[0][0]+parts[parts.length-1][0]).toUpperCase()}
 type SaveReply={revision:number;error?:string;attemptId?:string;submissionKey?:string;sourceId?:string}
-const reviewFields=['speakingPart2','speakingFollowup','speakingReview','vocabUse','readQ0','readQ1','writeOriginal','writeRevision','reviewMemo']
+const reviewFields=['speakingPart2','speakingFollowup','speakingMock','speakingReview','vocabUse','readQ0','readQ1','writeOriginal','writeRevision','reviewMemo']
+const POLL_BACKOFF=[3_000,5_000,10_000,30_000,60_000,300_000] as const
+const ACTIONABLE_BLOCKED=new Set(['temporary_read_failure','recording_missing','recording_digest_mismatch','analysis_required'])
 const pendingPrefix=(account:string)=>'bandroom.pending-submission.'+encodeURIComponent(account)+'.'
 const sendCheckpoint=(account:string,body:string)=>requestJSON<SaveReply|null>('/api/state',{
  method:'PUT',redirect:'manual',headers:{'Content-Type':'application/json','X-Bandroom-Account':account},body,
@@ -118,11 +122,15 @@ export default function Studio(){
     // recordings are not left readable on a shared browser after a switch.
     // Security review: await the wipe and retry on failure rather than
     // fire-and-forget; a failed clear must not silently leave clips behind.
+    // The upload queue stages the same recording bytes, so it is wiped too.
     // Only wipe on a genuine switch from a *known* previous account. On first
-    // load / same-account remount activeAccount.current is still '' — wiping
+    // load / same-account remount activeAccount.current is still empty — wiping
     // there would erase the current learner's retained clips and (with a
     // blocked IndexedDB) stall the first render behind the retry timeouts.
-    if(activeAccount.current){for(let attempt=0;attempt<3;attempt++){if(await clearLocalClips())break;}}
+    if(activeAccount.current){
+      for(let attempt=0;attempt<3;attempt++){if(await clearLocalClips())break;}
+      for(let attempt=0;attempt<3;attempt++){if(await clearUploadQueue())break;}
+    }
    }
    const previous=live.current
    const differentLesson=next.day!==previous.day||next.stage!==previous.stage||
@@ -145,30 +153,71 @@ export default function Studio(){
  const runningTaskCount=reviewTasks.filter(task=>task.state==='running').length;
  const unresolvedLinkCount=reviewLinks.filter(link=>!feedback.some(row=>row.attempt===link.id)).length;
  const completedUnfetched=reviewTasks.filter(task=>task.state==='completed'&&!feedback.some(row=>row.attempt===task.attemptId)).length;
- const pollSince=useRef<number|null>(null);
+ // P0-1 inbox: completed-but-unfetched, needs_attention and blocked tasks with a
+ // learner action. Consent/DSR blocks only show a reason and are not counted.
+ const inboxTasks=reviewTasks.filter(task=>task.state==='needs_attention'
+  ||(task.state==='completed'&&!feedback.some(row=>row.attempt===task.attemptId))
+  ||(task.state==='blocked'&&ACTIONABLE_BLOCKED.has(task.lastError??'')))
+ const inboxDay=(task:ReviewTaskStatus)=>reviewLinks.find(link=>link.id===task.attemptId)?.day
+ const inboxLabel=(task:ReviewTaskStatus)=>{
+  if(task.state==='completed')return '结果待读取'
+  if(task.state==='needs_attention')return '自动批改未完成'
+  if(task.state==='blocked')return '原录音不可用'
+  if(task.state==='queued')return '排队中'
+  if(task.state==='running')return '分析中'
+  return '等待重试'
+ }
+ const [inboxSeen,setInboxSeen]=useState<Record<string,number>>({})
+ useEffect(()=>{
+  try{const raw=localStorage.getItem('bandroom.inbox.seen.'+encodeURIComponent(account));const parsed=raw?JSON.parse(raw) as unknown:null;setInboxSeen(parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed as Record<string,number>:{})}catch{setInboxSeen({})}
+ },[account])
+ function markInboxSeen(){
+  const next={...inboxSeen}
+  for(const task of inboxTasks)next[task.id]=task.updatedAt
+  setInboxSeen(next)
+  // Best effort only: server state stays authoritative and nothing is hidden.
+  try{localStorage.setItem('bandroom.inbox.seen.'+encodeURIComponent(account),JSON.stringify(next))}catch{/* Storage may be unavailable. */}
+ }
+ // P0-1: polling lifecycle. Backoff 3→5→10→30→60→300s; after 30 minutes it
+ // degrades to a visible 5-minute check instead of silently stopping. While the
+ // page is hidden it pauses; becoming visible refreshes immediately. A
+ // disconnected automation is floored at 60s.
+ const pollSince=useRef<number|null>(null),pollStep=useRef(0),pollActive=useRef(false);
+ const [pollDegraded,setPollDegraded]=useState(false);
  useEffect(()=>{
   if(!account||locked)return
   const active=pendingTaskCount>0||unresolvedLinkCount>0||completedUnfetched>0
-  if(!active)pollSince.current=null
-  const live=Boolean(automation?.connected)
-  const refreshNow=()=>{if(document.visibilityState==='visible')void refreshCoach()}
-  const interval=runningTaskCount>0?(live?3_000:10_000)
-   :pendingTaskCount>0?(live?3_000:15_000)
-   :3_000
-  let timer:ReturnType<typeof setInterval>|undefined
-  const poll=()=>{
-   if(document.visibilityState!=='visible')return
-   // A disconnected or unknown automation must not keep the page polling
-   // forever; after 30 minutes the user can refresh or use the manual path.
-   if(pollSince.current===null)pollSince.current=Date.now()
-   if(Date.now()-pollSince.current>30*60_000){if(timer)clearInterval(timer);return}
-   void refreshCoach()
+  if(active&&!pollActive.current){pollStep.current=0;if(pollSince.current===null)pollSince.current=Date.now()}
+  if(!active){pollSince.current=null;pollStep.current=0;setPollDegraded(false)}
+  pollActive.current=active
+  const disconnected=automation?.connected===false
+  let disposed=false, timer:ReturnType<typeof setTimeout>|undefined
+  const clear=()=>{if(timer)clearTimeout(timer);timer=undefined}
+  const schedule=(delay:number)=>{if(disposed)return;clear();timer=setTimeout(tick,delay)}
+  const nextDelay=()=>{
+   const elapsed=pollSince.current===null?0:Date.now()-pollSince.current
+   const degraded=elapsed>=30*60_000
+   if(degraded!==pollDegraded)setPollDegraded(degraded)
+   const base=degraded?300_000:POLL_BACKOFF[Math.min(pollStep.current++,POLL_BACKOFF.length-1)]
+   return disconnected?Math.max(base,60_000):base
   }
-  if(active)timer=setInterval(poll,interval)
-  window.addEventListener('focus',refreshNow);document.addEventListener('visibilitychange',refreshNow)
+  const tick=()=>{
+   if(disposed)return
+   if(document.visibilityState!=='visible'){schedule(30_000);return}
+   void refreshCoach()
+   schedule(nextDelay())
+  }
+  const wake=()=>{
+   if(disposed||document.visibilityState!=='visible')return
+   pollStep.current=0
+   void refreshCoach()
+   schedule(disconnected?60_000:3_000)
+  }
+  if(active)schedule(disconnected?60_000:3_000)
+  window.addEventListener('focus',wake);document.addEventListener('visibilitychange',wake)
   // This is a request-generation counter, intentionally read at cleanup (not a DOM ref).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  return ()=>{if(timer)clearInterval(timer);window.removeEventListener('focus',refreshNow);document.removeEventListener('visibilitychange',refreshNow);coachRead.current++}
+  return ()=>{disposed=true;clear();window.removeEventListener('focus',wake);document.removeEventListener('visibilitychange',wake);coachRead.current++}
  // refreshCoach reads the current account through its ref.
  // eslint-disable-next-line react-hooks/exhaustive-deps
  },[account,locked,pendingTaskCount,runningTaskCount,unresolvedLinkCount,completedUnfetched,automation?.connected,reviewLinks.length,feedback.length])
@@ -250,12 +299,30 @@ export default function Studio(){
   {sync!=='load'&&<button className="secondary" onClick={()=>void refresh()}>重新读取进度</button>}</div></section>
  if(!account)return <main>{loginGate}</main>
  const feedbackDay=tab==='history'?historyDay:s.day
- return <FeedbackProvider key={account} day={feedbackDay} entry={s.entries[feedbackDay]||{}} feedback={feedback.filter(f=>f.day===feedbackDay)} links={reviewLinks} tasks={reviewTasks} automation={automation} error={coachError} refresh={()=>void refreshCoach()}>{locked&&<main>{loginGate}</main>}<div className="app-shell" hidden={locked} inert={locked} style={locked?{display:'none'}:undefined}>
+ return <FeedbackProvider key={account} day={feedbackDay} entry={s.entries[feedbackDay]||{}} feedback={feedback.filter(f=>f.day===feedbackDay)} links={reviewLinks} tasks={reviewTasks} automation={automation} error={coachError} refresh={()=>void refreshCoach()} account={account} drillTakes={s.entries[feedbackDay]?.speakingDrillTakes} saveDrillTakes={!s.finished&&feedbackDay===s.day?(raw=>save({speakingDrillTakes:raw})):undefined}>{locked&&<main>{loginGate}</main>}<div className="app-shell" hidden={locked} inert={locked} style={locked?{display:'none'}:undefined}>
  <aside className="side"><button className="brand" onClick={()=>navigate('home')}><Emblem/><span><b>Bandroom</b><small>IELTS STUDY STUDIO</small></span></button>
  <div className="nav-label">WORKSPACE</div><nav>{tabs.map(([id,title,Icon])=><button key={id} aria-current={tab===id||(tab==='lesson'&&id==='home')?'page':undefined} className={'nav-item '+((tab===id||(tab==='lesson'&&id==='home'))?'selected':'')} onClick={()=>navigate(id)}><Icon size={18}/>{title}</button>)}</nav>
  <div className="sidebar-bottom"><div className="sidebar-target"><span>MY PROGRAMME</span><b>IELTS <em>{overallTarget.toFixed(1)}</em></b><small>62 课时学习计划</small></div><button className={'nav-item '+(tab==='settings'?'selected':'')} onClick={()=>navigate('settings')}><SlidersHorizontal size={17}/>训练设置</button><div className="profile"><span>{initialsOf(displayName||'Learner')}</span><div><b>{displayName||'学习者'}</b><small>个人学习空间</small></div></div></div>
  </aside>
- <div className="main-column"><header className="topbar"><span className="crumb"><span>学习工作台</span><ChevronRight size={13}/><b>{tabLabel}</b></span><span className="mobile-brand"><Emblem small/>Bandroom</span><button className="sync" onClick={()=>void refresh()} disabled={pending||sync==='load'} title="重新读取进度与教练反馈">{sync==='ok'?<Cloud size={15}/>:<RefreshCw size={14}/>} {statuses[sync]}</button></header>
+ <div className="main-column"><header className="topbar"><span className="crumb"><span>学习工作台</span><ChevronRight size={13}/><b>{tabLabel}</b></span><span className="mobile-brand"><Emblem small/>Bandroom</span>
+ {(inboxTasks.length>0||pollDegraded)&&<details className="inbox" onToggle={e=>{if(e.currentTarget.open)markInboxSeen()}}>
+  <summary aria-label={'批改收件箱，'+inboxTasks.length+' 项待处理'}><Inbox size={15}/><span className="inbox-title">批改</span>{inboxTasks.length>0&&<span className="inbox-count">{inboxTasks.length}</span>}</summary>
+  <div className="inbox-panel">
+   <div className="inbox-head"><strong>批改收件箱</strong><button type="button" className="text-btn" onClick={()=>void refreshCoach()}>立即刷新</button></div>
+   {pollDegraded&&<p className="inbox-note">自动刷新已降频（每 5 分钟检查一次）。结果不会丢失，回到本页会立即刷新。</p>}
+   {automation?.connected===false&&<p className="inbox-note">批改服务当前未连接；任务会保留，恢复后自动更新。</p>}
+   {!inboxTasks.length&&<p className="inbox-note">当前没有需要处理的批改。</p>}
+   {inboxTasks.map(task=>{
+    const d=inboxDay(task),fresh=inboxSeen[task.id]!==task.updatedAt
+    return <div className={'inbox-row'+(fresh?' is-new':'')} key={task.id}>
+     <span className="inbox-row-label">{inboxLabel(task)}{fresh&&<i className="inbox-new" aria-label="有新变化"/>}</span>
+     {task.lastError&&<small>{taskReason[task.lastError]??task.lastError}</small>}
+     <span className="inbox-row-actions">{d!==undefined&&<button type="button" className="sp-link" onClick={()=>archive(d)}>查看 Day {d}</button>}<button type="button" className="sp-link" onClick={()=>void refreshCoach()}>刷新</button></span>
+    </div>
+   })}
+  </div>
+ </details>}
+ <button className="sync" onClick={()=>void refresh()} disabled={pending||sync==='load'} title="重新读取进度与教练反馈">{sync==='ok'?<Cloud size={15}/>:<RefreshCw size={14}/>} {statuses[sync]}</button></header>
  <nav className="mobile-nav">{[...tabs,['settings','设置',SlidersHorizontal] as const].map(([id,title,I])=><button key={id} aria-current={tab===id||(id==='home'&&tab==='lesson')?'page':undefined} className={(tab===id||(id==='home'&&tab==='lesson'))?'selected':''} onClick={()=>navigate(id)}><I size={15}/>{title}</button>)}</nav>
  <main id="main">
  <FeedbackIdentificationStatus/>
@@ -267,10 +334,10 @@ export default function Studio(){
  {s.finished&&s.day<62&&<section className="card nextbox"><div><div className="eyebrow">NEXT LESSON</div><h3>Day {s.day+1} · {nextReady?'从口语开始':'等待新课包'}</h3><p>{nextReady?'准备好再开始，开启后才会记录新课。':'可请 ChatGPT 教练为下一课添加新材料。'}</p></div>{nextReady&&<button className="primary" onClick={()=>void start()} disabled={pending}>开始 Day {s.day+1}<ArrowRight size={16}/></button>}{!nextReady&&<a className="secondary" target="_blank" rel="noreferrer" href="https://chatgpt.com/c/6adc0a0c-e9a4-83ec-96a3-ddef0fe89edd">打开教练对话<ArrowUpRight size={15}/></a>}</section>}
  <section className="card itinerary"><div className="section-head"><div><div className="eyebrow">Session plan</div><h2>本课路线</h2></div><span className="time-tag"><Clock3 size={14}/>{cap} 分钟预算</span></div>
  <div className="route-rows">{order.map((k,i)=>{const finished=stageDone(k),active=!s.finished&&k===stage;return <button key={k} disabled={!finished&&!active} onClick={()=>active?navigate('lesson'):archive(s.day)} className={'route-row '+(active?'active ':'')+(finished?'done':'')}><span className="route-mark">{finished?<Check size={15}/>:active?<AudioLines size={16}/>:String(i+1).padStart(2,'0')}</span><span className="route-name">{labels[k]} <small>{english[k]}</small></span><span className="route-status">{active?'当前':finished?'已完成':'待进行'}</span><span className="route-time">{mins[k]} min</span>{active?<ChevronRight size={16}/>:<span className="end-dot"/>}</button>})}</div></section>
- </div><aside className="desk-aside"><section className="card progress-card"><div className="section-head"><div className="eyebrow">Programme</div><Flag size={16}/></div><h2>课程进度</h2><div className="big-count">{done}<small> / 62</small></div><div className="prog-track"><div style={{width:done/62*100+'%'}}/></div><div className="metric-note"><span>已打卡课时</span><b>{(done/62*100).toFixed(1)}%</b></div><div className="goal-split"/><div className="tiny-label"><Target size={15}/> 我的目标分数</div><Goals/></section>
+ </div><aside className="desk-aside"><WeeklySpeakingCard entry={entry}/><section className="card progress-card"><div className="section-head"><div className="eyebrow">Programme</div><Flag size={16}/></div><h2>课程进度</h2><div className="big-count">{done}<small> / 62</small></div><div className="prog-track"><div style={{width:done/62*100+'%'}}/></div><div className="metric-note"><span>已打卡课时</span><b>{(done/62*100).toFixed(1)}%</b></div><div className="goal-split"/><div className="tiny-label"><Target size={15}/> 我的目标分数</div><Goals/></section>
  <section className="card focus-card"><div className="eyebrow"><span className="coral-dot"/>Coach’s note</div><h2>口语练习重点</h2><p>回答原因类问题时，先说出一个具体原因，再说明它可能带来什么后果。</p><div className="phrase">“One reason is that …”</div><button className="text-btn" onClick={()=>navigate('notes')}>打开错题手记 <ArrowUpRight size={14}/></button></section></aside></div>}
  {tab==='lesson'&&<><button className="back" onClick={()=>navigate('home')}><ArrowLeft size={16}/>今日练习</button><div className="page-intro"><div><div className="eyebrow"><span className="kicker-line"/>{dayName(s)} / {english[stage]}</div><h1>{labels[stage]}</h1><p>{s.day===11?'预警信号与判断':topic.theme}</p></div>{pill(s.finished?'已打卡':'进行中',!s.finished)}</div>
- {s.finished?<section className="card pad"><h2>本课已打卡</h2><button className="secondary" onClick={()=>archive(s.day)}>查看档案</button></section>:stage==='speak'?<Speaking account={account} key={account+"-"+s.day+"-"+refreshKey} day={s.day} entry={entry} prompt={topic.speaking} followup={s.day===11?part3:topic.followup} save={save} advance={()=>void advance()}/>:stage!=='review'?<Exercise key={account+"-"+s.day+stage+"-"+refreshKey} account={account} day={s.day} stage={stage} entry={entry} completedDays={s.completed} save={save} advance={()=>void advance()}/>:<section className="card pad check-card"><div className="eyebrow">Final check-in</div><h2>给 Day {s.day} 收个尾</h2><p>回想一个下次能独立用出的表达，或一个仍需练习的问题。</p><label>一句复盘 <small>可选；保存后可请 Work 教练给建议</small><textarea readOnly={pending||entry.reviewMemo!==undefined} value={entry.reviewMemo??memo} onChange={e=>setMemo(e.target.value)} placeholder="下次我想试着……"/></label>{entry.reviewMemo===undefined?<button className="secondary" disabled={pending||!memo.trim()} onClick={()=>void save({reviewMemo:memo.trim()})}>保存复盘，查看批改入口</button>:<AttemptFeedback field="reviewMemo"/>}<p className="muted">保存复盘和查看反馈不会完成本课；最终打卡由你确认。</p><label className="checkbox"><input type="checkbox" checked={check} onChange={e=>setCheck(e.target.checked)}/>我已完成本课核心练习，确认打卡 Day {s.day}。</label><button className="primary" disabled={!check||pending||unsavedMemo} onClick={()=>void finish()}>确认完成 Day {s.day}<CheckCheck size={17}/></button></section>}
+ {s.finished?<section className="card pad"><h2>本课已打卡</h2><button className="secondary" onClick={()=>archive(s.day)}>查看档案</button></section>:stage==='speak'?<Speaking account={account} key={account+"-"+s.day+"-"+refreshKey} day={s.day} entry={entry} prompt={topic.speaking} followup={s.day===11?part3:topic.followup} save={save} advance={()=>void advance()} feedback={feedback.filter(f=>f.day===s.day)}/>:stage!=='review'?<Exercise key={account+"-"+s.day+stage+"-"+refreshKey} account={account} day={s.day} stage={stage} entry={entry} completedDays={s.completed} save={save} advance={()=>void advance()}/>:<section className="card pad check-card"><div className="eyebrow">Final check-in</div><h2>给 Day {s.day} 收个尾</h2><p>回想一个下次能独立用出的表达，或一个仍需练习的问题。</p><label>一句复盘 <small>可选；保存后可把本题交给教练批改</small><textarea readOnly={pending||entry.reviewMemo!==undefined} value={entry.reviewMemo??memo} onChange={e=>setMemo(e.target.value)} placeholder="下次我想试着……"/></label>{entry.reviewMemo===undefined?<button className="secondary" disabled={pending||!memo.trim()} onClick={()=>void save({reviewMemo:memo.trim()})}>保存复盘，查看批改入口</button>:<AttemptFeedback field="reviewMemo"/>}<p className="muted">保存复盘和查看反馈不会完成本课；最终打卡由你确认。</p><label className="checkbox"><input type="checkbox" checked={check} onChange={e=>setCheck(e.target.checked)}/>我已完成本课核心练习，确认打卡 Day {s.day}。</label><button className="primary" disabled={!check||pending||unsavedMemo} onClick={()=>void finish()}>确认完成 Day {s.day}<CheckCheck size={17}/></button></section>}
  <div className="lesson-foot"><Clock3 size={14}/><span>当前模块预算 {mins[stage]} 分钟 · 本课总预算 {cap} 分钟</span><button onClick={()=>navigate('home')}>返回工作台</button></div></>}
  {tab==='history'&&<div className="archive-grid"><div className="card archive-list">{Array.from({length:s.day},(_,i)=>s.day-i).map(d=><button key={d} className={d===historyDay?'selected':''} onClick={()=>{setHistoryDay(d);setShowPacket(false)}}><span>Day {String(d).padStart(2,'0')}</span>{s.completed.includes(d)?<Check size={15}/>:<i/>}</button>)}</div><div className="card pad history-detail"><div className="eyebrow">Lesson record / {String(historyDay).padStart(2,'0')}</div><h2>{brief[historyDay]||getLesson(historyDay).theme}</h2>{pill(s.completed.includes(historyDay)?'已打卡':'进行中',!s.completed.includes(historyDay))}{historyDay<=11&&<p className="muted">基础阶段为合成示例数据，仅用于演示与回归。</p>}<div className="record-list">{(oldResults[historyDay]||[]).map(([a,b])=><div key={a}><span>{a}</span><b>{b}</b></div>)}</div>
  {writings[historyDay]?.map((t,i)=><details key={i}><summary>{i?'写作修订稿':'写作独立首稿'}<ChevronDown size={15}/></summary><p className="english-text">{t}</p></details>)}
@@ -282,7 +349,7 @@ export default function Studio(){
  {tab==='notes'&&<div className="notebook"><div className="note-picks">{notes.map((n,i)=><button className={i===note?'selected':''} key={n.word} onClick={()=>{setNote(i);setReply('');setResult(null)}}><span>0{i+1}</span>{n.word}</button>)}</div><section className="card pad"><div className="eyebrow">Active recall · Day {notes[note].day}</div><h2>{notes[note].word}</h2><p className="sample-line">{notes[note].cue}</p><label>凭记忆填入一个词<input value={reply} onChange={e=>{setReply(e.target.value);setResult(null)}} placeholder="Your answer" autoComplete="off"/></label><button className="primary" disabled={!reply.trim()||pending||result!==null} onClick={async()=>{const ok=reply.trim().toLowerCase()===notes[note].key,word=notes[note].word;if(await persist(p=>({...p,practice:{...p.practice,[word]:{count:(p.practice[word]?.count||0)+1,date:dayStamp(),lastCorrect:ok}}})))setResult(ok)}}>核对并记录<ArrowRight size={16}/></button>
  {result!==null&&<div className="notice"><b>{result?'答对了。':'参考答案为 '+notes[note].key+'。'}</b><p>{notes[note].after}</p><p>{notes[note].tip}</p></div>}<details><summary>回看纠错笔记<ChevronDown size={15}/></summary><p className="before">{notes[note].before}</p><p className="example">{notes[note].after}</p><p>{notes[note].tip}</p></details>
  {s.practice[notes[note].word]&&<small className="muted">已提交 {s.practice[notes[note].word].count} 次 · 最近 {s.practice[notes[note].word].date}</small>}</section></div>}
- {tab==='report'&&<><Reports account={account} s={s} persist={persist} pending={pending} feedback={feedback}/><PronunciationProfilePanel feedback={feedback} onManageRecordings={()=>navigate('history')}/></>}
+ {tab==='report'&&<><Reports account={account} s={s} persist={persist} pending={pending} feedback={feedback}/><SpeakingProgressPanel entry={entry}/><PronunciationProfilePanel feedback={feedback} onManageRecordings={()=>navigate('history')}/></>}
  {tab==='settings'&&<><section className="card pad settings"><div className="eyebrow">Course preferences</div><h2>考试与训练安排</h2><label>考试类型<select value={s.exam} onChange={e=>{const v=e.target.value as Ledger['exam'];void persist(p=>({...p,exam:v}))}}><option>未选择</option><option>Academic</option><option>General Training</option></select></label><p>确认后可用于安排对应的阅读整卷与 Writing Task 1。</p><div className="record-list">{[['整体目标','Overall '+overallTarget.toFixed(1)],['每课预算','通常 110 分钟，最高 120 分钟'],['新课第一项','口语 · 工作日 15–20 分钟，周末 25–30 分钟'],['课程日期','按北京时间记录首次分配'],['评估周期','每 7 天回顾，每 28 天合评'],['目标节点','2026 年 12 月 22 日'],['完成条件','核心练习已提交，并由你最终打卡']].map(([k,v])=><div key={k}><span>{k}</span><b>{v}</b></div>)}</div></section><BackupPanel account={account} onRestored={refresh}/></>}
  </main><footer className="footer"><span><Mark/>Bandroom</span><small>PERSONAL IELTS STUDY STUDIO</small></footer></div></div></FeedbackProvider>
 }
