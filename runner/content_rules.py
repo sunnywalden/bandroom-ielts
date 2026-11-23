@@ -19,7 +19,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping
 
-PROMPT_VERSION = "bandroom-coach-prompts-2026-11-15.2"
+PROMPT_VERSION = "bandroom-coach-prompts-2026-11-23.1"
 
 MAX_FEEDBACK = 6000
 MAX_EVIDENCE = 2000

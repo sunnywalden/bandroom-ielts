@@ -990,6 +990,16 @@ class CoachRunner:
         )
         return Produced(validated=validated, day=day, stage=stage)
 
+    def _complete_writing(self, system: str, user: str) -> str:
+        """Raw structured-writing completion. `complete_writing` is an optional
+        capability (not part of the CoachModel protocol), so it is looked up
+        explicitly; a non-string answer is treated as malformed, never coerced."""
+        complete = getattr(self.model, "complete_writing", None)
+        if not callable(complete):
+            raise PermanentTaskError("writing_unsupported", "model cannot produce structured writing reviews")
+        raw = complete(system, user)
+        return raw if isinstance(raw, str) else ""
+
     def _produce_writing(self, attempt: Mapping[str, Any], day: int) -> Produced:
         """Writing issue cards (first draft) or an incremental verdict review
         (second draft with a frozen first review). A locally invalid answer
@@ -997,7 +1007,7 @@ class CoachRunner:
         learner is never left without feedback because of a format slip."""
         mode, system, user = writing_cards.build_messages(attempt)
         try:
-            raw = self.model.complete_writing(system, user)
+            raw = self._complete_writing(system, user)
             review = writing_cards.parse_review(raw, attempt, mode)
         except writing_cards.WritingCardError as exc:
             self._log("writing_fallback_prose", attempt=str(attempt.get("id")), code=exc.code)
@@ -1015,18 +1025,18 @@ class CoachRunner:
             response=str(attempt.get("response") or ""),
         )
         self._log("writing_review_produced", attempt=str(attempt.get("id")), mode=mode,
-                  issues=len(review.writing.get("issues") or []))
+                  issues=len(review.writing.get("issues") or []),
+                  promptVersion=writing_cards.WRITING_PROMPT_VERSION)
         return Produced(validated=validated, day=day, stage=stage, writing=review.writing)
 
     def _produce_recheck(self, attempt: Mapping[str, Any], day: int) -> Produced:
         """"我改好了吗？" quick check: a structured single-issue verdict only.
         There is no prose fallback (a prose answer cannot be shown as a
         verdict); a malformed answer is a retryable failure."""
-        complete = getattr(self.model, "complete_writing", None)
-        if not callable(complete):
-            raise PermanentTaskError("writing_unsupported", "model cannot produce structured quick checks")
         system, user = writing_cards.build_recheck_messages(attempt)
-        review = writing_cards.parse_recheck(complete(system, user), attempt)
+        review = writing_cards.parse_recheck(self._complete_writing(system, user), attempt)
+        self._log("writing_recheck_produced", attempt=str(attempt.get("id")),
+                  promptVersion=writing_cards.WRITING_PROMPT_VERSION)
         stage = str(attempt.get("stage"))
         validated = validate_feedback(
             review.feedback, review.evidence, str(attempt["id"]),
@@ -1378,6 +1388,14 @@ class CoachRunner:
         ):
             raise PermanentTaskError("snapshot_invalid", "claimed task has no attempt snapshot")
         attempt = snapshot["attempt"]
+        # The frozen review is {sourceId, attempt, context} (app/api/state/route.ts):
+        # context is a SIBLING of attempt, while the owner path inlines it into
+        # each attempt (lib/coach.ts). Fold it in so both paths hand the model
+        # the same payload; dropping it left the coach reviewing a reading
+        # answer without the passage, choices or key. Inline context wins.
+        frozen_context = snapshot.get("context")
+        if isinstance(frozen_context, Mapping) and "context" not in attempt:
+            attempt = {**attempt, "context": frozen_context}
         user_id = str(task["userId"])
         task_id = str(task["id"])
         fence = int(task["fence"])

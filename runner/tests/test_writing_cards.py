@@ -180,3 +180,35 @@ def test_queue_completes_recheck_without_prose_fallback(tmp_path):
     bad = FakeQueueClient([_write_task("t-rc2", attempt=recheck_attempt())])
     report = mt_runner(tmp_path / "b", bad, model=WritingModel("{nope")).run()
     assert report.processed == 0 and not bad.completed, "a malformed quick check is never shown as prose"
+
+
+def _events(caplog, name):
+    out = []
+    for record in caplog.records:
+        try:
+            data = json.loads(record.getMessage())
+        except ValueError:
+            continue
+        if data.get("event") == name:
+            out.append(data)
+    return out
+
+
+def test_writing_logs_identify_the_writing_prompt_version(tmp_path, caplog):
+    """The receipt does not carry a prompt version, so the runner log is the
+    audit trail: it must name the WRITING prompts that produced a card, not the
+    coach prompt version."""
+    import logging
+    caplog.set_level(logging.INFO, logger="bandroom.runner")
+    client = FakeQueueClient([_write_task()])
+    assert mt_runner(tmp_path, client, model=WritingModel(json.dumps(CARDS))).run().processed == 1
+    produced = _events(caplog, "writing_review_produced")
+    assert produced and produced[0]["promptVersion"] == wc.WRITING_PROMPT_VERSION
+
+    caplog.clear()
+    raw = json.dumps({"attempt": "v2:rc1", "mode": "recheck", "result": "partial",
+                      "evidence_quote": "people believe", "why_zh": "主谓一致对了。"})
+    rc = FakeQueueClient([_write_task("t-rc", attempt=recheck_attempt())])
+    assert mt_runner(tmp_path / "rc", rc, model=WritingModel(raw)).run().processed == 1
+    rechecked = _events(caplog, "writing_recheck_produced")
+    assert rechecked and rechecked[0]["promptVersion"] == wc.WRITING_PROMPT_VERSION
