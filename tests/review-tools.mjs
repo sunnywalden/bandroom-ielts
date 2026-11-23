@@ -49,6 +49,7 @@ registerHooks({resolve(specifier,context,next){
 
 const {callReviewTool,reviewTools}=await import('../lib/review-tools.ts');
 const {POST:takeoverPost}=await import('../app/api/review-tasks/takeover/route.ts');
+const {POST:renderedPost}=await import('../app/api/review-tasks/rendered/route.ts');
 const {GET:bundleGet}=await import('../app/api/analysis-bundle/route.ts');
 const {GET:transferGet,PUT:transferPut}=await import('../app/api/review-transfer/route.ts');
 const owner='tool-owner',other='tool-other';
@@ -502,5 +503,25 @@ const takeoverBody=await takeover.json();
 eq([takeoverBody.claimed,takeoverBody.state],[true,'running'],'takeover claims the task');
 eq(sql.prepare('SELECT claim_kind FROM review_tasks WHERE id=?').get(takeoverJob.taskId).claim_kind,'manual','takeover records a manual claim');
 eq(await callReviewTool(owner,'claim_review_tasks',{limit:1,clientRunId:'auto-after-takeover'}).then(text).then(v=>v.tasks.length),0,'automatic claim cannot follow takeover');
+// Phase 0 telemetry: first render of a completed review, tenant-scoped and idempotent.
+reset();
+const renderedJob=insertJob();
+const renderedRequest=(body,origin='https://fixture.example')=>new Request('https://fixture.example/api/review-tasks/rendered',{method:'POST',
+  headers:{origin,'content-type':'application/json'},body:JSON.stringify(body)});
+const renderedEvents=()=>sql.prepare("SELECT COUNT(*) n FROM analysis_events WHERE event='feedback_rendered'").get().n;
+globalThis.testUser=null;
+eq((await renderedPost(renderedRequest({attemptId:renderedJob.jobId}))).status,401,'rendered requires sign-in');
+globalThis.testUser={userId:owner};
+eq((await renderedPost(renderedRequest({attemptId:renderedJob.jobId},'https://evil.test'))).status,403,'rendered rejects foreign origin');
+eq((await renderedPost(renderedRequest({}))).status,400,'rendered requires an attempt id');
+eq(await (await renderedPost(renderedRequest({attemptId:renderedJob.jobId}))).json(),{recorded:false},'a queued task is not a render');
+sql.prepare("UPDATE review_tasks SET state='completed' WHERE id=?").run(renderedJob.taskId);
+globalThis.testUser={userId:'other-tenant-render'};
+eq(await (await renderedPost(renderedRequest({attemptId:renderedJob.jobId}))).json(),{recorded:false},'another tenant cannot record a render');
+globalThis.testUser={userId:owner};
+eq(await (await renderedPost(renderedRequest({attemptId:renderedJob.jobId}))).json(),{recorded:true},'first render is recorded');
+eq(await (await renderedPost(renderedRequest({attemptId:renderedJob.jobId}))).json(),{recorded:false},'render is idempotent');
+eq(renderedEvents(),1,'exactly one render event');
+eq(sql.prepare("SELECT user_id FROM analysis_events WHERE event='feedback_rendered'").get().user_id,owner,'render event is tenant-attributed');
 globalThis.testUser=null;
 console.log(JSON.stringify({suite:'review-tools',checks,passed:true}));

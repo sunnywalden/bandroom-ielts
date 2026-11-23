@@ -1,20 +1,24 @@
 # Bandroom own coach runner — systemd service template (Linux).
 # Install to /etc/systemd/system/bandroom-coach-runner.service together with
-# bandroom-coach-runner.timer. The orchestrator flock remains the final
-# single-instance guard; Type=oneshot prevents two timer starts overlapping.
+# Phase 0: the runner stays running (--daemon) and exits cleanly after
+# 6 h / 200 tasks; Restart=always brings it back with fresh config. The timer
+# unit is only needed for the legacy --once cadence. The orchestrator flock
+# remains the final single-instance guard.
 [Unit]
 Description=Bandroom own coach runner (production coach track)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
+Type=simple
+Restart=always
+RestartSec=30
 WorkingDirectory=/opt/bandroom/repo
 # Root-owned 0600 file with BANDROOM_RUNNER_CLIENT_ID,
 # BANDROOM_RUNNER_CLIENT_SECRET and DASHSCOPE_API_KEY. Never inline secrets.
 EnvironmentFile=/etc/bandroom/coach-runner.env
-ExecStart=/usr/bin/python3 -m runner.orchestrator --config /opt/bandroom/repo/runner/config.toml
-TimeoutStartSec=30min
+ExecStart=/usr/bin/python3 -m runner.orchestrator --config /opt/bandroom/repo/runner/config.toml --daemon
+TimeoutStopSec=5min
 Nice=10
 NoNewPrivileges=true
 PrivateTmp=true

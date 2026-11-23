@@ -156,7 +156,7 @@ function Writing({lesson,entry,save,advance,day,account,busy}:Common) {
       {under&&current.trim()&&<label className="ex-check"><input type="checkbox" disabled={submitting} checked={shortOk} onChange={e=>setShortOk(e.target.checked)}/>按当前字数提交，并保留篇幅不足的记录</label>}
       <div className="actions"><Submit disabled={busy||!ready} onClick={submit}>{isRevision?"提交修订稿":"提交并锁定首稿"}</Submit>
         <button type="button" className="secondary" disabled={busy||!current.trim()} onClick={()=>void save({[draftKey]:current})}>保存草稿</button></div>
-      <p className="ex-hint">提交后可以把这道题交给教练批改，评语会自动显示在对应稿件旁。你可以先看反馈，再动笔修订。</p>
+      <p className="ex-hint">{isRevision?"提交后会自动复核这份二稿，结果会显示在稿件旁。":"提交后会自动开始批改，结果会显示在首稿旁。建议看到批改后再动笔改二稿。"}</p>
     </>}
   </>;
 }

@@ -40,7 +40,7 @@ globalThis.testCloud.BANDROOM_QUOTA_GATE='off'; // fixture: quota tested separat
 registerHooks({resolve(spec,ctx,next){
  const mock=src=>({url:'data:text/javascript,'+encodeURIComponent(src),shortCircuit:true});
  if(spec==='cloudflare:workers')return mock('export const env=globalThis.testCloud');
- if(spec==='@/app/chatgpt-auth')return mock('export const getChatGPTUser=async()=>globalThis.user; export const getAuthContext=async()=>({user:globalThis.user,scope:"owner",identityType:"mock"})');
+ if(spec==='@/app/chatgpt-auth')return mock('export const getChatGPTUser=async()=>globalThis.user; export const getAuthContext=async()=>({user:globalThis.user,scope:globalThis.authScope??"owner",identityType:"mock"})');
  if(ctx.parentURL?.startsWith(root.href)&&!ctx.parentURL.includes('node_modules')){
   if(spec==='@/db')return {url:new URL('db/index.ts',root).href,shortCircuit:true};
   if(spec.startsWith('@/'))return {url:new URL(spec.slice(2)+'.ts',root).href,shortCircuit:true};
@@ -232,6 +232,23 @@ heartbeat('failed',Date.now(),null,null);
 assert.equal((await(await http.GET()).json()).automation.connected,false);check();
 heartbeat('finished',Date.now()-3*60*60_000,Date.now()-3*60*60_000,Date.now()+60*60_000);
 assert.equal((await(await http.GET()).json()).automation.connected,true);check();
+// D4: only the coach-runner service writes the tenant-neutral heartbeat, and
+// every tenant reads it (previously other tenants were always "disconnected").
+const svcRows=()=>db.prepare('SELECT COUNT(*) n FROM service_heartbeats').get().n;
+const svcBeat={automationId:'bandroom-coach-runner',generation:1,clientRunId:'run-svc',status:'started',startedAt:Date.now(),nextExpectedAt:Date.now()+60_000};
+unpack(await call('report_scheduler_heartbeat',svcBeat));
+assert.equal(svcRows(),0,'an owner-scope heartbeat never writes the shared service row');check();
+globalThis.user={userId:'runner-fixture'};globalThis.authScope='coach-runner';
+unpack(await call('report_scheduler_heartbeat',svcBeat));
+assert.equal(svcRows(),1,'the runner service writes the shared service row');check();
+globalThis.authScope=undefined;globalThis.user={userId:'tenant-without-heartbeat'};
+const otherAutomation=(await(await http.GET()).json()).automation;
+assert.equal(otherAutomation.connected,true,'a tenant with no own heartbeat sees the connected runner');check();
+assert.equal(otherAutomation.nextExpectedAt,svcBeat.nextExpectedAt);check();
+db.prepare("UPDATE service_heartbeats SET status='failed', updated_at=?").run(Date.now());
+assert.equal((await(await http.GET()).json()).automation.connected,false,'a failed service heartbeat reads as disconnected');check();
+db.prepare('DELETE FROM service_heartbeats').run();
+globalThis.user={userId:'feedback-fixture'};
 globalThis.user={userId:'other-fixture'};
 assert.equal((await call('read_study_session',{day:12,attemptId:id})).isError,true);
 assert.equal((await call('add_coach_feedback',fixedReview)).isError,true);check();

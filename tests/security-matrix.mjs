@@ -40,6 +40,7 @@ const state = await import("../app/api/state/route.ts");
 const audio = await import("../app/api/audio/route.ts");
 const coach = await import("../app/api/coach/route.ts");
 const takeover = await import("../app/api/review-tasks/takeover/route.ts");
+const rendered = await import("../app/api/review-tasks/rendered/route.ts");
 const backup = await import("../app/api/backup/route.ts");
 const transfer = await import("../app/api/review-transfer/route.ts");
 const bundle = await import("../app/api/analysis-bundle/route.ts");
@@ -139,6 +140,7 @@ test("every browser route rejects coach and coach-runner identities", async () =
       ["audio POST", await audio.POST(sameOrigin("/api/audio", {method: "POST"}))],
       ["coach GET", await coach.GET()],
       ["takeover POST", await takeover.POST(jsonBody("/api/review-tasks/takeover", {attemptId: "x"}))],
+      ["rendered POST", await rendered.POST(jsonBody("/api/review-tasks/rendered", {attemptId: "x"}))],
       ["backup GET", await backup.GET(sameOrigin("/api/backup"))],
       ["backup POST", await backup.POST(sameOrigin("/api/backup", {method: "POST"}))],
     ];
@@ -163,6 +165,7 @@ test("read-only mode rejects every write while owner reads still pass the guard"
     ["state PUT", await state.PUT(sameOrigin("/api/state", {method: "PUT"}))],
     ["audio POST", await audio.POST(sameOrigin("/api/audio", {method: "POST"}))],
     ["takeover POST", await takeover.POST(jsonBody("/api/review-tasks/takeover", {attemptId: "x"}))],
+    ["rendered POST", await rendered.POST(jsonBody("/api/review-tasks/rendered", {attemptId: "x"}))],
     ["backup POST", await backup.POST(sameOrigin("/api/backup", {method: "POST"}))],
   ];
   for (const [label, response] of writes) {
