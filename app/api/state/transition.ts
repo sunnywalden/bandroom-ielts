@@ -110,6 +110,16 @@ function ready(day:number, stage:Stage, e:Entry) {
   }
 }
 
+/** Revealed issue ids: a bounded list of well-formed ids, or null when invalid. */
+function hintIds(raw:string|undefined):string[]|null {
+  if(raw===undefined)return null;
+  try{
+    const value=JSON.parse(raw) as unknown;
+    if(!Array.isArray(value)||value.length>24)return null;
+    return value.every(id=>typeof id==="string"&&/^[A-Za-z0-9_-]{1,16}$/.test(id))?value as string[]:null;
+  }catch{return null}
+}
+
 function validEntry(day:number, stage:Stage, before:Entry, after:Entry, lesson?:Lesson) {
   const changed=[...new Set([...Object.keys(before),...Object.keys(after)])].filter(k=>before[k]!==after[k]);
   for(const k of changed){
@@ -132,7 +142,7 @@ function validEntry(day:number, stage:Stage, before:Entry, after:Entry, lesson?:
       };
       if(!newRows(next,prior,cap,rowValid))return false;
       if(k==="speakingFollowup" && day!==11 && !attempts(before.speakingPart2)?.length)return false;
-    } else if(before[k]!==undefined && !MUTABLE_SPEAK.has(k) && !k.endsWith("Draft"))return false;
+    } else if(before[k]!==undefined && !MUTABLE_SPEAK.has(k) && !k.endsWith("Draft") && k!=="writeHintReveals")return false;
   }
   if(stage==="speak"){
     if(changed.includes("speakingPhase") && !["part1","part2","followup","review"].includes(after.speakingPhase??""))return false;
@@ -193,6 +203,16 @@ function validEntry(day:number, stage:Stage, before:Entry, after:Entry, lesson?:
     if(!changed.includes(key)||after[key]===undefined)continue;
     if(after[key].length>8000||!before.writeOriginal?.trim()&&!after.writeOriginal?.trim())return false;
     try{if(!Array.isArray(JSON.parse(after[key])))return false}catch{return false}
+  }
+  // Revealing a reference fix is a repeated action, so writeHintReveals is the
+  // one submitted writing field that may change after its first save. It is
+  // append-only: the record feeds the "未看参考" honesty metric, and dropping an
+  // earlier id would let a later save rewrite that history. Everything else
+  // about the submitted draft stays immutable.
+  if(changed.includes("writeHintReveals") && after.writeHintReveals!==undefined){
+    const next=hintIds(after.writeHintReveals), prior=hintIds(before.writeHintReveals);
+    if(!next||new Set(next).size!==next.length)return false;
+    if(prior&&!prior.every(id=>next.includes(id)))return false;
   }
   if(changed.includes("speakingComplete") && !attempts(before.speakingFollowup)?.length)return false;
   const done=stage==="speak"?"speakingComplete":stage+"Done";

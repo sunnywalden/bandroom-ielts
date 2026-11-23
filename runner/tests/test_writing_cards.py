@@ -212,3 +212,36 @@ def test_writing_logs_identify_the_writing_prompt_version(tmp_path, caplog):
     assert mt_runner(tmp_path / "rc", rc, model=WritingModel(raw)).run().processed == 1
     rechecked = _events(caplog, "writing_recheck_produced")
     assert rechecked and rechecked[0]["promptVersion"] == wc.WRITING_PROMPT_VERSION
+
+
+def test_server_invalid_issue_id_falls_back_to_prose(tmp_path):
+    """An id the server schema rejects ("issue 1" has a space) must fail HERE,
+    so the learner still gets the documented prose review instead of a task
+    that can only end in needs_attention."""
+    import copy
+    bad = copy.deepcopy(CARDS)
+    bad["issues"][0]["id"] = "issue 1"
+    with pytest.raises(wc.WritingCardError):
+        wc.parse_review(json.dumps(bad), write_attempt(attempt_id="v2:w1"), "cards")
+    client = FakeQueueClient([_write_task()])
+    assert mt_runner(tmp_path, client, model=WritingModel(json.dumps(bad))).run().processed == 1
+    assert "writing" not in client.completed[0], "prose fallback, not a doomed structured submit"
+
+
+def test_duplicate_issue_ids_are_rejected_locally():
+    import copy
+    bad = copy.deepcopy(CARDS)
+    bad["issues"].append(copy.deepcopy(bad["issues"][0]))
+    with pytest.raises(wc.WritingCardError) as excinfo:
+        wc.parse_review(json.dumps(bad), write_attempt(attempt_id="v2:w1"), "cards")
+    assert "duplicate" in str(excinfo.value)
+
+
+def test_delta_band_rule_covers_new_issue_prompts_and_suggestions():
+    attempt = {"id": "v2:d1", "response": "people believe that",
+               "context": {"firstDraft": "people believes that", "firstReview": {"issues": [{"id": "i1"}]}}}
+    raw = {"attempt": "v2:d1", "verdicts": [], "summary": {"carry_forward_zh": "继续。"},
+           "issues": [{"id": "n1", "category": "GRA", "priority": "must", "quote": "people believe",
+                       "prompt_zh": "这里写作 band 7", "why_zh": "主谓一致。", "suggestion": None}]}
+    with pytest.raises(wc.WritingCardError):
+        wc.parse_review(json.dumps(raw), attempt, "delta")

@@ -168,8 +168,19 @@ for(let day=12;day<=62;day++){
     await reject(withEntry({writeHintReveals:'{"a":1}'}));
     await reject(withEntry({writeRevisionIssues:JSON.stringify(['x'.repeat(8000)])}));
     await mark({writeLoop:'v1',writeHintReveals:JSON.stringify(['i1'])});
+    // Revealing references is repeated: append-only growth is allowed, while
+    // dropping an earlier id or sending malformed ids stays rejected.
+    await mark({writeHintReveals:JSON.stringify(['i1','i2'])});
+    await mark({writeHintReveals:JSON.stringify(['i1','i2','i3'])});
+    await reject(withEntry({writeHintReveals:JSON.stringify(['i1'])}));
+    await reject(withEntry({writeHintReveals:JSON.stringify(['i2','i3'])}));
+    await reject(withEntry({writeHintReveals:JSON.stringify(['i1','i2','i2'])}));
+    await reject(withEntry({writeHintReveals:JSON.stringify(['i1','bad id'])}));
+    await reject(withEntry({writeHintReveals:JSON.stringify(['i1',3])}));
     await mark({writeRevision:'Revised draft.',writeFocus:'people 是复数',writeDone:'1',
       writeRevisionIssues:JSON.stringify([{id:'i1',state:'changed',why:'people 是复数'}])});
+    // The submitted revision checklist itself stays immutable.
+    await reject(withEntry({writeRevisionIssues:JSON.stringify([{id:'i1',state:'untouched',why:''}])}));
   }else await mark({writeRevision:'Revised draft.',writeFocus:'Evidence',writeDone:'1'});
   await advance('review');await finish();
 }

@@ -586,6 +586,28 @@ ReviewRun DO：调用 DashScope（stream）→ 每行：解析 → 锚点 → �
 
 第 2 期（流式快评）的前置项与 spike 仍未开始，且需要把模型密钥放到 Worker 上，开工前需要负责人单独确认。
 
+## 13. 第 1 期代码评审与闭环（2026-11-22）
+
+对 PR #57 的全量 diff 做了一轮独立评审，10 项发现全部复现确认并修复，每项都配了回归测试。
+
+| # | 位置 | 问题 | 修复 |
+|---|---|---|---|
+| 1 | `api/state/transition.ts` | `writeHintReveals` 被“已提交字段不可变”规则拦住，第二次展开参考改法返回 422 | 允许该字段追加式增长；删除历史 id、重复 id、非法 id 仍拒绝。其余已提交字段保持不可变 |
+| 2 | `lib/review-jobs.ts` | 取“最新一条 feedback”当作首稿批改，学习者笔记会盖住问题卡，二稿退化为普通批改 | 独立选取最新的 v1 问题卡行；无卡片时才回退到最新散文 |
+| 3 | `lib/review-tools.ts` | 服务端改写了结论，旧文本仍保留模型的矛盾措辞（结构化显示“未改动”，文本显示“已解决”） | 旧文本改为由**校验后**的结构重新生成 |
+| 4 | `lib/writing-feedback.ts` | 模型漏评的已改动问题会从复盘页消失；被改写的结论仍带原理由 | 每条首稿问题都必须有结论，漏评的明确标注“未评估”；服务端改写结论时同步替换理由 |
+| 5 | `runner/writing_cards.py` | 本地校验不查 issue id 格式与重复，服务端才拒绝，导致承诺的散文兜底不会触发 | 本地镜像服务端 id 规则与去重；补齐 delta 新问题的提示语/参考改法的分数禁令 |
+| 6 | `app/writing-diff.ts` | 引文用子串匹配，`he` 能锚进 `The`，一个字母的“证据”也能保住“已解决” | 锚点与证据引文都要求词边界；中文不受此限 |
+| 7 | `app/writing-loop-model.ts` | 合法的 issue id `__proto__` 会被原型 setter 吞掉，状态追踪失效 | 状态表与“为什么”字典改用 null 原型，并新增 `whyFor()` 只读自有属性 |
+| 8 | `api/writing/recheck/route.ts` | body 为 JSON `null` 时属性访问抛 TypeError，变成 500 | 解析后立即要求非空、非数组对象，否则 400 |
+| 9 | `lib/review-jobs.ts` / `app/writing-loop.tsx` | `frozenReviews` 无 `ORDER BY`，`.at(-1)` 可能拿到旧的快检 | 按 `created_at, id` 升序；用真实 SQLite + drizzle proxy 做排序回归 |
+| 10 | `lib/content-rules.ts` / `runner/content_rules.py` | 引文门禁只要求共享任意子串，“the answer is good” 也能通过 | 停用词不计入引文，且必须整词匹配；无实义词的短回答退化为整词匹配而非一律拒绝 |
+
+**评审之外的连带发现**：修第 7 项时新增测试暴露 `revisionGate` 与输入框读取 `why["__proto__"]` 会拿到原型对象再调 `.trim()`，已一并用 `whyFor()` 收敛。
+
+**验证**：`test:review` 退出码 0、无失败（node:test 53/53、120/120、158/158；脚本式套件 364 项）；`pytest runner/tests` 375 通过；
+`tsc` 与 `eslint` 均与干净 main 的既有基线一致，无新增。新增 `tests/review-jobs-order.test.mjs` 并注册进 `test:review`。
+
 ## 附录 A：顺手清理
 
 - `app/review-request.tsx:11` 和 `app/studio.tsx:334` 都硬编码了同一个具体的 ChatGPT 对话链接。

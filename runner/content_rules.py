@@ -441,6 +441,20 @@ def _coerce_pronunciation(value: Pronunciation | Mapping[str, Any] | None) -> Pr
     )
 
 
+_STOPWORDS = frozenset(
+    "the a an and or but so of to in on at for with by as from is are was were be been being "
+    "it its this that these those i you he she we they my your his her our their them not no do does did have has had "
+    "will would can could should there here what which who how when where why if than then because about into over "
+    "under very too also just".split()
+)
+
+
+def _contains_word(lowered_evidence: str, token: str) -> bool:
+    return re.search(
+        r"(?<![A-Za-z0-9'_-])" + re.escape(token) + r"(?![A-Za-z0-9'_-])", lowered_evidence
+    ) is not None
+
+
 def _require_citation(evidence: str, response: str, recording_id: str | None) -> None:
     """Require at least one concrete token from the learner's answer.
 
@@ -453,7 +467,11 @@ def _require_citation(evidence: str, response: str, recording_id: str | None) ->
     if not tokens:
         return
     lowered = evidence.lower()
-    if any(token in lowered for token in tokens):
+    # Mirrors lib/content-rules.ts: function words prove nothing, and a token
+    # only counts as a whole word ("the" inside "other" is not a citation).
+    content = {token for token in tokens if token not in _STOPWORDS}
+    candidates = content or tokens
+    if any(_contains_word(lowered, token) for token in candidates):
         return
     raise ContentRuleError(
         "evidence_missing_citation",

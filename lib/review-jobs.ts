@@ -1,8 +1,8 @@
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import type { ReviewAttempt } from "@/app/feedback-model";
 import { getTenantDb } from "@/db";
 import { reviewJobs } from "@/db/schema";
-import { isWritingCards, type WritingIssue } from "./writing-feedback";
+import { isWritingCards, type WritingCards, type WritingIssue } from "./writing-feedback";
 import type { reviewContext } from "./review-context";
 import { createReviewTaskStatement, type ReviewTaskDb } from "./review-tasks";
 
@@ -24,6 +24,11 @@ export type WritingRevisionContext = {
   rechecksUsed?: number;
 };
 
+function parseAnalysis(raw: string | null): unknown {
+  if (!raw) return null;
+  try { return JSON.parse(raw) as unknown; } catch { return null; }
+}
+
 export async function writingRevisionContext(userId: string, day: number, firstDraftSourceId: string,
   firstDraft: string): Promise<WritingRevisionContext> {
   // Raw tenant-scoped SQL (same client as submitReview) so the lookup runs
@@ -36,19 +41,28 @@ export async function writingRevisionContext(userId: string, day: number, firstD
     catch { return false; }
   });
   if (!job) return { firstDraft };
-  const row = await db.prepare(`SELECT id, feedback, analysis_json AS analysisJson FROM teacher_feedback
-    WHERE user_id=? AND attempt=? ORDER BY created_at DESC, id DESC LIMIT 1`)
-    .bind(userId, job.id).first<{ id: string; feedback: string; analysisJson: string | null }>();
-  if (!row) return { firstDraft };
-  let analysis: unknown = null;
-  try { analysis = row.analysisJson ? JSON.parse(row.analysisJson) : null; } catch { analysis = null; }
-  if (isWritingCards(analysis)) {
-    const prefix = `recheck:${row.id}:`;
+  const rows = await db.prepare(`SELECT id, feedback, analysis_json AS analysisJson FROM teacher_feedback
+    WHERE user_id=? AND attempt=? ORDER BY created_at DESC, id DESC LIMIT 12`)
+    .bind(userId, job.id).all<{ id: string; feedback: string; analysisJson: string | null }>();
+  const list = rows.results ?? [];
+  if (!list.length) return { firstDraft };
+  // Select the newest CARD review, not merely the newest feedback row. A later
+  // learner note (add_learner_note) is a newer row on this same attempt with no
+  // cards; letting it win would silently hide the structured first review and
+  // downgrade the second draft to a plain re-review.
+  let cardRow: { id: string; feedback: string; analysisJson: string | null } | undefined;
+  let cards: WritingCards | null = null;
+  for (const row of list) {
+    const analysis = parseAnalysis(row.analysisJson);
+    if (isWritingCards(analysis)) { cardRow = row; cards = analysis; break; }
+  }
+  if (cardRow && cards) {
+    const prefix = `recheck:${cardRow.id}:`;
     const used = await db.prepare("SELECT COUNT(*) AS n FROM review_jobs WHERE user_id=? AND substr(submission_key,1,?)=?")
       .bind(userId, prefix.length, prefix).first<{ n: number }>();
-    return { firstDraft, firstReview: { feedbackId: row.id, issues: analysis.issues }, rechecksUsed: Number(used?.n ?? 0) };
+    return { firstDraft, firstReview: { feedbackId: cardRow.id, issues: cards.issues }, rechecksUsed: Number(used?.n ?? 0) };
   }
-  return { firstDraft, firstFeedback: String(row.feedback).slice(0, 6000) };
+  return { firstDraft, firstFeedback: String(list[0].feedback).slice(0, 6000) };
 }
 
 export async function findSubmission(userId: string, submissionKey: string) {
@@ -58,9 +72,12 @@ export async function findSubmission(userId: string, submissionKey: string) {
 }
 
 export async function frozenReviews(userId: string, day?: number) {
+  // Deterministic oldest→newest order: callers take the LAST entry as the
+  // latest quick check, and SQLite never promised an order without ORDER BY.
   return getTenantDb(userId).select({ id: reviewJobs.id, day: reviewJobs.day, revision: reviewJobs.revision, snapshot: reviewJobs.snapshot })
     .from(reviewJobs).where(day === undefined ? eq(reviewJobs.userId, userId)
-      : and(eq(reviewJobs.userId, userId), eq(reviewJobs.day, day))).all();
+      : and(eq(reviewJobs.userId, userId), eq(reviewJobs.day, day)))
+    .orderBy(asc(reviewJobs.createdAt), asc(reviewJobs.id)).all();
 }
 
 export async function submitReview(
