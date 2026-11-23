@@ -150,6 +150,27 @@ export async function reviewAttempts(day:number, entry:Record<string,string>):Pr
 export function feedbackFor(attempt:ReviewAttempt,feedback:CoachFeedback[]) {
   return feedback.filter(f=>f.day===attempt.day&&f.stage===attempt.stage&&f.attempt===attempt.id);
 }
+// A review submission must carry exactly one NEW reviewable subjective answer
+// (server: app/api/state/route.ts). Two session-era changes touch a review
+// field without adding one, and must stay plain checkpoints or the server
+// rejects them with invalid_review_submission:
+//   * speakingMock — the server deliberately excludes mock from submissions;
+//     mock feedback is reviewed after the run, not per answer.
+//   * speakingFollowup — daily-mode extra practice rows carry reviewed:false
+//     and are skipped by reviewAttempts above, so appending one adds no task.
+// Answer rows are append-only (the oldest is evicted at the cap), so the newly
+// written answer is always the last row; it adds a review task only when it is
+// reviewable. This mirrors the server rule on the client so the submission key
+// is attached exactly when a submission carries a new reviewable answer.
+export function addsReviewableAnswer(field:string,after:string|undefined):boolean{
+  if(field==='speakingMock')return false;
+  if(field!=='speakingFollowup')return true;
+  let rows:unknown;
+  try{rows=JSON.parse(after||'[]')}catch{return false}
+  if(!Array.isArray(rows)||!rows.length)return false;
+  const last=rows[rows.length-1];
+  return Boolean(last)&&typeof last==='object'&&(last as {reviewed?:unknown}).reviewed!==false;
+}
 export function reviewRequest(attempt:ReviewAttempt) {
   return `请通过 Bandroom 调用 read_study_session（day: ${attempt.day}, attemptId: ${attempt.id}）读取已提交作答，批改“${attempt.title}”（attempt: ${attempt.id}）。结合题目逐句指出问题，给出修正表达、原因和下一步练习；使用 add_coach_feedback 将评语写回这个 attempt。口语必须实际听到录音才评发音和流利度。不要完成本课或开启下一课。`;
 }

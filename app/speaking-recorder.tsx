@@ -448,6 +448,10 @@ export default function SessionRecorder({ limit, clip, disabled, practice = true
       const url = URL.createObjectURL(blob);
       clearTake();
       takeRef.current = { url };
+      // A new take has not been adopted by the parent yet. Without this reset
+      // the previous clip's `clipSeen` flag clears the fresh summary on the
+      // next effect pass, hiding the duration and the honest device verdict.
+      clipSeen.current = false;
       const entry = { blob, url, meta: { durationMs, silent, metered, incomplete: partial, interrupted: wasInterrupted } };
       setTake(entry);
       onClipRef.current(blob, entry.meta);
