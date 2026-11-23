@@ -2,6 +2,7 @@ import { z } from "zod/v4";
 import { acousticChunkIndex, acousticChunkLimit } from "./acoustic-chunk";
 import { citationViolation, coachingContentViolation } from "./content-rules";
 import {
+  composeWritingText,
   validateWritingCards, validateWritingDelta, validateWritingRecheck, WritingFeedbackError, WRITING_FIELDS, RECHECK_FIELD,
   type WritingFeedback, type WritingIssue,
 } from "./writing-feedback";
@@ -533,14 +534,18 @@ export async function callReviewTool(
           if ((input.analysis?.decoded as { sampleCount?: number }).sampleCount !== sampleCount)
             throw new ReviewTaskError("invalid_analysis", "The decoded sample count differs from the committed timeline.");
         }
+        // The plain text is derived from the VALIDATED structure, not from the
+        // model's prose: when the server downgrades a verdict the legacy text
+        // must not keep claiming "已解决" (history, MCP and exports read this).
+        const feedbackText = writing ? composeWritingText(writing) : input.feedback;
         const completed = await completeReviewTask(db, scope.user, {
           taskId: scope.task, fence: scope.fence,
           // `writing` enters the digest only when present, so every pre-Phase-1
           // receipt replays byte-identically.
-          output: { feedback: input.feedback, evidence: input.evidence, analysis: effectiveAnalysis, ...(writing ? { writing } : {}) },
+          output: { feedback: feedbackText, evidence: input.evidence, analysis: effectiveAnalysis, ...(writing ? { writing } : {}) },
           feedback: {
             id: `rt:${scope.task}`, day: task.day, stage: attempt.stage, attempt: task.attemptId,
-            evidence: input.evidence, feedback: input.feedback,
+            evidence: input.evidence, feedback: feedbackText,
             pronunciation: input.pronunciation ? { ...input.pronunciation, scope: "partial" as const } : undefined,
             // Text tasks never carry acoustic analysis, so the stored JSON
             // column holds the schema-tagged writing payload instead; the read

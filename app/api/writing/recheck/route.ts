@@ -15,6 +15,9 @@ export async function POST(request: Request) {
   if (body instanceof Response) return body;
   let input: { issueId?: unknown; revised?: unknown; why?: unknown } = {};
   try { input = JSON.parse(new TextDecoder().decode(body)) as typeof input; } catch { /* invalid JSON */ }
+  // JSON.parse accepts `null`, arrays and scalars; reading .issueId off `null`
+  // would throw outside this route's error handling and surface as a 500.
+  if (!input || typeof input !== "object" || Array.isArray(input)) return json({ error: "invalid_request" }, 400);
   if (typeof input.issueId !== "string" || !/^[A-Za-z0-9_-]{1,16}$/.test(input.issueId)
       || typeof input.revised !== "string" || !input.revised.trim() || input.revised.length > 12000
       || (input.why !== undefined && typeof input.why !== "string"))

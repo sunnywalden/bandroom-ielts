@@ -6,7 +6,7 @@ import ListeningPlayer from "./listening-player";
 import VocabularyReview, { learnedWords } from "./vocabulary-review";
 import AttemptFeedback, { useAttemptReview } from "./attempt-feedback";
 import { WritingStepper, ReviewPanel, RevisionChecklist, ReflectPanel } from "./writing-loop";
-import { defaultSelection, draftStats, isCards, isDelta, loopStep, parseList, parseWhy, revisionGate } from "./writing-loop-model";
+import { defaultSelection, draftStats, isCards, isDelta, loopStep, parseList, parseWhy, revisionGate, whyFor } from "./writing-loop-model";
 import Pronunciation from "./pronunciation";
 import "./exercise.css";
 
@@ -138,7 +138,7 @@ function Writing({lesson,entry,save,advance,day,account,busy}:Common) {
     setRecheckStatus("");
     try{
       const res=await fetch("/api/writing/recheck",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({issueId,revised:second,why:why[issueId]??""})});
+        body:JSON.stringify({issueId,revised:second,why:whyFor(why,issueId)})});
       const data=await res.json().catch(()=>({})) as {error?:string};
       if(!res.ok)setRecheckStatus(data.error==="recheck_limit"?"本稿的 5 次快检已用完。":data.error==="issue_untouched"?"这一处还没有改动。":"暂时无法快检，请稍后再试。");
       firstReview.refresh();

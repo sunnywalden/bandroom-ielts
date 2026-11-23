@@ -61,13 +61,18 @@ export function parseList(raw: string | undefined): string[] {
   }
 }
 export function parseWhy(raw: string | undefined): Record<string, string> {
+  // Also null-prototype, so a missing "__proto__" key reads back undefined
+  // instead of the object prototype (callers do `.trim()` on the result).
+  const out: Record<string, string> = Object.create(null);
   try {
     const value = JSON.parse(raw || "{}") as unknown;
-    return value && typeof value === "object" && !Array.isArray(value)
-      ? Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([, v]) => typeof v === "string")) as Record<string, string>
-      : {};
+    if (!value || typeof value !== "object" || Array.isArray(value)) return out;
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof item === "string") out[key] = item;
+    }
+    return out;
   } catch {
-    return {};
+    return out;
   }
 }
 
@@ -83,7 +88,10 @@ export type IssueState = "changed" | "untouched" | "unanchored";
 export function issueStates(original: string, revised: string, issues: WritingIssue[]): Record<string, IssueState> {
   const anchored = issues.filter(issue => issue.anchor);
   const tracked = trackAnchors(original, revised, anchored.map(issue => issue.anchor as Span));
-  const out: Record<string, IssueState> = {};
+  // Null prototype: issue ids are model-controlled and the schema permits
+  // "__proto__", which a plain object would route to the prototype setter and
+  // silently swallow, corrupting the per-issue state map.
+  const out: Record<string, IssueState> = Object.create(null);
   for (const issue of issues) out[issue.id] = "unanchored";
   anchored.forEach((issue, index) => { out[issue.id] = tracked[index].state; });
   return out;
@@ -103,17 +111,25 @@ export type RevisionGate = {
  * this gate adds: at least one chosen anchor changed OR a note, and a short
  * "why" for every chosen must-fix issue that was changed.
  */
+/** Read a learner "why" note by issue id. Ids are model-controlled and may be
+ * "__proto__", so inherited properties must never be read (a plain `{}` would
+ * otherwise hand back the prototype object and crash on `.trim()`). */
+export function whyFor(why: Record<string, string>, id: string): string {
+  const value = Object.hasOwn(why, id) ? why[id] : undefined;
+  return typeof value === "string" ? value : "";
+}
+
 export function revisionGate(input: {
   original: string; revised: string; issues: WritingIssue[]; selected: string[];
   why: Record<string, string>; note: string;
 }): RevisionGate {
   const chosen = input.issues.filter(issue => input.selected.includes(issue.id));
   const states = issueStates(input.original, input.revised, chosen);
-  const rows = chosen.map(issue => ({ id: issue.id, state: states[issue.id], why: (input.why[issue.id] ?? "").trim() }));
+  const rows = chosen.map(issue => ({ id: issue.id, state: states[issue.id], why: whyFor(input.why, issue.id).trim() }));
   const numbered = new Map(input.issues.map((issue, index) => [issue.id, index + 1]));
   const parts = chosen
-    .filter(issue => states[issue.id] === "changed" || (states[issue.id] === "unanchored" && (input.why[issue.id] ?? "").trim()))
-    .map(issue => `#${numbered.get(issue.id)} ${CATEGORY_ZH[issue.category]}：${(input.why[issue.id] ?? "").trim() || "已修改"}`);
+    .filter(issue => states[issue.id] === "changed" || (states[issue.id] === "unanchored" && whyFor(input.why, issue.id).trim()))
+    .map(issue => `#${numbered.get(issue.id)} ${CATEGORY_ZH[issue.category]}：${whyFor(input.why, issue.id).trim() || "已修改"}`);
   const note = input.note.trim();
   const focus = [parts.length ? "改了：" + parts.join("；") : "", note].filter(Boolean).join(" · ").slice(0, 400);
   let reason = "";
@@ -123,7 +139,7 @@ export function revisionGate(input: {
     : "写一句补充说明：这次改了什么。";
   else {
     const missing = chosen.find(issue => issue.priority === "must" && states[issue.id] === "changed"
-      && (input.why[issue.id] ?? "").trim().length < MIN_WHY);
+      && whyFor(input.why, issue.id).trim().length < MIN_WHY);
     if (missing) reason = `为必改项 #${numbered.get(missing.id)} 写一句“为什么这样改”。`;
   }
   return { ready: !reason, reason, focus, issues: rows };

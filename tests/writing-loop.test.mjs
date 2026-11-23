@@ -116,11 +116,91 @@ test("validateWritingDelta: deterministic untouched wins and resolved needs a ve
   assert.equal(out.baseFeedbackId, "rt:first");
 });
 
-test("validateWritingDelta fills a verdict for every untouched anchored issue", () => {
+test("validateWritingDelta fills a verdict for EVERY first-draft issue, even an edited one the model omitted", () => {
   const first = wf.validateWritingCards(cards, DRAFT);
+  const revised = DRAFT + " Extra sentence.";
   const out = wf.validateWritingDelta({ mode: "delta", verdicts: [], issues: [], summary: { carry_forward_zh: "继续。" } },
-    DRAFT + " Extra sentence.", DRAFT, { feedbackId: "rt:first", issues: first.issues });
-  assert.deepEqual(out.verdicts.map(v => [v.issue, v.result]), [["i1", "untouched"], ["i2", "untouched"]]);
+    revised, DRAFT, { feedbackId: "rt:first", issues: first.issues });
+  const map = new Map(out.verdicts.map(v => [v.issue, v]));
+  assert.equal(map.size, first.issues.length, "no issue may silently disappear");
+  assert.equal(map.get("i1").result, "untouched");
+  assert.equal(map.get("i2").result, "untouched");
+  // i3 has no anchor: it is neither provably untouched nor assessed, so it is
+  // reported as unassessed rather than dropped or passed.
+  assert.equal(map.get("i3").result, "unresolved");
+  assert.equal(map.get("i3").adjusted, true);
+  assert.match(map.get("i3").why_zh, /没有评估/);
+});
+
+test("validateWritingDelta: an edited issue the model skipped is reported as unassessed, not resolved", () => {
+  const first = wf.validateWritingCards(cards, DRAFT);
+  const anchored = first.issues.find(i => i.anchor);
+  const revised = DRAFT.replace(anchored.quote, "completely different wording here");
+  const out = wf.validateWritingDelta({ mode: "delta", verdicts: [], issues: [], summary: { carry_forward_zh: "继续。" } },
+    revised, DRAFT, { feedbackId: "rt:first", issues: first.issues });
+  const row = out.verdicts.find(v => v.issue === anchored.id);
+  assert.equal(row.local, "changed");
+  assert.equal(row.result, "unresolved");
+  assert.match(row.why_zh, /做了修改/);
+});
+
+test("validateWritingDelta: a server-overridden verdict no longer keeps the model's contradictory rationale", () => {
+  const first = wf.validateWritingCards(cards, DRAFT);
+  const anchored = first.issues.find(i => i.anchor);
+  // Unchanged draft, but the model claims the issue was resolved.
+  const out = wf.validateWritingDelta({ mode: "delta", issues: [], summary: { carry_forward_zh: "继续。" },
+    verdicts: [{ issue: anchored.id, result: "resolved", evidence_quote: anchored.quote, why_zh: "已补充具体例子,论证完整。" }] },
+    DRAFT, DRAFT, { feedbackId: "rt:first", issues: first.issues });
+  const row = out.verdicts.find(v => v.issue === anchored.id);
+  assert.equal(row.result, "untouched");
+  assert.equal(row.adjusted, true);
+  assert.equal(row.why_zh, "这一处在二稿中没有改动。");
+  assert.ok(!row.why_zh.includes("已补充"), "contradictory model prose must not survive the override");
+  // The legacy plain text is derived from the same corrected structure.
+  assert.ok(!wf.composeWritingText(out).includes("已解决】"), "legacy text must not claim 已解决");
+});
+
+test("resolveAnchor and evidence quotes require token boundaries (no anchoring inside a word)", () => {
+  const draft = "The economy grows.";
+  assert.equal(diff.resolveAnchor(draft, "he"), null, "'he' inside 'The' is not an anchor");
+  assert.equal(diff.resolveAnchor(draft, "econom"), null, "a word prefix is not an anchor");
+  assert.ok(diff.resolveAnchor(draft, "economy"), "a whole word still resolves");
+  assert.ok(diff.resolveAnchor(draft, "The economy"), "a multi-word phrase still resolves");
+  assert.equal(diff.containsQuote(draft, "he"), false);
+  assert.equal(diff.containsQuote(draft, "economy grows"), true);
+  // A single-letter evidence quote can no longer preserve a resolved verdict.
+  const first = wf.validateWritingCards(cards, DRAFT);
+  const anchored = first.issues.find(i => i.anchor);
+  const revised = DRAFT.replace(anchored.quote, "many people believe");
+  const out = wf.validateWritingDelta({ mode: "delta", issues: [], summary: { carry_forward_zh: "继续。" },
+    verdicts: [{ issue: anchored.id, result: "resolved", evidence_quote: "e", why_zh: "改好了。" }] },
+    revised, DRAFT, { feedbackId: "rt:first", issues: first.issues });
+  assert.equal(out.verdicts.find(v => v.issue === anchored.id).result, "unresolved");
+});
+
+test("issueStates and parseWhy survive a model-controlled issue id of __proto__", () => {
+  const draft = "many people believes that";
+  const cardsWithProto = { mode: "cards", summary: { priorities: [], next_step_zh: "继续。" },
+    issues: [{ id: "__proto__", category: "GRA", priority: "must", quote: "people believes",
+      prompt_zh: "主谓一致?", why_zh: "复数主语。", suggestion: "people believe" }] };
+  const first = wf.validateWritingCards(cardsWithProto, draft);
+  const states = model.issueStates(draft, draft.replace("people believes", "people believe"), first.issues);
+  assert.equal(states["__proto__"], "changed", "the state is stored, not swallowed by the prototype setter");
+  const gate = model.revisionGate({ original: draft, revised: draft.replace("people believes", "people believe"),
+    issues: first.issues, selected: ["__proto__"], why: {}, note: "" });
+  assert.match(gate.reason, /必改项/, "the gate still reads a real state for that id");
+  assert.equal(model.parseWhy("{}")["__proto__"], undefined, "a missing key must not read the prototype");
+  assert.deepEqual({ ...model.parseWhy('{"i1":"x","i2":3}') }, { i1: "x" });
+});
+
+test("citation gate: stopwords and substrings no longer count as quoting the learner", () => {
+  assert.equal(rules.citesLearnerText("the answer is good", "The economy grows."), false,
+    "sharing only 'the' is not a citation");
+  assert.equal(rules.citesLearnerText("otherwise fine", "The economy grows."), false,
+    "'the' inside 'otherwise' is a substring, not a quote");
+  assert.equal(rules.citesLearnerText("原文 “economy” 这里的论述", "The economy grows."), true);
+  assert.equal(rules.citesLearnerText("Learner wrote \"Fixture answer\"", "Fixture answer"), true);
+  assert.equal(rules.citesLearnerText("anything", "!!"), true, "a token-free answer cannot be cited");
 });
 
 test("content rules: text stages may not carry a band number; speaking criterion bands unaffected", () => {
@@ -169,5 +249,5 @@ test("revisionGate: unchanged, untouched selection, must-why, note-only and comp
   assert.equal(model.revisionGate({ ...base, selected: [], revised: fixed }).reason, "写一句补充说明：这次改了什么。");
   assert.deepEqual(model.defaultSelection(first), ["i1", "i2"]);
   assert.deepEqual(model.parseList("not json"), []);
-  assert.deepEqual(model.parseWhy('{"i1":"x","i2":3}'), { i1: "x" });
+  assert.deepEqual({ ...model.parseWhy('{"i1":"x","i2":3}') }, { i1: "x" });
 });

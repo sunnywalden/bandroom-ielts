@@ -5,7 +5,7 @@ import type { WritingCards, WritingDelta, WritingIssue } from "@/lib/writing-fee
 import type { WritingRecheckStatus } from "./feedback-model";
 import { diffWords } from "./writing-diff";
 import {
-  CATEGORY_ZH, PRIORITY_ZH, RESULT_ZH, STEP_LABELS, MIN_WHY, segmentDraft, issueStates,
+  CATEGORY_ZH, PRIORITY_ZH, RESULT_ZH, STEP_LABELS, MIN_WHY, segmentDraft, issueStates, whyFor,
   type IssueState, type LoopStep,
 } from "./writing-loop-model";
 import "./writing-loop.css";
@@ -116,8 +116,8 @@ export function RevisionChecklist({ original, revised, cards, selected, why, onW
         <IssueCard issue={issue} n={n} revealed={revealed.includes(issue.id)} onReveal={() => onReveal(issue.id)} state={states[issue.id]}/>
         {(needWhy || states[issue.id] !== "untouched") && <label className="ex-label wl-why-input">
           {needWhy ? "为什么这样改（必填，一句话）" : "为什么这样改（选填）"}
-          <input value={why[issue.id] ?? ""} maxLength={160} onChange={event => onWhy(issue.id, event.target.value)}
-            placeholder="例如：people 是复数，谓语用原形" aria-invalid={needWhy && (why[issue.id] ?? "").trim().length < MIN_WHY}/>
+          <input value={whyFor(why, issue.id)} maxLength={160} onChange={event => onWhy(issue.id, event.target.value)}
+            placeholder="例如：people 是复数，谓语用原形" aria-invalid={needWhy && (whyFor(why, issue.id)).trim().length < MIN_WHY}/>
         </label>}
         {onRecheck && issue.anchor && states[issue.id] === "changed" && <RecheckRow
           latest={rechecks.filter(row => row.issue === issue.id).at(-1)} used={used}

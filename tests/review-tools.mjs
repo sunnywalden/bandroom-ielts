@@ -556,6 +556,10 @@ eq(text(await callReviewTool(owner,'complete_review_task',{taskId:secondJob.task
 const storedDelta=JSON.parse(sql.prepare('SELECT analysis_json FROM teacher_feedback WHERE review_task_id=?').get(secondJob.taskId).analysis_json);
 eq(storedDelta.verdicts.map(v=>[v.issue,v.result,v.adjusted]),[['i1','resolved',false],['i2','untouched',true]],
   'an unchanged anchor can never be reported as resolved');
+// Legacy prose is derived from the CORRECTED verdicts, not the model's prose.
+const deltaText=sql.prepare('SELECT feedback FROM teacher_feedback WHERE review_task_id=?').get(secondJob.taskId).feedback;
+eq(deltaText.includes('已补充'),false,'the downgraded verdict no longer carries the model rationale');
+eq(deltaText.includes('未改动'),true,'legacy text reflects the corrected verdict');
 const plainSecond=insertJob({field:'writeRevision',response:REVISION,context:{prompt:'p',firstDraft:DRAFT}});
 const plainTask=await claimOne(plainSecond,'run-w4');
 eq(text(await callReviewTool(owner,'complete_review_task',{taskId:plainSecond.taskId,fence:plainTask.fence,
@@ -598,6 +602,18 @@ eq(text(await callReviewTool(owner,'complete_review_task',{taskId:rcTask.id,fenc
 const rcStored=JSON.parse(sql.prepare('SELECT analysis_json FROM teacher_feedback WHERE attempt=?').get(rc1.jobId).analysis_json);
 eq([rcStored.mode,rcStored.issue,rcStored.result,rcStored.adjusted,rcStored.baseFeedbackId],['recheck','i1','unresolved',true,'rt:'+rcFirst.taskId],
   'a non-verbatim quote downgrades the advisory verdict');
+// The quick-check rationale is replaced when the server downgrades it.
+eq(rcStored.why_zh,'快检结论缺少可逐字核对的原文引用,因此不能判定为已解决。','quick-check rationale replaced on downgrade');
+
+// A later learner note on the same attempt must not hide the card review.
+const {writingRevisionContext}=await import('../lib/review-jobs.ts');
+sql.prepare(`INSERT INTO teacher_feedback(id,user_id,day,stage,attempt,evidence,feedback,created_at,analysis_json)
+  VALUES ('note-newer',?,12,'write',?,'','学习者自己的笔记',?,NULL)`)
+  .run(owner,rcFirst.jobId,new Date(Date.now()+60_000).toISOString());
+const ctxAfterNote=await writingRevisionContext(owner,12,rcSource,DRAFT);
+eq(ctxAfterNote.firstReview?.feedbackId,'rt:'+rcFirst.taskId,'a newer learner note cannot hide the structured first review');
+eq(ctxAfterNote.firstFeedback===undefined,true,'a note does not turn the second draft into a prose re-review');
+
 for(let i=2;i<=5;i++)eq((await (await recheckPost(recheckRequest({issueId:'i1',revised:REVISION+' x'.repeat(i)}))).json()).used,i,'quick check '+i);
 eq(await (await recheckPost(recheckRequest({issueId:'i1',revised:REVISION}))).json(),{error:'recheck_limit'},'five quick checks per first-draft review');
 
@@ -621,5 +637,14 @@ eq(await (await renderedPost(renderedRequest({attemptId:renderedJob.jobId}))).js
 eq(await (await renderedPost(renderedRequest({attemptId:renderedJob.jobId}))).json(),{recorded:false},'render is idempotent');
 eq(renderedEvents(),1,'exactly one render event');
 eq(sql.prepare("SELECT user_id FROM analysis_events WHERE event='feedback_rendered'").get().user_id,owner,'render event is tenant-attributed');
+// --- Review-closure regressions (findings from the Phase 1 code review) ---
+// `null` and arrays are valid JSON but not request objects: a 400, never a 500.
+globalThis.testUser={userId:owner};
+const rawRecheck=body=>new Request('https://fixture.example/api/writing/recheck',{method:'POST',
+  headers:{origin:'https://fixture.example','content-type':'application/json'},body});
+eq((await recheckPost(rawRecheck('null'))).status,400,'a JSON null body is a client error, not a TypeError');
+eq((await recheckPost(rawRecheck('[1,2]'))).status,400,'a JSON array body is a client error');
+eq((await recheckPost(rawRecheck('"text"'))).status,400,'a JSON scalar body is a client error');
+
 globalThis.testUser=null;
 console.log(JSON.stringify({suite:'review-tools',checks,passed:true}));

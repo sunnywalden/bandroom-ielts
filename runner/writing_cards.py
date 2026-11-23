@@ -38,6 +38,13 @@ class WritingCardError(ContentRuleError):
     """Local validation failure; the caller falls back to the prose review."""
 
 
+# Must mirror the server schema (lib/writing-feedback.ts issueSpec) exactly:
+# an id the server would reject has to fail HERE, so the caller delivers the
+# documented prose fallback instead of submitting a payload that can only be
+# refused later and end the task in needs_attention.
+_ISSUE_ID = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
+
+
 @dataclass(frozen=True)
 class WritingReview:
     writing: dict[str, Any]
@@ -123,6 +130,7 @@ def _issues(raw: Any, draft: str, *, limit: int) -> list[dict[str, Any]]:
     if not isinstance(raw, list) or len(raw) > limit:
         raise WritingCardError("invalid_writing", "issues must be a short list", retryable=True)
     out = []
+    seen: set[str] = set()
     for item in raw:
         if not isinstance(item, Mapping):
             raise WritingCardError("invalid_writing", "issue must be an object", retryable=True)
@@ -131,8 +139,14 @@ def _issues(raw: Any, draft: str, *, limit: int) -> list[dict[str, Any]]:
         if category not in CATEGORIES or priority not in PRIORITIES:
             raise WritingCardError("invalid_writing", "bad category or priority", retryable=True)
         quote = _text(item.get("quote"), "quote", 300)
+        issue_id = _text(item.get("id"), "id", 16)
+        if not _ISSUE_ID.match(issue_id):
+            raise WritingCardError("invalid_writing", "issue id must match [A-Za-z0-9_-]{1,16}", retryable=True)
+        if issue_id in seen:
+            raise WritingCardError("invalid_writing", f"duplicate issue id {issue_id}", retryable=True)
+        seen.add(issue_id)
         issue = {
-            "id": _text(item.get("id"), "id", 16),
+            "id": issue_id,
             "category": category,
             "priority": priority,
             "quote": quote,
@@ -203,7 +217,8 @@ def parse_review(raw: str, attempt: Mapping[str, Any], mode: str) -> WritingRevi
             })
         issues = _issues(data.get("issues") or [], draft, limit=8)
         carry = _text(summary.get("carry_forward_zh"), "carry_forward_zh", 300)
-        _check_band(carry, *(v["why_zh"] for v in verdicts), *(i["why_zh"] for i in issues))
+        _check_band(carry, *(v["why_zh"] for v in verdicts),
+                    *(f"{i['prompt_zh']} {i['why_zh']} {i['suggestion'] or ''}" for i in issues))
         writing = {"mode": "delta", "verdicts": verdicts, "issues": issues,
                    "summary": {"carry_forward_zh": carry}}
         lines = [f"【{_RESULT_ZH[v['result']]}】{v['issue']}：{v['why_zh']}" for v in verdicts]

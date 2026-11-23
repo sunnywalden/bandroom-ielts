@@ -9,7 +9,7 @@
 // words are all unchanged is always `untouched`, and a `resolved`/`partial`
 // verdict must quote the second draft verbatim.
 import { z } from "zod/v4";
-import { resolveAnchor, trackAnchors, type Span } from "@/app/writing-diff";
+import { containsQuote, resolveAnchor, trackAnchors, type Span } from "@/app/writing-diff";
 import { coachingContentViolation } from "./content-rules";
 
 export const WRITING_SCHEMA = "bandroom-writing-feedback-v1";
@@ -160,22 +160,41 @@ export function validateWritingDelta(raw: unknown, revision: string, firstDraft:
     seen.add(verdict.issue);
     const local = states.get(verdict.issue) ?? null;
     const quote = verdict.evidence_quote?.trim() || null;
-    let result = verdict.result, adjusted = false;
-    if (local === "untouched" && result !== "untouched") { result = "untouched"; adjusted = true; }
-    else if (local === "changed" && result === "untouched") { result = "unresolved"; adjusted = true; }
-    if ((result === "resolved" || result === "partial") && (!quote || !revision.includes(quote))) {
+    const cited = Boolean(quote && containsQuote(revision, quote));
+    let result = verdict.result, adjusted = false, override: string | null = null;
+    if (local === "untouched" && result !== "untouched") {
+      result = "untouched"; adjusted = true;
+      override = "这一处在二稿中没有改动。";
+    } else if (local === "changed" && result === "untouched") {
       result = "unresolved"; adjusted = true;
+      override = "这一处在二稿中有改动,但还不能据此判定改好了。";
     }
-    verdicts.push({ issue: verdict.issue, result, evidence_quote: quote && revision.includes(quote) ? quote : null,
-      why_zh: verdict.why_zh, local, adjusted });
+    if ((result === "resolved" || result === "partial") && !cited) {
+      result = "unresolved"; adjusted = true;
+      override = "复核结论缺少可逐字核对的二稿原文引用,因此不能判定为已解决。";
+    }
+    // When the server overrides the model, its rationale is replaced too:
+    // storing "已解决" prose next to an `untouched` verdict would contradict the
+    // structured result in every legacy reader (history, MCP, exports).
+    verdicts.push({ issue: verdict.issue, result, evidence_quote: cited ? quote : null,
+      why_zh: override ?? verdict.why_zh, local, adjusted });
   }
-  // Every anchored first-draft issue gets a verdict; missing ones are filled
-  // from the deterministic state so the learner never sees a silent gap.
+  // EVERY first-draft issue gets a verdict, not just the untouched ones: an
+  // edited issue the model simply omitted must not vanish from the reflection
+  // page. A missing verdict is reported as unassessed, never as a pass.
   for (const issue of firstReview.issues) {
     if (seen.has(issue.id)) continue;
     const local = states.get(issue.id) ?? null;
-    if (local === "untouched") verdicts.push({ issue: issue.id, result: "untouched", evidence_quote: null,
-      why_zh: "这一处在二稿中没有改动。", local, adjusted: true });
+    if (local === "untouched") {
+      verdicts.push({ issue: issue.id, result: "untouched", evidence_quote: null,
+        why_zh: "这一处在二稿中没有改动。", local, adjusted: true });
+    } else {
+      verdicts.push({ issue: issue.id, result: "unresolved", evidence_quote: null,
+        why_zh: local === "changed"
+          ? "这一处你做了修改,但本次复核没有给出结论,请自行核对。"
+          : "本次复核没有评估这一处,请自行核对。",
+        local, adjusted: true });
+    }
   }
   const issues = normalizeIssues(input.issues.map(issue => ({ ...issue, id: issue.id.startsWith("n") ? issue.id : "n" + issue.id })), revision);
   const result: WritingDelta = {
@@ -191,12 +210,16 @@ export function validateWritingDelta(raw: unknown, revision: string, firstDraft:
 export function validateWritingRecheck(raw: unknown, snippet: string, context: { baseFeedbackId: string; issueId: string }): WritingRecheck {
   const input = parse(recheckSpec, raw);
   const quote = input.evidence_quote?.trim() || null;
-  const verbatim = Boolean(quote && snippet.includes(quote));
+  const verbatim = Boolean(quote && containsQuote(snippet, quote));
   let result = input.result, adjusted = false;
-  if ((result === "resolved" || result === "partial") && !verbatim) { result = "unresolved"; adjusted = true; }
-  checkRules([input.why_zh]);
+  let why = input.why_zh;
+  if ((result === "resolved" || result === "partial") && !verbatim) {
+    result = "unresolved"; adjusted = true;
+    why = "快检结论缺少可逐字核对的原文引用,因此不能判定为已解决。";
+  }
+  checkRules([why]);
   return { schema: WRITING_SCHEMA, mode: "recheck", baseFeedbackId: context.baseFeedbackId, issue: context.issueId,
-    result, evidence_quote: verbatim ? quote : null, why_zh: input.why_zh, adjusted };
+    result, evidence_quote: verbatim ? quote : null, why_zh: why, adjusted };
 }
 
 /** Shape check for a frozen first review read back from the snapshot. */

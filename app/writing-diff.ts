@@ -117,6 +117,30 @@ export function trackAnchors(original: string, revised: string, anchors: Span[])
   return anchors.map(anchor => trackAnchor(original, revised, anchor, cache));
 }
 
+// A quote must land on token boundaries. Plain substring matching would let a
+// quote like "he" anchor inside "The", or a one-letter evidence quote validate a
+// "resolved" verdict — both would present text the model never actually cited.
+// Only Latin/digit edges are constrained: CJK text has no space-delimited words.
+const WORD_CHAR = /[A-Za-z0-9_'-]/;
+const LATIN = /[A-Za-z0-9]/;
+
+function onTokenBoundary(text: string, start: number, end: number): boolean {
+  if (LATIN.test(text[start] ?? "") && start > 0 && WORD_CHAR.test(text[start - 1])) return false;
+  if (LATIN.test(text[end - 1] ?? "") && end < text.length && WORD_CHAR.test(text[end])) return false;
+  return true;
+}
+
+/** Verbatim evidence: occurs at least once, on token boundaries. */
+export function containsQuote(text: string, quote: string): boolean {
+  if (!quote) return false;
+  for (let from = 0; ; ) {
+    const index = text.indexOf(quote, from);
+    if (index < 0) return false;
+    if (onTokenBoundary(text, index, index + quote.length)) return true;
+    from = index + 1;
+  }
+}
+
 /**
  * Resolve a quoted anchor inside `text` (server-side; the model never supplies
  * offsets). Exact match first; if the quote occurs more than once,
@@ -128,7 +152,7 @@ export function resolveAnchor(text: string, quote: string, contextBefore = ""): 
   for (let from = 0; ; ) {
     const index = text.indexOf(quote, from);
     if (index < 0) break;
-    hits.push(index);
+    if (onTokenBoundary(text, index, index + quote.length)) hits.push(index);
     from = index + 1;
   }
   if (!hits.length) return null;

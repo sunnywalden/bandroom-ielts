@@ -59,14 +59,30 @@ export function coachingContentViolation(input: {
 // characters or 2+ CJK characters.
 const CITATION_WORD = /[A-Za-z0-9][A-Za-z0-9'_-]{2,}|[一-鿿]{2,}/g;
 
+// Function words carry no citation value: "the answer is good" must not count
+// as quoting a draft that happens to contain "the".
+const STOPWORDS = new Set(("the a an and or but so of to in on at for with by as from is are was were be been being " +
+  "it its this that these those i you he she we they my your his her our their them not no do does did have has had " +
+  "will would can could should there here what which who how when where why if than then because about into over " +
+  "under very too also just").split(" "));
+
+/** Whole-token match, so "the" inside "other" is not a citation. */
+function containsWord(loweredEvidence: string, token: string): boolean {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![A-Za-z0-9'_-])${escaped}(?![A-Za-z0-9'_-])`).test(loweredEvidence);
+}
+
 /** Evidence must quote at least one concrete token from the learner's answer
- * (an empty or token-free answer cannot be cited and passes). */
+ * (an empty or token-free answer cannot be cited and passes). Content words are
+ * required when the answer has any; stopword-only answers fall back to a
+ * boundary-aware match rather than rejecting every short answer. */
 export function citesLearnerText(evidence: string, response: string): boolean {
   const tokens = new Set((response.match(CITATION_WORD) ?? []).map(token => token.toLowerCase()));
   if (!tokens.size) return true;
   const lowered = evidence.toLowerCase();
-  for (const token of tokens) if (lowered.includes(token)) return true;
-  return false;
+  const content = [...tokens].filter(token => !STOPWORDS.has(token));
+  const candidates = content.length ? content : [...tokens];
+  return candidates.some(token => containsWord(lowered, token));
 }
 
 export function citationViolation(evidence: string, response: string): ContentRuleViolation | null {
