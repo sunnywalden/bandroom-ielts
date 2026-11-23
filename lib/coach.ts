@@ -62,6 +62,17 @@ function compatibleLesson(value:unknown):unknown {
   return {...value,lesson:{...l,words:tuples(l.words,["term","meaning","example"]),phrases:tuples(l.phrases,["term","meaning"]),
     collocations:tuples(l.collocations,["term","meaning"]),recall:Array.isArray(l.recall)&&l.recall.length===2?{prompt:l.recall[0],answer:l.recall[1]}:l.recall}};
 }
+// Positive measured speech in a fluency card's evidence. Absent or zero
+// measurement is NOT evidence — the criterion must refuse to score.
+function measuredSpeech(evidence:unknown):boolean {
+  if(!evidence||typeof evidence!=="object")return false;
+  const e=evidence as Record<string,unknown>;
+  const ratio=typeof e.speech_ratio==="number"?e.speech_ratio:null;
+  const speech=typeof e.speech_duration_seconds==="number"?e.speech_duration_seconds:null;
+  const total=typeof e.total_duration_seconds==="number"?e.total_duration_seconds:null;
+  if(ratio===0||speech===0||total===0)return false;
+  return (ratio!=null&&ratio>0)||(speech!=null&&speech>0);
+}
 const dayNumber = z.number().int().min(1).max(62);
 const stageName = z.enum(["speak","vocab","listen","read","write","review"]);
 const readSpec = z.strictObject({ attemptId:text(160,"Exact attempt ID. When set, return only this submitted question, its answer and feedback.").optional(), inspectUnlinkedRecordings:z.boolean().optional().describe("Check for this account’s uploaded but unlinked audio for the active question. Legacy matches are time-window candidates requiring learner audition."), day: dayNumber.optional().describe("Day to inspect; defaults to the current day. Only started days are accessible.") });
@@ -110,7 +121,26 @@ const feedbackSpec = z.strictObject({
     }).passthrough().refine(
       card=>!card.criteria.some(c=>c.key==="pronunciation"&&c.band!=null),
       "Pronunciation band is forbidden while phoneme assertion gates are unmet.",
-    ).optional().describe("Score-first feedback; every band is a disclosed reference estimate, pronunciation never scored."),
+    ).refine(
+      // Owner deviation report (2026-11-23): a report showed numeric bands for
+      // criteria the attempt page declared "not measured". A fluency band is
+      // only honest with positive measured speech; zero/absent measurement must
+      // stay unscored (mirrors runner/scorecard.py fluency_card refusal).
+      card=>card.criteria.every(c=>c.key!=="fluency_coherence"||c.band==null||measuredSpeech((c as {evidence?:unknown}).evidence)),
+      "Fluency band requires measured usable speech (speech_ratio or speech_duration_seconds > 0); without it the criterion must stay unscored.",
+    ).refine(
+      card=>card.criteria.every(c=>c.band==null||Number.isInteger(c.band*2)),
+      "Criterion bands must be half-band multiples; no fabricated precision.",
+    ).refine(
+      // The overall may only aggregate disclosed scored criteria, never silent
+      // defaults or unscored ones (mirrors runner build_scorecard basis).
+      card=>{
+        const scored=card.criteria.filter(c=>c.band!=null).map(c=>c.band as number);
+        if(!scored.length)return card.overall.band==null;
+        return card.overall.band!=null&&card.overall.band>=Math.min(...scored)&&card.overall.band<=Math.max(...scored);
+      },
+      "Overall band must be null when no criterion is scored, and otherwise lie within the scored criteria's min–max; it cannot include unscored criteria.",
+    ).optional().describe("Score-first feedback; every band is a disclosed reference estimate gated on measured evidence, pronunciation never scored."),
   }).optional().describe("Grounded speaking evidence only. Requires stage=speak and recordingId. Omit for text reviews."),
 });
 const publishSpec = z.strictObject({ day: z.number().int().min(17).max(62), lesson: lessonSpec });
