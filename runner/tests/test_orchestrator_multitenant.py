@@ -205,6 +205,74 @@ def test_grounded_task_completes_with_recording_sha_and_analysis(tmp_path, monke
     assert "pronunciation" not in args  # grounded emits no pronunciation band
 
 
+# ①a The frozen context must reach the text model -------------------------
+def _reading_task(task_id, user_id, *, day=14):
+    """Production snapshot shape (app/api/state/route.ts): ``context`` is a
+    SIBLING of ``attempt`` in the frozen review, never nested inside it."""
+    attempt = text_attempt(
+        attempt_id=f"v2:{task_id}", stage="read", title="阅读第 2 题", day=day,
+        response="2", conditions="",
+        evidence="The passage said the centre has not yet counted peak attendance.",
+    )
+    attempt.pop("context")
+    return {
+        "id": task_id, "userId": user_id, "kind": "text", "day": day,
+        "fence": 0, "state": "queued", "next_at": 0, "lease_until": 0,
+        "analysisVersion": None, "recordingId": None,
+        "snapshot": {
+            "sourceId": "legacy-source-id",
+            "attempt": attempt,
+            "context": {
+                "passage": "The centre has not yet counted peak attendance.",
+                "prompt": "What would staff need to know before concluding that 36 seats are enough?",
+                "choices": ["A names", "B wheelchair access", "C participants at peak times"],
+                "answer": 2,
+                "why": "Peak attendance is uncounted.",
+            },
+        },
+    }
+
+
+def test_text_task_model_receives_the_frozen_context(tmp_path):
+    seen = []
+
+    def feedback(snapshot):
+        seen.append(snapshot)
+        return Feedback(
+            feedback="你选了 C，与原文 “has not yet counted” 一致，判断正确。",
+            evidence=f"证据句：{snapshot['evidence']}",
+            attempt=str(snapshot["id"]),
+        )
+
+    client = FakeQueueClient([_reading_task("r1", "u1")])
+    report = mt_runner(tmp_path, client, model=FakeTextModel(feedback=feedback)).run()
+    assert report.processed == 1 and report.fatal is False
+    # Without the passage/choices/answer the coach can only say "I cannot check
+    # your answer" and critique a bare option index as an essay.
+    context = seen[0].get("context")
+    assert context and context["passage"].startswith("The centre has not yet")
+    assert context["choices"][2] == "C participants at peak times"
+    assert context["answer"] == 2
+    # The attempt identity the model must echo is untouched by the merge.
+    assert seen[0]["id"] == "v2:r1"
+
+
+def test_context_already_inside_attempt_is_kept(tmp_path):
+    """Owner-path attempts carry context inline; a sibling must not clobber it."""
+    seen = []
+
+    def feedback(snapshot):
+        seen.append(snapshot)
+        return Feedback(feedback="把 “I go” 改成 “I went”。", evidence="原文 “I go to school”。",
+                        attempt=str(snapshot["id"]))
+
+    task = _text_task("t9", "u1")
+    task["snapshot"]["context"] = {"prompt": "FROZEN SIBLING"}
+    client = FakeQueueClient([task])
+    mt_runner(tmp_path, client, model=FakeTextModel(feedback=feedback)).run()
+    assert seen[0]["context"] == {"prompt": "Describe your day."}
+
+
 # ①b B1: the claimed lease is carried to reads, completion and failures ----
 def test_runner_carries_lease_to_complete_and_fail(tmp_path):
     client = FakeQueueClient([_text_task("t1", "u1")], lease="lease-text")
