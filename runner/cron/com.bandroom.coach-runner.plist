@@ -4,8 +4,11 @@
   Bandroom own coach runner — launchd template (macOS).
   Install to ~/Library/LaunchAgents/com.bandroom.coach-runner.plist and load:
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bandroom.coach-runner.plist
-  The shell wrapper adds up to 30 s of jitter; the orchestrator flock makes the
-  job single-instance even if a previous run is still active.
+  Phase 0: the runner stays running (`--daemon`, polls every 2-10 s) and exits
+  cleanly after 6 h / 200 tasks; KeepAlive restarts it with fresh config and
+  credentials. The orchestrator flock keeps it single-instance. To roll back to
+  the 5-minute cadence, replace `--daemon` with `--once`, remove KeepAlive and
+  restore StartInterval 300.
   Replace /opt/bandroom/repo and the credentials.
 -->
 <plist version="1.0">
@@ -16,16 +19,17 @@
   <array>
     <string>/bin/sh</string>
     <string>-c</string>
-    <string>set -a; . /etc/bandroom/coach-runner.env; set +a; sleep $((RANDOM % 30)); exec /usr/bin/python3 -m runner.orchestrator --config /opt/bandroom/repo/runner/config.toml</string>
+    <string>set -a; . /etc/bandroom/coach-runner.env; set +a; exec /usr/bin/python3 -m runner.orchestrator --config /opt/bandroom/repo/runner/config.toml --daemon</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/opt/bandroom/repo</string>
-  <key>StartInterval</key>
-  <integer>300</integer>
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
   <key>KeepAlive</key>
-  <false/>
+  <true/>
+  <!-- Back-off between restarts (auth failures already wait 300 s in-process). -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
   <key>StandardOutPath</key>
   <string>/tmp/bandroom-coach-runner.log</string>
   <key>StandardErrorPath</key>

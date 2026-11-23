@@ -27,6 +27,7 @@ import fcntl
 import json
 import logging
 import os
+import signal
 import tempfile
 import time
 import tomllib
@@ -490,6 +491,39 @@ class RunReport:
         return asdict(self)
 
 
+# Phase 0 (docs/experience-upgrade-realtime-feedback-revision-2026-11-22.md §4.2):
+# an always-on runner replaces the 300 s launchd cadence. Idle cycles back off
+# 2 -> 4 -> 8 -> 10 s; any work resets to 2 s. Heartbeats are decoupled from
+# claims (about one per minute while idle), and the process exits after a
+# bounded lifetime so launchd (KeepAlive) restarts it fresh with reloaded
+# config and credentials.
+DAEMON_IDLE_BACKOFF_SECONDS: tuple[float, ...] = (2.0, 4.0, 8.0, 10.0)
+DAEMON_HEARTBEAT_SECONDS = 60.0
+DAEMON_PAUSED_SLEEP_SECONDS = 300.0
+DAEMON_ERROR_SLEEP_SECONDS = 30.0
+DAEMON_AUTH_FAILURE_SLEEP_SECONDS = 300.0
+DAEMON_MAX_RUNTIME_SECONDS = 6 * 3600.0
+DAEMON_MAX_TASKS = 200
+
+
+@dataclass
+class DaemonReport:
+    cycles: int = 0
+    processed: int = 0
+    failed: int = 0
+    exit_reason: str = ""
+    fatal: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"daemon": True, **asdict(self)}
+
+
+def daemon_idle_delay(idle_cycles: int) -> float:
+    """Idle backoff for the always-on runner (bounded at 10 s)."""
+    index = min(max(0, idle_cycles), len(DAEMON_IDLE_BACKOFF_SECONDS) - 1)
+    return DAEMON_IDLE_BACKOFF_SECONDS[index]
+
+
 @dataclass
 class Produced:
     """A validated review ready to be persisted, independent of the save path.
@@ -674,6 +708,9 @@ class CoachRunner:
         # F9 progress heartbeats: keep nextExpectedAt honest during a long run.
         self._queue_started_at = 0
         self._queue_processed = 0
+        # Phase 0 daemon mode: heartbeat throttling state.
+        self._daemon_mode = False
+        self._last_heartbeat_ms = 0
 
     # -- helpers ----------------------------------------------------------
     def _now_ms(self) -> int:
@@ -693,7 +730,8 @@ class CoachRunner:
         old ``startedAt + interval`` value went stale while the runner was still
         busy, which the page rendered as "disconnected" (F9).
         """
-        interval_ms = max(1, int(self.config.interval_seconds)) * 1000
+        interval_s = DAEMON_HEARTBEAT_SECONDS if self._daemon_mode else self.config.interval_seconds
+        interval_ms = max(1, int(interval_s)) * 1000
         return self._now_ms() + max(interval_ms, int(horizon_ms or 0))
 
     def _long_task_horizon_ms(self) -> int:
@@ -715,7 +753,16 @@ class CoachRunner:
         finished_at: int | None = None,
         detail: str | None = None,
         next_expected_at: int | None = None,
+        throttle: bool = False,
     ) -> None:
+        # Daemon idle cycles would otherwise send two heartbeats every few
+        # seconds; throttled heartbeats go out at most once per minute.
+        if (
+            throttle
+            and self._daemon_mode
+            and self._now_ms() - self._last_heartbeat_ms < DAEMON_HEARTBEAT_SECONDS * 1000
+        ):
+            return
         payload = heartbeat_payload(
             automation_id=self.config.automation_id,
             generation=self.config.generation,
@@ -734,6 +781,7 @@ class CoachRunner:
             self.client.call_tool(
                 "report_scheduler_heartbeat", payload, client_run_id=run_id
             )
+            self._last_heartbeat_ms = self._now_ms()
         except AuthError:
             raise
         except Exception as exc:  # heartbeat is observability, not the work
@@ -1415,7 +1463,8 @@ class CoachRunner:
             batchCap=self.config.tenant_batch_cap,
         )
         try:
-            self._send_heartbeat(run_id, "started", started_at=started_at)
+            if not self._daemon_mode:
+                self._send_heartbeat(run_id, "started", started_at=started_at)
             # Safety bound: a misbehaving queue must not spin forever in one run.
             for _ in range(1000):
                 if budget.global_paused():
@@ -1472,6 +1521,10 @@ class CoachRunner:
                 )
             report.detail = detail
             status = "failed" if report.fatal else "finished"
+            idle = not (
+                report.fatal or report.paused or report.processed or report.failed
+                or report.capped or report.yielded or report.blocked
+            )
             with contextlib.suppress(Exception):
                 self._send_heartbeat(
                     run_id,
@@ -1479,6 +1532,7 @@ class CoachRunner:
                     started_at=started_at,
                     finished_at=self._now_ms(),
                     detail=detail,
+                    throttle=idle,
                 )
             self.state.set_last_run(
                 {
@@ -1495,6 +1549,74 @@ class CoachRunner:
                     "detail": detail,
                 }
             )
+        return report
+
+    def run_daemon(
+        self,
+        *,
+        max_runtime_seconds: float = DAEMON_MAX_RUNTIME_SECONDS,
+        max_tasks: int = DAEMON_MAX_TASKS,
+        sleep: Callable[[float], None] = time.sleep,
+        should_stop: Callable[[], bool] = lambda: False,
+    ) -> DaemonReport:
+        """Always-on loop: run a pass, then wait briefly and run again.
+
+        Single instance is still guaranteed by the caller's flock (held for the
+        whole process lifetime). Each pass re-reads the per-tenant budget file,
+        and the owner cost state is rolled to the current UTC day every cycle.
+        """
+        self._daemon_mode = True
+        report = DaemonReport()
+        started = self._clock()
+        idle_cycles = 0
+
+        def wait(seconds: float) -> None:
+            # Sleep in short slices so a stop signal is honoured promptly.
+            deadline = self._clock() + seconds
+            while not should_stop():
+                remaining = deadline - self._clock()
+                if remaining <= 0:
+                    return
+                sleep(min(1.0, remaining))
+
+        self._log("daemon_started", maxRuntimeSeconds=max_runtime_seconds, maxTasks=max_tasks)
+        while True:
+            if should_stop():
+                report.exit_reason = "signal"
+                break
+            self.state.ensure_day(self._utc_day())
+            cycle = self.run()
+            report.cycles += 1
+            report.processed += cycle.processed
+            report.failed += cycle.failed
+            if cycle.fatal and cycle.detail == "auth_failed":
+                # Do not hammer the site with bad credentials; the supervisor
+                # restarts us after this back-off.
+                report.fatal = True
+                report.exit_reason = "auth_failed"
+                wait(DAEMON_AUTH_FAILURE_SLEEP_SECONDS)
+                break
+            if report.processed >= max_tasks:
+                report.exit_reason = "max_tasks"
+                break
+            if self._clock() - started >= max_runtime_seconds:
+                report.exit_reason = "max_runtime"
+                break
+            did_work = bool(
+                cycle.processed or cycle.failed or cycle.capped or cycle.yielded or cycle.blocked
+            )
+            if did_work:
+                idle_cycles = 0
+                delay = DAEMON_IDLE_BACKOFF_SECONDS[0]
+            else:
+                delay = daemon_idle_delay(idle_cycles)
+                idle_cycles += 1
+            if cycle.paused:
+                delay = DAEMON_PAUSED_SLEEP_SECONDS
+            elif cycle.fatal:
+                delay = max(delay, DAEMON_ERROR_SLEEP_SECONDS)
+            wait(delay)
+        self._log("daemon_stopped", **report.to_dict())
         return report
 
     # -- run --------------------------------------------------------------
@@ -1678,6 +1800,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--once", action="store_true", help="run a single pass (default; kept for cron clarity)"
     )
     parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="stay running: poll the queue every 2-10 s and exit after a bounded lifetime "
+        "(run under launchd KeepAlive / systemd Restart=always)",
+    )
+    parser.add_argument(
+        "--max-runtime-seconds", type=float, default=DAEMON_MAX_RUNTIME_SECONDS,
+        help="daemon only: exit cleanly after this many seconds (default 6 h)",
+    )
+    parser.add_argument(
+        "--max-tasks", type=int, default=DAEMON_MAX_TASKS,
+        help="daemon only: exit cleanly after processing this many tasks (default 200)",
+    )
+    parser.add_argument(
         "--state-dir", default=None, help="override the persistent state directory"
     )
     parser.add_argument(
@@ -1718,7 +1854,23 @@ def main(argv: list[str] | None = None) -> int:
             contextlib.nullcontext() if args.no_lock else single_instance_lock(lock_path)
         )
         with context:
-            report = CoachRunner(config).run()
+            if args.daemon:
+                stop = {"requested": False}
+
+                def request_stop(signum, _frame):  # pragma: no cover - signal wiring
+                    stop["requested"] = True
+
+                # SIGHUP/SIGTERM/SIGINT: finish the current pass, then exit so
+                # the supervisor restarts with reloaded config and credentials.
+                for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                    signal.signal(signum, request_stop)
+                report = CoachRunner(config).run_daemon(
+                    max_runtime_seconds=args.max_runtime_seconds,
+                    max_tasks=args.max_tasks,
+                    should_stop=lambda: stop["requested"],
+                )
+            else:
+                report = CoachRunner(config).run()
     except AlreadyRunning:
         print(json.dumps({"error": "already_running"}, ensure_ascii=False))
         return 3

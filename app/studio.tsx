@@ -20,6 +20,7 @@ import {clearLocalClips} from './speaking-draft'
 import {clearUploadQueue} from './speaking-queue'
 import {addsReviewableAnswer,type AutomationStatus,type CoachFeedback,type ReviewLink,type ReviewTaskStatus} from './feedback-model'
 import {useDraft} from './use-draft'
+import {FAST_POLL_MS,nextPollDelay} from './review-polling'
 
 const tabs=[['home','今日练习',LayoutDashboard],['history','学习档案',BookOpen],['notes','错题手记',NotebookPen],['report','阶段评估',Activity]] as const
 type Tab=typeof tabs[number][0]|'lesson'|'settings'
@@ -30,7 +31,6 @@ type Checkpoint={account:string;displayName?:string;revision:number;state:Snapsh
 const initialsOf=(name:string)=>{const parts=name.trim().split(/\s+/).filter(Boolean);if(!parts.length)return 'L';if(parts.length===1)return parts[0].slice(0,2).toUpperCase();return (parts[0][0]+parts[parts.length-1][0]).toUpperCase()}
 type SaveReply={revision:number;error?:string;attemptId?:string;submissionKey?:string;sourceId?:string}
 const reviewFields=['speakingPart2','speakingFollowup','speakingMock','speakingReview','vocabUse','readQ0','readQ1','writeOriginal','writeRevision','reviewMemo']
-const POLL_BACKOFF=[3_000,5_000,10_000,30_000,60_000,300_000] as const
 const ACTIONABLE_BLOCKED=new Set(['temporary_read_failure','recording_missing','recording_digest_mismatch','analysis_required'])
 const pendingPrefix=(account:string)=>'bandroom.pending-submission.'+encodeURIComponent(account)+'.'
 const sendCheckpoint=(account:string,body:string)=>requestJSON<SaveReply|null>('/api/state',{
@@ -151,6 +151,7 @@ export default function Studio(){
  // One read-only subscription for the page. It never refreshes drafts or advances the checkpoint.
  const pendingTaskCount=reviewTasks.filter(task=>['queued','running','retry_wait'].includes(task.state)).length;
  const runningTaskCount=reviewTasks.filter(task=>task.state==='running').length;
+ const inFlightTaskCount=reviewTasks.filter(task=>task.state==='queued'||task.state==='running').length;
  const unresolvedLinkCount=reviewLinks.filter(link=>!feedback.some(row=>row.attempt===link.id)).length;
  const completedUnfetched=reviewTasks.filter(task=>task.state==='completed'&&!feedback.some(row=>row.attempt===task.attemptId)).length;
  // P0-1 inbox: completed-but-unfetched, needs_attention and blocked tasks with a
@@ -182,24 +183,28 @@ export default function Studio(){
  // degrades to a visible 5-minute check instead of silently stopping. While the
  // page is hidden it pauses; becoming visible refreshes immediately. A
  // disconnected automation is floored at 60s.
- const pollSince=useRef<number|null>(null),pollStep=useRef(0),pollActive=useRef(false);
+ const pollSince=useRef<number|null>(null),pollStep=useRef(0),pollActive=useRef(false),pollInFlight=useRef(0);
  const [pollDegraded,setPollDegraded]=useState(false);
  useEffect(()=>{
   if(!account||locked)return
   const active=pendingTaskCount>0||unresolvedLinkCount>0||completedUnfetched>0
   if(active&&!pollActive.current){pollStep.current=0;if(pollSince.current===null)pollSince.current=Date.now()}
   if(!active){pollSince.current=null;pollStep.current=0;setPollDegraded(false)}
+  // A new submission starts a fresh fast-poll window even mid-episode.
+  if(inFlightTaskCount>pollInFlight.current){pollSince.current=Date.now();pollStep.current=0}
+  pollInFlight.current=inFlightTaskCount
   pollActive.current=active
+  const connected=automation?.connected===true
   const disconnected=automation?.connected===false
   let disposed=false, timer:ReturnType<typeof setTimeout>|undefined
   const clear=()=>{if(timer)clearTimeout(timer);timer=undefined}
   const schedule=(delay:number)=>{if(disposed)return;clear();timer=setTimeout(tick,delay)}
   const nextDelay=()=>{
    const elapsed=pollSince.current===null?0:Date.now()-pollSince.current
-   const degraded=elapsed>=30*60_000
-   if(degraded!==pollDegraded)setPollDegraded(degraded)
-   const base=degraded?300_000:POLL_BACKOFF[Math.min(pollStep.current++,POLL_BACKOFF.length-1)]
-   return disconnected?Math.max(base,60_000):base
+   const next=nextPollDelay({elapsedMs:elapsed,step:pollStep.current,inFlight:inFlightTaskCount>0,connected,disconnected})
+   if(!next.fast)pollStep.current++
+   if(next.degraded!==pollDegraded)setPollDegraded(next.degraded)
+   return next.delay
   }
   const tick=()=>{
    if(disposed)return
@@ -211,16 +216,16 @@ export default function Studio(){
    if(disposed||document.visibilityState!=='visible')return
    pollStep.current=0
    void refreshCoach()
-   schedule(disconnected?60_000:3_000)
+   schedule(disconnected?60_000:connected&&inFlightTaskCount>0?FAST_POLL_MS:3_000)
   }
-  if(active)schedule(disconnected?60_000:3_000)
+  if(active)schedule(disconnected?60_000:connected&&inFlightTaskCount>0?FAST_POLL_MS:3_000)
   window.addEventListener('focus',wake);document.addEventListener('visibilitychange',wake)
   // This is a request-generation counter, intentionally read at cleanup (not a DOM ref).
   // eslint-disable-next-line react-hooks/exhaustive-deps
   return ()=>{disposed=true;clear();window.removeEventListener('focus',wake);document.removeEventListener('visibilitychange',wake);coachRead.current++}
  // refreshCoach reads the current account through its ref.
  // eslint-disable-next-line react-hooks/exhaustive-deps
- },[account,locked,pendingTaskCount,runningTaskCount,unresolvedLinkCount,completedUnfetched,automation?.connected,reviewLinks.length,feedback.length])
+ },[account,locked,pendingTaskCount,runningTaskCount,inFlightTaskCount,unresolvedLinkCount,completedUnfetched,automation?.connected,reviewLinks.length,feedback.length])
  async function persist(make:(prev:Snapshot)=>Snapshot,forReview=false){
   if(accessLocked.current||busy.current||revisionAtRead.current===null||!activeAccount.current||sync==='conflict'||sync==='auth'||sync==='load')return false
   busy.current=true;setPending(true);setError('');setSync('write')

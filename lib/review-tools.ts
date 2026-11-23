@@ -18,6 +18,7 @@ import { signLease, leaseEnabled, verifyLease, type LeasePayload } from "./lease
 import { assertConsent, ConsentError } from "./consent";
 import { hasEntitlement } from "./entitlement";
 import { drizzleFromBinding } from "@/db";
+import { recordServiceHeartbeat, type MetricsDb } from "./metrics";
 
 const taskId = z.string().trim().min(1).max(200).describe("Exact review task ID returned by claim_review_tasks.");
 // B1: server-issued capability returned by claim_next_review_task. When present
@@ -177,6 +178,10 @@ export type ReviewToolOptions = {
   /** Reports a lease that verified successfully so the MCP audit layer can
    * attribute the call to the signed tenant (S7.1) instead of guessing. */
   onLeaseVerified?: (payload: LeasePayload) => void;
+  /** Caller identity scope resolved by the MCP route. Only the coach-runner
+   * service principal may write the service-level heartbeat that every tenant
+   * reads; a learner or owner call never reaches the shared row. */
+  scope?: string;
 };
 
 type EffectiveScope = {
@@ -589,6 +594,18 @@ export async function callReviewTool(
       case "report_scheduler_heartbeat": {
         const input = heartbeatSpec.parse(args);
         const result = await reportSchedulerHeartbeat(db, {...input, ownerUserId: userId});
+        // D4: the tenant row above is keyed by the caller (the runner resolves
+        // to the owner), so other tenants never saw a connected runner. The
+        // service row is tenant-neutral; only the runner service may write it.
+        if (options.scope === "coach-runner") {
+          // Observability only: a missing table on a rolling deploy must not
+          // fail the tenant heartbeat that was already written.
+          await recordServiceHeartbeat(db as unknown as MetricsDb, {
+            serviceId: input.automationId, generation: input.generation, clientRunId: input.clientRunId,
+            status: input.status, startedAt: input.startedAt ?? null, finishedAt: input.finishedAt ?? null,
+            nextExpectedAt: input.nextExpectedAt ?? null, detail: input.detail ?? null,
+          }).catch(() => undefined);
+        }
         return { content: [{ type: "text", text: JSON.stringify({ ok: true, updated: result.updated }) }] };
       }
       default:

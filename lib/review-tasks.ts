@@ -619,3 +619,30 @@ export async function reportSchedulerHeartbeat(db: D1Like, input: {
       input.nextExpectedAt ?? null, input.status, input.detail ?? null, now).run();
   return { updated: (result.meta?.changes ?? 0) > 0 };
 }
+
+/** D4: the most recent service-level runner heartbeat (tenant-neutral row
+ * written only by the coach-runner service principal). Content-blind: timing
+ * and status only. A missing table (rolling deploy) reads as "none". */
+export async function readServiceHeartbeat(db: D1Like): Promise<{
+  startedAt: number | null; lastSuccessAt: number | null; nextExpectedAt: number | null; status: string;
+} | null> {
+  try {
+    const row = await db.prepare(`SELECT started_at AS startedAt, last_success_at AS lastSuccessAt,
+      next_expected_at AS nextExpectedAt, status FROM service_heartbeats ORDER BY updated_at DESC LIMIT 1`)
+      .bind().first<{ startedAt: number | null; lastSuccessAt: number | null; nextExpectedAt: number | null; status: string }>();
+    return row ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Phase 0 telemetry: record the first client render of a completed review.
+ * Tenant-scoped (the task must belong to userId) and idempotent per task. */
+export async function recordFeedbackRendered(db: D1Like, userId: string, taskId: string, now = Date.now()): Promise<boolean> {
+  const result = await db.prepare(`INSERT INTO analysis_events (at, task_id, user_id, event, outcome)
+    SELECT ?, id, user_id, 'feedback_rendered', 'ok' FROM review_tasks
+    WHERE id=? AND user_id=? AND state='completed'
+      AND NOT EXISTS (SELECT 1 FROM analysis_events WHERE task_id=? AND user_id=? AND event='feedback_rendered')`)
+    .bind(now, taskId, userId, taskId, userId).run();
+  return (result.meta?.changes ?? 0) > 0;
+}

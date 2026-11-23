@@ -1,5 +1,6 @@
 'use client';
 import {createContext,useContext,useEffect,useState,type ReactNode} from 'react';
+import {etaText,runningLabel} from './review-polling';
 import {feedbackFor,reviewAttempts,reviewRequest,type AutomationStatus,type CoachFeedback,type ReviewAttempt,type ReviewLink,type ReviewTaskStatus} from './feedback-model';
 import {legacyPromptTitle,sideFromFeedback,type CompareSide,type QuestionRef} from './speaking-compare';
 import {questionById} from './speaking-questions';
@@ -53,9 +54,7 @@ const clock=(ms:number)=>new Date(ms).toLocaleTimeString('zh-CN',{hour:'2-digit'
 // Honest ETA: only a connected automation with a real nextExpectedAt may show a
 // time. The task's own `nextAt` is a retry time and is labelled as such.
 function eta(automation?:AutomationStatus){
-  if(!automation?.connected)return '';
-  if(!automation.nextExpectedAt)return '';
-  return `预计下次检查约 ${clock(automation.nextExpectedAt)}。`;
+  return etaText(automation,Date.now(),clock);
 }
 type TaskNext={text:string;refresh?:boolean;manual?:boolean;redo?:boolean;wait?:boolean};
 function nextSteps(task:ReviewTaskStatus,disconnected:boolean):TaskNext {
@@ -87,7 +86,7 @@ function TaskState({task,automation,refresh,onManual,manualBusy}:{task:ReviewTas
   if(task.state==='running')
     return disconnected
       ? <p className="af-hint" role="status">上次读取时这道题还在分析中；批改服务连接已断开，现在无法确认进度，状态可能暂时不会更新。已保存的作答仍保留。</p>
-      : <p className="af-hint" role="status">教练正在分析{task.kind==='speaking'?'这段录音':'这份作答'}（{stageLabel[task.stage]??task.stage}）。已完成的部分会保留；可以先离开页面，回来自动刷新。</p>;
+      : <p className="af-hint" role="status">教练正在分析{task.kind==='speaking'?'这段录音':'这份作答'}（{runningLabel(task.kind,task.stage,stageLabel)}）。已完成的部分会保留；可以先离开页面，回来自动刷新。</p>;
   const next=nextSteps(task,disconnected);
   const reason=task.lastError?taskReason[task.lastError]:undefined;
   return <div className="af-next" role="status">
@@ -148,10 +147,20 @@ function ReviewRow({row,recordingId,attemptId}:{row:CoachFeedback;recordingId?:s
   </article>;
 }
 
+// Phase 0 telemetry: report the first render of a completed review once per
+// page session (the server is idempotent per task). Timing only, best effort.
+const reportedRenders=new Set<string>();
+function reportRendered(attemptId:string){
+  if(reportedRenders.has(attemptId)||typeof fetch!=='function')return;
+  reportedRenders.add(attemptId);
+  void fetch('/api/review-tasks/rendered',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({attemptId}),keepalive:true}).catch(()=>{});
+}
 export default function AttemptFeedback({field,index=0}:{field:string;index?:number}) {
   const {attempts,feedback,tasks,automation,error,refresh}=useContext(FeedbackContext);
   const attempt=attempts.find(a=>a.field===field&&a.index===index);
   const [copyStatus,setCopyStatus]=useState(''),[fallback,setFallback]=useState(false),[takingOver,setTakingOver]=useState(false);
+  const renderedTaskAttempt=attempt&&feedbackFor(attempt,feedback).length&&tasks.some(t=>t.attemptId===attempt.id&&t.state==='completed')?attempt.id:'';
+  useEffect(()=>{if(renderedTaskAttempt)reportRendered(renderedTaskAttempt)},[renderedTaskAttempt]);
   if(!attempt)return null;
   const rows=feedbackFor(attempt,feedback);
   const task=tasks.find(t=>t.attemptId===attempt.id);

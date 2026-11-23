@@ -14,7 +14,7 @@ import { listRecoverable } from "./recording-recovery";
 import { initial, oldResults, part3, writings, type Ledger } from "@/app/ledger";
 import { callReviewTool, reviewTools, type ReviewToolOptions } from "./review-tools";
 import { calibrationToolNames, calibrationTools, callCalibrationTool, issueCalibrationCandidates, verdictsForCandidates } from "./calibration";
-import { claimManualReviewTask, completeReviewTask, createReviewTaskStatement, findReviewTaskByAttempt, reviewTaskDb, ReviewTaskError } from "./review-tasks";
+import { claimManualReviewTask, completeReviewTask, createReviewTaskStatement, findReviewTaskByAttempt, readServiceHeartbeat, reviewTaskDb, ReviewTaskError } from "./review-tasks";
 
 const text = (max: number, description: string) => z.string().trim().min(1).max(max).describe(description);
 const term = text(160, "English word, phrase or collocation.");
@@ -197,7 +197,11 @@ export async function coachData(userId:string) {
     }).from(automationHeartbeats).where(eq(automationHeartbeats.userId,userId))
       .orderBy(desc(automationHeartbeats.startedAt)).limit(1)).catch(()=>[]),
   ]);
-  const heartbeat=heartbeats[0],now=Date.now();
+  // D4: prefer whichever heartbeat is fresher — the tenant row (owner) or the
+  // tenant-neutral service row that every learner can rely on.
+  const service=await readServiceHeartbeat(reviewTaskDb());
+  const fresh=(h:{startedAt:number|null;lastSuccessAt:number|null}|null|undefined)=>h?Math.max(h.lastSuccessAt??0,h.startedAt??0):-1;
+  const heartbeat=fresh(service)>fresh(heartbeats[0])?service!:heartbeats[0],now=Date.now();
   const last=heartbeat?.lastSuccessAt??heartbeat?.startedAt??null;
   const next=heartbeat?.nextExpectedAt??null;
   const automation={

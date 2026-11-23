@@ -2,6 +2,7 @@ import { getAuthContext } from "@/app/chatgpt-auth";
 import { callCoach, coachTools } from "@/lib/coach";
 import { mcpToolAllowed, mcpToolsForScope } from "@/lib/mcp-scope";
 import { auditServiceCall } from "@/lib/service-audit";
+import { isEmptyClaim } from "@/lib/claim-audit";
 import { env } from "cloudflare:workers";
 import { consentGate, crossOrigin, json, limitedBody } from "../api/shared";
 
@@ -79,8 +80,13 @@ export async function POST(request:Request) {
       let verifiedUid:string|undefined;
       const result=await callCoach(auth.user.userId,message.params.name,message.params.arguments??{},{
         onLeaseVerified:lease=>{verifiedUid=lease.uid;},
+        scope:auth.scope??undefined,
       });
-      if(auth.scope==="coach"||auth.scope==="coach-runner")
+      // An idle daemon polls the queue every few seconds; an empty claim carries
+      // no task, tenant or learner action, so it is not written to the audit
+      // trail (D7 write budget). Every claim that returns a task is still audited.
+      const emptyClaim=message.params.name==="claim_next_review_task"&&isEmptyClaim(result);
+      if((auth.scope==="coach"||auth.scope==="coach-runner")&&!emptyClaim)
         void auditServiceCall(auth,message.params.name,message.params.arguments,result,
           result&&!(result as {isError?:boolean}).isError?verifiedUid:undefined);
       return reply(result);
