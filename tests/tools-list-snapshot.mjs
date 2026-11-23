@@ -3,6 +3,10 @@
 // claim) to the rev2 19-tool set; the three calibration tools stay last and the
 // heartbeat description/schema are unchanged. Any further change updates these
 // digests and must be treated as a contract version change.
+// Realtime upgrade Phase 1 (doc §4.7) is such a change: complete_review_task
+// gains the optional `writing` input (bandroom-writing-feedback-v1). Stripping
+// that single property reproduces the previous digest 973c7f99…, so nothing
+// else in the 21-tool contract moved.
 import test from "node:test";
 import assert from "node:assert/strict";
 import {registerHooks} from "node:module";
@@ -39,7 +43,7 @@ const EXPECTED_NAMES = [
   "read_review_receipt", "report_scheduler_heartbeat",
   "record_pronunciation_verdict", "read_pronunciation_profile", "reset_pronunciation_profile",
 ];
-const ALL_SHA256 = "973c7f997d253a2bc0ce8032b8f68ab1c5039d0e3116d919a3c1d4c17726b18c";
+const ALL_SHA256 = "836f0c50bd3a242cbb4c5cdafa55d47a8bd442790906c19dc71e1f9e91d05019";
 const HEARTBEAT_SCHEMA_SHA256 = "ec4f5fd56ea44f485b2941a23436eb69a546eadd15f64e459e1792533815a530";
 
 const payload = coachTools.map(tool => ({

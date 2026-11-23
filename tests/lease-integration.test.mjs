@@ -103,6 +103,12 @@ function reset() {
   auditRows.length = 0;
 }
 
+// Phase 1 (D2): automatic text reviews must quote the learner's own wording,
+// so the completion fixtures cite the snapshot response ("Fixture answer"). The
+// lease / tenant predicates under test must be reached with VALID content;
+// otherwise the content rule would reject the call first and mask them.
+const CITED_EVIDENCE = 'Learner wrote "Fixture answer"';
+
 function seedUser(userId, { status = "active", revocationEpoch = 0 } = {}) {
   const now = Date.now();
   sql.prepare(`INSERT INTO users
@@ -175,7 +181,7 @@ test("lease-verified completion uses lease.uid, not the caller userId", async ()
   let reportedUid = null;
   const result = await callReviewTool(OWNER, "complete_review_task", {
     taskId: task.id, fence: task.fence, lease,
-    feedback: "Text correction", evidence: "Text evidence",
+    feedback: "Text correction", evidence: CITED_EVIDENCE,
   }, { onLeaseVerified: payload => { reportedUid = payload.uid; } });
   assert.equal(result.isError, undefined, JSON.stringify(result));
   assert.equal(reportedUid, TENANT, "verified lease reported to the audit layer");
@@ -197,7 +203,7 @@ test("lease with the wrong operation is rejected", async () => {
   const lease = await leaseFor(task, TENANT, ["renew_review_lease"]);
   const result = await callReviewTool(TENANT, "complete_review_task", {
     taskId: task.id, fence: task.fence, lease,
-    feedback: "Text correction", evidence: "Text evidence",
+    feedback: "Text correction", evidence: CITED_EVIDENCE,
   });
   assert.equal(result.isError, true);
   assert.equal(text(result).error, "lease_ops_denied");
@@ -214,7 +220,7 @@ test("a lease rid must match the runner that claimed the task (G19)", async () =
   const lease = await leaseFor(task, TENANT, ["complete_review_task"], { rid: "runner-other" });
   const result = await callReviewTool(TENANT, "complete_review_task", {
     taskId: task.id, fence: task.fence, lease,
-    feedback: "Text correction", evidence: "Text evidence",
+    feedback: "Text correction", evidence: CITED_EVIDENCE,
   });
   assert.equal(result.isError, true);
   assert.equal(text(result).error, "stale_lease");
@@ -228,7 +234,7 @@ test("no lease with the lease system enabled falls back to the legacy owner path
   const task = await claimFor(OWNER);
   const result = await callReviewTool(OWNER, "complete_review_task", {
     taskId: task.id, fence: task.fence,
-    feedback: "Text correction", evidence: "Text evidence",
+    feedback: "Text correction", evidence: CITED_EVIDENCE,
   });
   assert.equal(result.isError, undefined, JSON.stringify(result));
   assert.equal(
@@ -275,7 +281,7 @@ test("atomic users predicate blocks a suspended tenant (S1.1)", async () => {
   const lease = await leaseFor(task, TENANT, ["complete_review_task"]);
   const result = await callReviewTool(TENANT, "complete_review_task", {
     taskId: task.id, fence: task.fence, lease,
-    feedback: "Text correction", evidence: "Text evidence",
+    feedback: "Text correction", evidence: CITED_EVIDENCE,
   });
   assert.equal(result.isError, true);
   assert.equal(text(result).error, "stale_lease");
@@ -289,7 +295,7 @@ test("atomic users predicate rejects a stale revocation epoch (S1.1)", async () 
   const lease = await leaseFor(task, TENANT, ["complete_review_task"], { rev: 1 });
   const result = await callReviewTool(TENANT, "complete_review_task", {
     taskId: task.id, fence: task.fence, lease,
-    feedback: "Text correction", evidence: "Text evidence",
+    feedback: "Text correction", evidence: CITED_EVIDENCE,
   });
   assert.equal(result.isError, true);
   assert.equal(text(result).error, "stale_lease");

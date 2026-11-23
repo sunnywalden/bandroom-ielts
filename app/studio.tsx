@@ -18,13 +18,13 @@ import {requestJSON} from './request-json'
 import {newClientId} from './client-id'
 import {clearLocalClips} from './speaking-draft'
 import {clearUploadQueue} from './speaking-queue'
-import {addsReviewableAnswer,type AutomationStatus,type CoachFeedback,type ReviewLink,type ReviewTaskStatus} from './feedback-model'
+import {addsReviewableAnswer,type AutomationStatus,type CoachFeedback,type ReviewLink,type ReviewTaskStatus,type WritingRecheckStatus} from './feedback-model'
 import {useDraft} from './use-draft'
 import {FAST_POLL_MS,nextPollDelay} from './review-polling'
 
 const tabs=[['home','今日练习',LayoutDashboard],['history','学习档案',BookOpen],['notes','错题手记',NotebookPen],['report','阶段评估',Activity]] as const
 type Tab=typeof tabs[number][0]|'lesson'|'settings'
-const titles:Record<Tab,[string,string,string]>={home:['Study desk','今日练习','从上次停下的地方继续，每次专注一道题。'],lesson:['Practice room','练习室',''],history:['Learning archive','学习档案','查阅每一课的提交记录、独立首稿与修订。'],notes:['Correction notebook','错题手记','用一个新句子，检验容易反复出现的表达。'],report:['Progress review','阶段评估','按实际学习日期回看证据，每七天一个观察窗口。'],settings:['Study preferences','训练设置','确认考试类型，查看课程的预算和评估规则。']}
+const titles:Record<Tab,[string,string,string]>={home:['Study desk','今日练习','从上次停下的地方继续，每次专注一道题。'],lesson:['Practice room','练习室',''],history:['Learning archive','学习档案','查阅每一课的提交记录、独立首稿与二稿。'],notes:['Correction notebook','错题手记','用一个新句子，检验容易反复出现的表达。'],report:['Progress review','阶段评估','按实际学习日期回看证据，每七天一个观察窗口。'],settings:['Study preferences','训练设置','确认考试类型，查看课程的预算和评估规则。']}
 type Feedback=CoachFeedback
 type Snapshot=ReportState
 type Checkpoint={account:string;displayName?:string;revision:number;state:Snapshot|null}
@@ -52,6 +52,7 @@ export default function Studio(){
  const [historyDay,setHistoryDay]=useState(11),[feedback,setFeedback]=useState<Feedback[]>([]),[coachError,setCoachError]=useState(false)
  const [reviewLinks,setReviewLinks]=useState<ReviewLink[]>([])
  const [reviewTasks,setReviewTasks]=useState<ReviewTaskStatus[]>([])
+ const [rechecks,setRechecks]=useState<WritingRecheckStatus[]>([])
  const [automation,setAutomation]=useState<AutomationStatus|undefined>(undefined)
  const [note,setNote]=useState(0),[reply,setReply]=useState(''),[result,setResult]=useState<boolean|null>(null),[check,setCheck]=useState(false),[showPacket,setShowPacket]=useState(false)
  const navigate=(page:Tab)=>{setTab(page);setCheck(false);setShowPacket(false);if(typeof window!=='undefined')window.scrollTo({top:0,behavior:'instant'})}
@@ -68,13 +69,13 @@ export default function Studio(){
   coachBusy.current=true
   const read=++coachRead.current,owner=activeAccount.current
   try{
-   const {response:res,data:c}=await requestJSON<{account:string;extras:Record<string,Lesson>;feedback:Feedback[];reviewLinks?:ReviewLink[];reviewTasks?:ReviewTaskStatus[];automation?:AutomationStatus}>('/api/coach',{cache:'no-store',redirect:'manual'})
+   const {response:res,data:c}=await requestJSON<{account:string;extras:Record<string,Lesson>;feedback:Feedback[];reviewLinks?:ReviewLink[];reviewTasks?:ReviewTaskStatus[];rechecks?:WritingRecheckStatus[];automation?:AutomationStatus}>('/api/coach',{cache:'no-store',redirect:'manual'})
    if(read!==coachRead.current||owner!==activeAccount.current)return
    if(requiresLogin(res)){lockAccess();return}
    if(!res.ok)throw Error()
    if(c?.account!==owner){lockAccess('登录账号已改变。请重新读取进度，核对当前账号。');return}
    if(!c||!c.extras||typeof c.extras!=='object'||!Array.isArray(c.feedback)||c.feedback.some(f=>!f||typeof f.id!=='string'||typeof f.attempt!=='string'||typeof f.feedback!=='string'))throw Error()
-   registerExtraLessons(c.extras||{});setFeedback(c.feedback||[]);if(Array.isArray(c.reviewLinks))setReviewLinks(current=>[...c.reviewLinks!,...current.filter(row=>!c.reviewLinks!.some(job=>job.id===row.id))]);setReviewTasks(Array.isArray(c.reviewTasks)?c.reviewTasks:[]);setAutomation(c.automation);setCoachError(false)
+   registerExtraLessons(c.extras||{});setFeedback(c.feedback||[]);if(Array.isArray(c.reviewLinks))setReviewLinks(current=>[...c.reviewLinks!,...current.filter(row=>!c.reviewLinks!.some(job=>job.id===row.id))]);setReviewTasks(Array.isArray(c.reviewTasks)?c.reviewTasks:[]);setRechecks(Array.isArray(c.rechecks)?c.rechecks:[]);setAutomation(c.automation);setCoachError(false)
   }catch{if(read===coachRead.current&&owner===activeAccount.current)setCoachError(true)}finally{coachBusy.current=false}
  }
  async function refresh(){
@@ -151,7 +152,8 @@ export default function Studio(){
  // One read-only subscription for the page. It never refreshes drafts or advances the checkpoint.
  const pendingTaskCount=reviewTasks.filter(task=>['queued','running','retry_wait'].includes(task.state)).length;
  const runningTaskCount=reviewTasks.filter(task=>task.state==='running').length;
- const inFlightTaskCount=reviewTasks.filter(task=>task.state==='queued'||task.state==='running').length;
+ const inFlightTaskCount=reviewTasks.filter(task=>task.state==='queued'||task.state==='running').length
+  +rechecks.filter(row=>row.state==='queued'||row.state==='running').length;
  const unresolvedLinkCount=reviewLinks.filter(link=>!feedback.some(row=>row.attempt===link.id)).length;
  const completedUnfetched=reviewTasks.filter(task=>task.state==='completed'&&!feedback.some(row=>row.attempt===task.attemptId)).length;
  // P0-1 inbox: completed-but-unfetched, needs_attention and blocked tasks with a
@@ -187,7 +189,7 @@ export default function Studio(){
  const [pollDegraded,setPollDegraded]=useState(false);
  useEffect(()=>{
   if(!account||locked)return
-  const active=pendingTaskCount>0||unresolvedLinkCount>0||completedUnfetched>0
+  const active=pendingTaskCount>0||unresolvedLinkCount>0||completedUnfetched>0||inFlightTaskCount>0
   if(active&&!pollActive.current){pollStep.current=0;if(pollSince.current===null)pollSince.current=Date.now()}
   if(!active){pollSince.current=null;pollStep.current=0;setPollDegraded(false)}
   // A new submission starts a fresh fast-poll window even mid-episode.
@@ -304,7 +306,7 @@ export default function Studio(){
   {sync!=='load'&&<button className="secondary" onClick={()=>void refresh()}>重新读取进度</button>}</div></section>
  if(!account)return <main>{loginGate}</main>
  const feedbackDay=tab==='history'?historyDay:s.day
- return <FeedbackProvider key={account} day={feedbackDay} entry={s.entries[feedbackDay]||{}} feedback={feedback.filter(f=>f.day===feedbackDay)} links={reviewLinks} tasks={reviewTasks} automation={automation} error={coachError} refresh={()=>void refreshCoach()} account={account} drillTakes={s.entries[feedbackDay]?.speakingDrillTakes} saveDrillTakes={!s.finished&&feedbackDay===s.day?(raw=>save({speakingDrillTakes:raw})):undefined}>{locked&&<main>{loginGate}</main>}<div className="app-shell" hidden={locked} inert={locked} style={locked?{display:'none'}:undefined}>
+ return <FeedbackProvider key={account} day={feedbackDay} entry={s.entries[feedbackDay]||{}} feedback={feedback.filter(f=>f.day===feedbackDay)} links={reviewLinks} tasks={reviewTasks} automation={automation} error={coachError} refresh={()=>void refreshCoach()} account={account} drillTakes={s.entries[feedbackDay]?.speakingDrillTakes} saveDrillTakes={!s.finished&&feedbackDay===s.day?(raw=>save({speakingDrillTakes:raw})):undefined} rechecks={rechecks}>{locked&&<main>{loginGate}</main>}<div className="app-shell" hidden={locked} inert={locked} style={locked?{display:'none'}:undefined}>
  <aside className="side"><button className="brand" onClick={()=>navigate('home')}><Emblem/><span><b>Bandroom</b><small>IELTS STUDY STUDIO</small></span></button>
  <div className="nav-label">WORKSPACE</div><nav>{tabs.map(([id,title,Icon])=><button key={id} aria-current={tab===id||(tab==='lesson'&&id==='home')?'page':undefined} className={'nav-item '+((tab===id||(tab==='lesson'&&id==='home'))?'selected':'')} onClick={()=>navigate(id)}><Icon size={18}/>{title}</button>)}</nav>
  <div className="sidebar-bottom"><div className="sidebar-target"><span>MY PROGRAMME</span><b>IELTS <em>{overallTarget.toFixed(1)}</em></b><small>62 课时学习计划</small></div><button className={'nav-item '+(tab==='settings'?'selected':'')} onClick={()=>navigate('settings')}><SlidersHorizontal size={17}/>训练设置</button><div className="profile"><span>{initialsOf(displayName||'Learner')}</span><div><b>{displayName||'学习者'}</b><small>个人学习空间</small></div></div></div>
@@ -345,7 +347,7 @@ export default function Studio(){
  {s.finished?<section className="card pad"><h2>本课已打卡</h2><button className="secondary" onClick={()=>archive(s.day)}>查看档案</button></section>:stage==='speak'?<Speaking account={account} key={account+"-"+s.day+"-"+refreshKey} day={s.day} entry={entry} prompt={topic.speaking} followup={s.day===11?part3:topic.followup} save={save} advance={()=>void advance()} feedback={feedback.filter(f=>f.day===s.day)}/>:stage!=='review'?<Exercise key={account+"-"+s.day+stage+"-"+refreshKey} account={account} day={s.day} stage={stage} entry={entry} completedDays={s.completed} save={save} advance={()=>void advance()}/>:<section className="card pad check-card"><div className="eyebrow">Final check-in</div><h2>给 Day {s.day} 收个尾</h2><p>回想一个下次能独立用出的表达，或一个仍需练习的问题。</p><label>一句复盘 <small>可选；保存后可把本题交给教练批改</small><textarea readOnly={pending||entry.reviewMemo!==undefined} value={entry.reviewMemo??memo} onChange={e=>setMemo(e.target.value)} placeholder="下次我想试着……"/></label>{entry.reviewMemo===undefined?<button className="secondary" disabled={pending||!memo.trim()} onClick={()=>void save({reviewMemo:memo.trim()})}>保存复盘，查看批改入口</button>:<AttemptFeedback field="reviewMemo"/>}<p className="muted">保存复盘和查看反馈不会完成本课；最终打卡由你确认。</p><label className="checkbox"><input type="checkbox" checked={check} onChange={e=>setCheck(e.target.checked)}/>我已完成本课核心练习，确认打卡 Day {s.day}。</label><button className="primary" disabled={!check||pending||unsavedMemo} onClick={()=>void finish()}>确认完成 Day {s.day}<CheckCheck size={17}/></button></section>}
  <div className="lesson-foot"><Clock3 size={14}/><span>当前模块预算 {mins[stage]} 分钟 · 本课总预算 {cap} 分钟</span><button onClick={()=>navigate('home')}>返回工作台</button></div></>}
  {tab==='history'&&<div className="archive-grid"><div className="card archive-list">{Array.from({length:s.day},(_,i)=>s.day-i).map(d=><button key={d} className={d===historyDay?'selected':''} onClick={()=>{setHistoryDay(d);setShowPacket(false)}}><span>Day {String(d).padStart(2,'0')}</span>{s.completed.includes(d)?<Check size={15}/>:<i/>}</button>)}</div><div className="card pad history-detail"><div className="eyebrow">Lesson record / {String(historyDay).padStart(2,'0')}</div><h2>{brief[historyDay]||getLesson(historyDay).theme}</h2>{pill(s.completed.includes(historyDay)?'已打卡':'进行中',!s.completed.includes(historyDay))}{historyDay<=11&&<p className="muted">基础阶段为合成示例数据，仅用于演示与回归。</p>}<div className="record-list">{(oldResults[historyDay]||[]).map(([a,b])=><div key={a}><span>{a}</span><b>{b}</b></div>)}</div>
- {writings[historyDay]?.map((t,i)=><details key={i}><summary>{i?'写作修订稿':'写作独立首稿'}<ChevronDown size={15}/></summary><p className="english-text">{t}</p></details>)}
+ {writings[historyDay]?.map((t,i)=><details key={i}><summary>{i?'写作二稿':'写作独立首稿'}<ChevronDown size={15}/></summary><p className="english-text">{t}</p></details>)}
  {historyDay===11&&<details><summary>口语记录 · 示例<ChevronDown size={15}/></summary><p>示例基础阶段口语记录：描述一个车载预警场景并给出处理步骤。原回答分三段，中间有追问。保留转录反馈，发音与流利度尚无可复核评分。</p><div className="example">The warning disappeared after the repair.</div></details>}
  <EntryHistory entry={s.entries[historyDay]||{}} day={historyDay}/>
  <UnmatchedFeedback/>

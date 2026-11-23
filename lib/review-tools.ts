@@ -1,6 +1,10 @@
 import { z } from "zod/v4";
 import { acousticChunkIndex, acousticChunkLimit } from "./acoustic-chunk";
-import { coachingContentViolation } from "./content-rules";
+import { citationViolation, coachingContentViolation } from "./content-rules";
+import {
+  validateWritingCards, validateWritingDelta, validateWritingRecheck, WritingFeedbackError, WRITING_FIELDS, RECHECK_FIELD,
+  type WritingFeedback, type WritingIssue,
+} from "./writing-feedback";
 import { env } from "cloudflare:workers";
 import { createAnalysisBundleGrant } from "./analysis-bundle";
 import { decodeCheckpointLimit, issueReviewTransfer, requireDecodedInput } from "./review-transfer";
@@ -81,6 +85,9 @@ const completeSpec = z.strictObject({
   analysis: z.record(z.string(), z.unknown()).optional(),
   pronunciation: pronunciationSpec.optional(),
   payload: z.record(z.string(), z.unknown()).optional(),
+  // Phase 1 (doc §4.4/§4.6): structured writing issue cards / second-draft
+  // verdicts. Separate from `analysis` (acoustic evidence) on purpose.
+  writing: z.record(z.string(), z.unknown()).optional(),
 });
 const bundleSpec = z.strictObject({ taskId, fence });
 const transferSpec = z.discriminatedUnion("action", [
@@ -380,14 +387,52 @@ export async function callReviewTool(
         const attempt = snapshot.attempt as Record<string, unknown> | undefined;
         if (!attempt || typeof attempt.stage !== "string")
           throw new ReviewTaskError("snapshot_invalid", "The immutable submission snapshot has no attempt stage.");
-        // The same content rules as add_coach_feedback (MJ-3) so a runner
-        // cannot award an overall Speaking band through this path.
-        if (attempt.stage === "speak") {
+        // The same content rules as add_coach_feedback (MJ-3), now for every
+        // stage (Phase 1, D2): no overall Speaking band, no unstructured
+        // pronunciation score and no band number on a text review.
+        {
           const violation = coachingContentViolation({
             feedback: input.feedback, evidence: input.evidence,
-            hasStructuredPronunciation: Boolean(input.pronunciation),
+            hasStructuredPronunciation: Boolean(input.pronunciation), stage: attempt.stage,
           });
           if (violation) throw new ReviewTaskError("content_rule_violation", violation.message);
+        }
+        let writing: WritingFeedback | null = null;
+        if (input.writing !== undefined && attempt.field === RECHECK_FIELD) {
+          // Quick check: advisory single-issue verdict on the frozen snippet.
+          const context = (snapshot as { context?: { baseFeedbackId?: unknown; issue?: { id?: unknown } } }).context;
+          if (task.kind !== "text" || input.writing.mode !== "recheck" || typeof context?.baseFeedbackId !== "string"
+              || typeof context.issue?.id !== "string")
+            throw new ReviewTaskError("writing_not_allowed", "A quick check needs its frozen issue context.");
+          try {
+            writing = validateWritingRecheck(input.writing, typeof attempt.response === "string" ? attempt.response : "",
+              { baseFeedbackId: context.baseFeedbackId, issueId: context.issue.id });
+          } catch (error) {
+            if (error instanceof WritingFeedbackError) throw new ReviewTaskError(error.code, error.message);
+            throw error;
+          }
+        } else if (attempt.field === RECHECK_FIELD) {
+          throw new ReviewTaskError("writing_required", "A quick check must be completed with a structured verdict.");
+        } else if (input.writing !== undefined) {
+          if (task.kind !== "text" || typeof attempt.field !== "string" || !WRITING_FIELDS.has(attempt.field))
+            throw new ReviewTaskError("writing_not_allowed", "Writing issue cards are only valid on a writing draft.");
+          const response = typeof attempt.response === "string" ? attempt.response : "";
+          const context = (snapshot as { context?: { firstDraft?: unknown; firstReview?: unknown } }).context;
+          const firstReview = context?.firstReview as { feedbackId?: unknown; issues?: unknown } | undefined;
+          try {
+            if (input.writing.mode === "delta") {
+              if (attempt.field !== "writeRevision" || typeof context?.firstDraft !== "string"
+                  || typeof firstReview?.feedbackId !== "string" || !Array.isArray(firstReview.issues))
+                throw new ReviewTaskError("writing_not_allowed", "An incremental review needs a frozen first-draft review.");
+              writing = validateWritingDelta(input.writing, response, context.firstDraft,
+                { feedbackId: firstReview.feedbackId, issues: firstReview.issues as WritingIssue[] });
+            } else {
+              writing = validateWritingCards(input.writing, response);
+            }
+          } catch (error) {
+            if (error instanceof WritingFeedbackError) throw new ReviewTaskError(error.code, error.message);
+            throw error;
+          }
         }
         if (task.kind === "speaking" && (!input.analysis || !input.recordingSha256))
           throw new ReviewTaskError("analysis_required", "A speaking task needs structured acoustic evidence and the original recording SHA-256.");
@@ -400,6 +445,12 @@ export async function callReviewTool(
             throw new ReviewTaskError("recording_required", "A pronunciation rating must bind the original recording digest.");
           if (input.pronunciation.recordingId !== task.recordingId)
             throw new ReviewTaskError("recording_mismatch", "The pronunciation rating refers to a different recording than this task.");
+        }
+        // Automatic text reviews must cite the learner's own wording (moved
+        // from runner/content_rules.py so every producer is gated).
+        if (task.kind === "text" && task.claimKind === "auto" && typeof attempt.response === "string") {
+          const violation = citationViolation(input.evidence, attempt.response);
+          if (violation) throw new ReviewTaskError("content_rule_violation", violation.message);
         }
         const analysisVersion = input.analysisVersion ?? task.analysisVersion;
         let effectiveAnalysis: Record<string, unknown> | null = input.analysis ?? null;
@@ -484,12 +535,17 @@ export async function callReviewTool(
         }
         const completed = await completeReviewTask(db, scope.user, {
           taskId: scope.task, fence: scope.fence,
-          output: { feedback: input.feedback, evidence: input.evidence, analysis: effectiveAnalysis },
+          // `writing` enters the digest only when present, so every pre-Phase-1
+          // receipt replays byte-identically.
+          output: { feedback: input.feedback, evidence: input.evidence, analysis: effectiveAnalysis, ...(writing ? { writing } : {}) },
           feedback: {
             id: `rt:${scope.task}`, day: task.day, stage: attempt.stage, attempt: task.attemptId,
             evidence: input.evidence, feedback: input.feedback,
             pronunciation: input.pronunciation ? { ...input.pronunciation, scope: "partial" as const } : undefined,
-            analysis: effectiveAnalysis ?? undefined,
+            // Text tasks never carry acoustic analysis, so the stored JSON
+            // column holds the schema-tagged writing payload instead; the read
+            // path maps it to `writing`, never to `analysis`.
+            analysis: (effectiveAnalysis ?? writing ?? undefined) as Record<string, unknown> | undefined,
           },
           receipt: {
             recordingSha256: input.recordingSha256 ?? null,

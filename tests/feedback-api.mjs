@@ -232,6 +232,31 @@ heartbeat('failed',Date.now(),null,null);
 assert.equal((await(await http.GET()).json()).automation.connected,false);check();
 heartbeat('finished',Date.now()-3*60*60_000,Date.now()-3*60*60_000,Date.now()+60*60_000);
 assert.equal((await(await http.GET()).json()).automation.connected,true);check();
+// Phase 1: writing cards surface as `writing` (never as acoustic `analysis`),
+// and quick checks are reported separately from feedback, links and tasks.
+{
+  const uid=user.userId,now=new Date().toISOString();
+  const cardsJson=JSON.stringify({schema:'bandroom-writing-feedback-v1',mode:'cards',issues:[],summary:{priorities:[],next_step_zh:'x'}});
+  db.prepare(`INSERT INTO teacher_feedback(id,user_id,day,stage,attempt,evidence,feedback,analysis_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
+    .run('wf-cards',uid,12,'write','v2:cards-attempt','e','f',cardsJson,now);
+  const rcSnapshot=JSON.stringify({sourceId:'recheck:wf-cards:i1:1',attempt:{id:'v2:rc-fixture',day:12,field:'writeRecheck',index:0,stage:'write',title:'单项快检',kind:'subjective',response:'r',conditions:'',evidence:''},
+    context:{baseFeedbackId:'wf-cards',issue:{id:'i1'}}});
+  db.prepare(`INSERT INTO review_jobs(id,user_id,day,submission_key,request_hash,revision,snapshot,created_at) VALUES (?,?,?,?,?,?,?,?)`)
+    .run('v2:rc-fixture',uid,12,'recheck:wf-cards:1','a'.repeat(64),1,rcSnapshot,now);
+  db.prepare(`INSERT INTO review_tasks(id,review_job_id,user_id,kind,attempt_id,day,attempt_revision,stage,state,fence,attempts,next_at,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,'read_input','completed',1,1,?,?,?)`).run('task-rc-fixture','v2:rc-fixture',uid,'text','v2:rc-fixture',12,1,Date.now(),Date.now(),Date.now());
+  db.prepare(`INSERT INTO teacher_feedback(id,user_id,day,stage,attempt,evidence,feedback,analysis_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
+    .run('wf-rc',uid,12,'write','v2:rc-fixture','e','f',JSON.stringify({schema:'bandroom-writing-feedback-v1',mode:'recheck',baseFeedbackId:'wf-cards',issue:'i1',result:'partial',evidence_quote:'r',why_zh:'好一些。',adjusted:false}),now);
+  const coach=await(await http.GET()).json();
+  const cardsRow=coach.feedback.find(f=>f.id==='wf-cards');
+  assert.equal(cardsRow.writing.mode,'cards');assert.equal(cardsRow.analysis,undefined,'writing never renders as acoustic analysis');check();
+  assert.equal(coach.feedback.some(f=>f.id==='wf-rc'),false,'quick-check verdicts are not general feedback');check();
+  assert.equal(coach.reviewLinks.some(l=>l.id==='v2:rc-fixture'),false,'quick checks are not review links');check();
+  assert.equal(coach.reviewTasks.some(t=>t.attemptId==='v2:rc-fixture'),false,'quick checks never reach the inbox');check();
+  assert.deepEqual(coach.rechecks.map(r=>[r.issue,r.state,r.result,r.baseFeedbackId]),[['i1','completed','partial','wf-cards']]);check();
+  for(const table of ['teacher_feedback WHERE id IN (\'wf-cards\',\'wf-rc\')','review_tasks WHERE id=\'task-rc-fixture\'','review_jobs WHERE id=\'v2:rc-fixture\''])
+    db.prepare('DELETE FROM '+table).run();
+}
 // D4: only the coach-runner service writes the tenant-neutral heartbeat, and
 // every tenant reads it (previously other tenants were always "disconnected").
 const svcRows=()=>db.prepare('SELECT COUNT(*) n FROM service_heartbeats').get().n;

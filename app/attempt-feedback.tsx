@@ -1,7 +1,7 @@
 'use client';
 import {createContext,useContext,useEffect,useState,type ReactNode} from 'react';
 import {etaText,runningLabel} from './review-polling';
-import {feedbackFor,reviewAttempts,reviewRequest,type AutomationStatus,type CoachFeedback,type ReviewAttempt,type ReviewLink,type ReviewTaskStatus} from './feedback-model';
+import {feedbackFor,reviewAttempts,reviewRequest,type AutomationStatus,type CoachFeedback,type ReviewAttempt,type ReviewLink,type ReviewTaskStatus,type WritingRecheckStatus} from './feedback-model';
 import {legacyPromptTitle,sideFromFeedback,type CompareSide,type QuestionRef} from './speaking-compare';
 import {questionById} from './speaking-questions';
 import AttemptCompare from './attempt-compare';
@@ -11,9 +11,9 @@ import {PronunciationCoach,TieredFeedbackProse} from './pronunciation-coach';
 import SpeakingScorecard from './speaking-scorecard';
 import './feedback.css';
 
-type Context = {attempts:ReviewAttempt[];feedback:CoachFeedback[];tasks:ReviewTaskStatus[];automation?:AutomationStatus;error:boolean;refresh:()=>void;ready:boolean;identificationFailed:boolean;retry:()=>void;account:string;drillTakes?:string;saveDrillTakes?:(raw:string)=>Promise<boolean>};
-const FeedbackContext=createContext<Context>({attempts:[],feedback:[],tasks:[],automation:undefined,error:false,refresh:()=>{},ready:false,identificationFailed:false,retry:()=>{},account:''});
-export function FeedbackProvider({day,entry,feedback,links,tasks,automation,error,refresh,children,account='',drillTakes,saveDrillTakes}:{day:number;entry:Record<string,string>;feedback:CoachFeedback[];links?:ReviewLink[];tasks?:ReviewTaskStatus[];automation?:AutomationStatus;error:boolean;refresh:()=>void;children:ReactNode;account?:string;drillTakes?:string;saveDrillTakes?:(raw:string)=>Promise<boolean>}) {
+type Context = {attempts:ReviewAttempt[];feedback:CoachFeedback[];tasks:ReviewTaskStatus[];automation?:AutomationStatus;error:boolean;refresh:()=>void;ready:boolean;identificationFailed:boolean;retry:()=>void;account:string;drillTakes?:string;saveDrillTakes?:(raw:string)=>Promise<boolean>;rechecks:WritingRecheckStatus[]};
+const FeedbackContext=createContext<Context>({attempts:[],feedback:[],tasks:[],automation:undefined,error:false,refresh:()=>{},ready:false,identificationFailed:false,retry:()=>{},account:'',rechecks:[]});
+export function FeedbackProvider({day,entry,feedback,links,tasks,automation,error,refresh,children,account='',drillTakes,saveDrillTakes,rechecks=[]}:{day:number;entry:Record<string,string>;feedback:CoachFeedback[];links?:ReviewLink[];tasks?:ReviewTaskStatus[];automation?:AutomationStatus;error:boolean;refresh:()=>void;children:ReactNode;account?:string;drillTakes?:string;saveDrillTakes?:(raw:string)=>Promise<boolean>;rechecks?:WritingRecheckStatus[]}) {
   const source=JSON.stringify(entry),[identified,setIdentified]=useState<{day:number;source:string;attempts:ReviewAttempt[];failed?:boolean}|null>(null);
   const [retryCount,setRetryCount]=useState(0);
   useEffect(()=>{
@@ -26,7 +26,7 @@ export function FeedbackProvider({day,entry,feedback,links,tasks,automation,erro
     const link=links?.find(row=>row.day===day&&row.sourceId===attempt.id);
     return link?{...attempt,id:link.id}:attempt;
   });
-  return <FeedbackContext.Provider value={{attempts,feedback,tasks:tasks??[],automation,error,refresh,ready:Boolean(current&&!current.failed),identificationFailed:Boolean(current?.failed),retry:()=>setRetryCount(n=>n+1),account,drillTakes,saveDrillTakes}}>{children}</FeedbackContext.Provider>;
+  return <FeedbackContext.Provider value={{attempts,feedback,tasks:tasks??[],automation,error,refresh,ready:Boolean(current&&!current.failed),identificationFailed:Boolean(current?.failed),retry:()=>setRetryCount(n=>n+1),account,drillTakes,saveDrillTakes,rechecks}}>{children}</FeedbackContext.Provider>;
 }
 export function FeedbackIdentificationStatus(){
   const {identificationFailed,retry}=useContext(FeedbackContext);
@@ -34,7 +34,7 @@ export function FeedbackIdentificationStatus(){
 }
 function QuickCheck({attempt}:{attempt:ReviewAttempt}) {
   const {field,response,recordingId,conditions}=attempt;
-  if(field.startsWith('write'))return <p className="af-check">提交核对：{(response.match(/\S+/g)||[]).length} 词。{field==='writeRevision'?'首稿和修改说明均已保留。':'首稿已锁定，修订会单独保存。'}论证和语言反馈见下方。</p>;
+  if(field.startsWith('write'))return <p className="af-check">提交核对：{(response.match(/\S+/g)||[]).length} 词。{field==='writeRevision'?'首稿和修改说明均已保留。':'首稿已锁定，二稿会单独保存。'}批改会显示在稿件旁。</p>;
   if(field==='vocabUse')return <p className="af-check">例句已保存。教练将核对搭配、语法及是否回应题目。</p>;
   if(field.startsWith('readQ'))return <p className="af-check">选择题已即时核对；你写的证据说明将单独批改。</p>;
   if(field==='speakingPart2'||field==='speakingFollowup')return <p className="af-check">{recordingId?'录音已提交。教练需听到这段录音后，才能评价发音和流利度。':conditions+'。发音和流利度暂不评分。'}</p>;
@@ -155,7 +155,16 @@ function reportRendered(attemptId:string){
   reportedRenders.add(attemptId);
   void fetch('/api/review-tasks/rendered',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({attemptId}),keepalive:true}).catch(()=>{});
 }
-export default function AttemptFeedback({field,index=0}:{field:string;index?:number}) {
+/** Phase 1: the writing loop renders structured cards itself and only needs
+ * the attempt, its review rows and task state from the shared context. */
+export function useAttemptReview(field:string,index=0){
+  const {attempts,feedback,tasks,ready,rechecks,refresh}=useContext(FeedbackContext);
+  const attempt=attempts.find(a=>a.field===field&&a.index===index);
+  const rows=attempt?feedbackFor(attempt,feedback):[];
+  const task=attempt?tasks.find(t=>t.attemptId===attempt.id):undefined;
+  return {attempt,rows,task,ready,rechecks,refresh};
+}
+export default function AttemptFeedback({field,index=0,structured=false}:{field:string;index?:number;structured?:boolean}) {
   const {attempts,feedback,tasks,automation,error,refresh}=useContext(FeedbackContext);
   const attempt=attempts.find(a=>a.field===field&&a.index===index);
   const [copyStatus,setCopyStatus]=useState(''),[fallback,setFallback]=useState(false),[takingOver,setTakingOver]=useState(false);
@@ -212,7 +221,9 @@ export default function AttemptFeedback({field,index=0}:{field:string;index?:num
     {!rows.length&&<QuickCheck attempt={attempt}/>}
     {!rows.length&&!task&&linked&&<p className="af-hint" role="status">已保存，正在核对批改队列…</p>}
     {!rows.length&&task&&<TaskState task={task} automation={automation} refresh={refresh} onManual={()=>void copyManualRequest()} manualBusy={takingOver}/>}
-    <div aria-live="polite" aria-relevant="additions text">{rows.map(row=><ReviewRow key={row.id} row={row} recordingId={attempt.recordingId} attemptId={attemptId}/>)}</div>
+    <div aria-live="polite" aria-relevant="additions text">{rows.map(row=>structured&&row.writing
+      ?<p key={row.id} className="af-hint">结构化批改已到达，见上方的问题卡。</p>
+      :<ReviewRow key={row.id} row={row} recordingId={attempt.recordingId} attemptId={attemptId}/>)}</div>
     {pair&&<AttemptCompare left={pair[0].side} right={pair[1].side}
       leftRef={questionRef(pair[0].row)} rightRef={questionRef(pair[1].row)}
       labelLeft={nth(pair[0].row)} labelRight={nth(pair[1].row)}/>}

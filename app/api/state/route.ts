@@ -3,7 +3,7 @@ import { requireUserScope } from "@/lib/route-guard";
 import { getTenantDb } from "@/db";
 import { learnerStates, teacherLessons } from "@/db/schema";
 import { hash, uuid } from "@/lib/backup-format";
-import { findSubmission, submitReview } from "@/lib/review-jobs";
+import { findSubmission, submitReview, writingRevisionContext } from "@/lib/review-jobs";
 import { reviewContext } from "@/lib/review-context";
 import { reviewAttempts } from "@/app/feedback-model";
 import { linkedRecordings } from "@/lib/recording-recovery";
@@ -122,9 +122,15 @@ export async function PUT(request: Request) {
     }
     const attempt = submitted[0];
     const recording = attempt.recordingId ? recordingIdentities.get(attempt.recordingId) : undefined;
+    // Phase 1 (doc §4.8): a second draft is reviewed against the frozen first
+    // draft and, when available, its issue cards.
+    const firstDraftAttempt = attempt.field === "writeRevision" ? after.find(a => a.field === "writeOriginal") : undefined;
+    const writing = firstDraftAttempt && typeof entry.writeOriginal === "string"
+      ? await writingRevisionContext(user.userId, state.day, firstDraftAttempt.id, entry.writeOriginal)
+      : {};
     const saved = await submitReview(user.userId, submissionKey, requestHash, revision, state, {
       sourceId: attempt.id, attempt: { ...attempt, id: "v2:" + crypto.randomUUID() },
-      context: reviewContext(attempt, lesson),
+      context: { ...reviewContext(attempt, lesson), ...writing },
       ...(recording && { recording }),
     }, env.ANALYSIS_BUNDLE_VERSION);
     return saved ? receipt(saved) : json({ error: "revision_conflict" }, 409);

@@ -345,6 +345,29 @@ class QwenAdapter:
             json_object=True,
         )
 
+    def complete_writing(
+        self, system: str, user: str, *, timeout: float | None = None
+    ) -> str:
+        """Structured JSON writing issue cards / second-draft verdicts (Phase 1).
+
+        Same text model and JSON mode as the scorecard call; the runner and the
+        server validate quotes against the submitted draft before display.
+        """
+        if not isinstance(system, str) or not system.strip():
+            raise ModelError("invalid_writing_prompt", "system prompt is empty", retryable=False)
+        if not isinstance(user, str) or not user.strip():
+            raise ModelError("invalid_writing_prompt", "user prompt is empty", retryable=False)
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        return self._post(
+            self.text_model,
+            messages,
+            timeout if timeout is not None else self.text_timeout,
+            json_object=True,
+        )
+
     def complete_audio(self, snapshot: Mapping[str, Any], audio: PreparedAudio) -> Feedback:
         if not audio.data_uri or not audio.format:
             raise ModelError("invalid_audio_input", "prepared audio is incomplete", retryable=False)

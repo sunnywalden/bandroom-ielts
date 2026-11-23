@@ -89,7 +89,9 @@ const byStage:Record<Stage,RegExp>={
   vocab:/^vocab(Recall(Correct|Draft)?|Use(Draft)?|Batch|Done)$/,
   listen:/^listen(Q[01](Correct)?|Mode[01]|Batch|Done)$/,
   read:/^read(Q[01](Correct)?|Evidence[01]|Batch|Done)$/,
-  write:/^write(Original|Revision(Draft)?|Focus|Done|Condition|Draft)$/,review:/^reviewMemo$/,
+  // Phase 1 second-draft loop (doc §4.7): writeLoop is the "v1" marker,
+  // writeRevisionIssues / writeHintReveals record the learner's choices.
+  write:/^write(Original|Revision(Draft)?|Focus|Done|Condition|Draft|Loop|RevisionIssues|HintReveals)$/,review:/^reviewMemo$/,
 };
 function ready(day:number, stage:Stage, e:Entry) {
   if(day===11 && stage!=="speak" && stage!=="review") return true;
@@ -185,6 +187,13 @@ function validEntry(day:number, stage:Stage, before:Entry, after:Entry, lesson?:
   }
   if(changed.includes("writeOriginal")&&(!after.writeOriginal.trim()||!["独立 · 未计时","独立 · 我已自行计时","有参考或获得提示"].includes(after.writeCondition)))return false;
   if(changed.includes("writeRevision") && !before.writeOriginal?.trim())return false;
+  // Loop metadata is bounded, well-formed and can only accompany a draft.
+  if(changed.includes("writeLoop") && after.writeLoop!==undefined && after.writeLoop!=="v1")return false;
+  for(const key of ["writeRevisionIssues","writeHintReveals"]){
+    if(!changed.includes(key)||after[key]===undefined)continue;
+    if(after[key].length>8000||!before.writeOriginal?.trim()&&!after.writeOriginal?.trim())return false;
+    try{if(!Array.isArray(JSON.parse(after[key])))return false}catch{return false}
+  }
   if(changed.includes("speakingComplete") && !attempts(before.speakingFollowup)?.length)return false;
   const done=stage==="speak"?"speakingComplete":stage+"Done";
   return !changed.includes(done) || ready(day,stage,after);

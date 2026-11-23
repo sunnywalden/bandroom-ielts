@@ -7,6 +7,8 @@ import { automationHeartbeats, learnerStates, reviewTasks, teacherFeedback, teac
 import { getExercises, type Lesson } from "@/app/curriculum";
 import { targets, overallTarget } from "@/app/goals";
 import { coachingContentViolation } from "./content-rules";
+import { isWritingFeedback } from "./writing-feedback";
+import { isRecheckSnapshot } from "./writing-recheck";
 import { assertConsent, ConsentError } from "./consent";
 import { frozenReviews } from "./review-jobs";
 import { reviewContext } from "./review-context";
@@ -163,6 +165,13 @@ async function reviews(userId:string, day?:number) {
   });
   const verdicts=await verdictsForCandidates(reviewTaskDb(),userId,candidateIds);
   return rows.map(({analysisJson,...row})=>{
+    // Phase 1: writing issue cards share the JSON column but are surfaced as
+    // `writing`, never as acoustic `analysis` (D3).
+    if(isWritingFeedback(analysisJson))return {
+      ...row,
+      ...(row.pronunciation?{evidence:row.evidence+` · 发音专项暂定 ${row.pronunciation.band.toFixed(1)}/9（本次录音）· ${row.pronunciation.observation}`}:{}),
+      writing:analysisJson,
+    };
     const raw=analysisJson as {items?:Array<Record<string,unknown>>}|null;
     // Only touch analyses that actually carry candidate items; legacy shapes
     // (errors/coverage) must pass through untouched.
@@ -211,8 +220,23 @@ export async function coachData(userId:string) {
     nextExpectedAt:next,
     status:heartbeat?.status??null,
   };
-  return {account:userId,extras:Object.fromEntries(lessons.map(({day,lesson})=>[day,lesson])),feedback,
-    reviewLinks:jobs.map(({id,day,snapshot})=>({id,day,sourceId:snapshot.sourceId})),reviewTasks:tasks,automation};
+  // Quick checks (doc §4.5) are advisory side tasks: they never appear as
+  // feedback, links or inbox tasks; the writing loop reads `rechecks`.
+  const recheckJobs=new Map(jobs.filter(job=>isRecheckSnapshot(job.snapshot)).map(job=>{
+    const context=(job.snapshot as unknown as {context?:{baseFeedbackId?:string;issue?:{id?:string}}}).context;
+    return [job.id,{day:job.day,baseFeedbackId:context?.baseFeedbackId??'',issue:context?.issue?.id??''}] as const;
+  }));
+  const rechecks=[...recheckJobs].map(([id,meta])=>{
+    const row=feedback.find(f=>f.attempt===id);
+    const task=tasks.find(t=>t.attemptId===id);
+    const verdict=row&&'writing' in row&&row.writing?.mode==='recheck'?row.writing:undefined;
+    return {id,...meta,state:verdict?'completed':task?.state??'queued',
+      ...(verdict?{result:verdict.result,why_zh:verdict.why_zh,adjusted:verdict.adjusted,createdAt:row!.createdAt}:{})};
+  });
+  return {account:userId,extras:Object.fromEntries(lessons.map(({day,lesson})=>[day,lesson])),
+    feedback:feedback.filter(f=>!recheckJobs.has(f.attempt)),
+    reviewLinks:jobs.filter(job=>!recheckJobs.has(job.id)).map(({id,day,snapshot})=>({id,day,sourceId:snapshot.sourceId})),
+    reviewTasks:tasks.filter(task=>!recheckJobs.has(task.attemptId)),rechecks,automation};
 }
 
 class CoachError extends Error {}
@@ -323,11 +347,12 @@ export async function callCoach(userId:string, name:string, args:unknown, option
         if(pronunciation&&!recordingId)throw new CoachError("A pronunciation rating requires a submitted recording you actually heard. For text or self-report, leave pronunciation unassessed.");
         if(groundedAnalysis&&(values.stage!=="speak"||!recordingId))
           throw new CoachError("Grounded analysis requires a speaking attempt with a submitted recording you actually heard.");
-        if(values.stage==="speak") {
+        {
           // A fragment may receive a provisional criterion rating, never a whole-skill band.
-          // The same rules guard complete_review_task via lib/content-rules.ts.
+          // Phase 1 (D2): the rules apply to every stage; text reviews may not
+          // state a band number. The same rules guard complete_review_task.
           const violation=coachingContentViolation({feedback:values.feedback,evidence:values.evidence,attempt:values.attempt,
-            hasStructuredPronunciation:Boolean(pronunciation)});
+            hasStructuredPronunciation:Boolean(pronunciation),stage:values.stage});
           if(violation)throw new CoachError(violation.message);
         }
         const {ledger}=await checkpoint(userId);

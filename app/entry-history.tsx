@@ -115,11 +115,11 @@ export default function EntryHistory({entry,day}:{entry:Entry;day?:number}) {
     ["speakingPart2Draft","口语陈述 · 未提交草稿","speakingPart2"],
     ["speakingFollowupDraft","口语追问 · 未提交草稿","speakingFollowup"],
     ["writeDraft","写作首稿 · 未提交草稿","writeOriginal"],
-    ["writeRevisionDraft","写作修订 · 未提交草稿","writeRevision"],
+    ["writeRevisionDraft","写作二稿 · 未提交","writeRevision"],
   ];
   const writingRows = [
     [entry.writeOriginal,entry.writeCondition?.startsWith("独立")?"写作 · 独立首稿":"写作 · 首稿",entry.writeCondition],
-    [entry.writeRevision,"写作 · 修订稿",entry.writeFocus?"修改说明 · "+entry.writeFocus:undefined],
+    [entry.writeRevision,"写作 · 二稿",entry.writeFocus?"修改说明 · "+entry.writeFocus:undefined],
   ];
   return <>
     <SpeechGroup field="speakingPart2" name="口语 Part 2" items={readAttempts(entry.speakingPart2)} prompt={speaking?.speaking} day={day} date={dates("口语表达")}/>
