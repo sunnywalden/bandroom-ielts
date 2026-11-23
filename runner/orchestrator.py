@@ -1327,6 +1327,14 @@ class CoachRunner:
         ):
             raise PermanentTaskError("snapshot_invalid", "claimed task has no attempt snapshot")
         attempt = snapshot["attempt"]
+        # The frozen review is {sourceId, attempt, context} (app/api/state/route.ts):
+        # context is a SIBLING of attempt, while the owner path inlines it into
+        # each attempt (lib/coach.ts). Fold it in so both paths hand the model
+        # the same payload; dropping it left the coach reviewing a reading
+        # answer without the passage, choices or key. Inline context wins.
+        frozen_context = snapshot.get("context")
+        if isinstance(frozen_context, Mapping) and "context" not in attempt:
+            attempt = {**attempt, "context": frozen_context}
         user_id = str(task["userId"])
         task_id = str(task["id"])
         fence = int(task["fence"])
