@@ -1,7 +1,7 @@
 'use client';
 import {createContext,useContext,useEffect,useState,type ReactNode} from 'react';
 import {feedbackFor,reviewAttempts,reviewRequest,type AutomationStatus,type CoachFeedback,type ReviewAttempt,type ReviewLink,type ReviewTaskStatus} from './feedback-model';
-import {sideFromFeedback,type CompareSide,type QuestionRef} from './speaking-compare';
+import {legacyPromptTitle,sideFromFeedback,type CompareSide,type QuestionRef} from './speaking-compare';
 import {questionById} from './speaking-questions';
 import AttemptCompare from './attempt-compare';
 import {displayPronunciationErrors} from './pronunciation-display';
@@ -190,7 +190,7 @@ export default function AttemptFeedback({field,index=0}:{field:string;index?:num
   const reviewed=speakingGroup.map(row=>({row,side:sideFromFeedback(feedback,row.id,row.day)}))
     .filter((item):item is {row:ReviewAttempt;side:CompareSide}=>Boolean(item.side));
   const pair=latestInGroup?.id===attempt.id&&reviewed.length>=2?reviewed.slice(-2):null;
-  const questionRef=(row:ReviewAttempt):QuestionRef=>({day:row.day,prompt:questionById(row.questionId)?.prompt??row.title,questionId:row.questionId});
+  const questionRef=(row:ReviewAttempt):QuestionRef=>({day:row.day,prompt:questionById(row.questionId)?.prompt??legacyPromptTitle(row.title),questionId:row.questionId});
   const nth=(row:ReviewAttempt)=>`第 ${speakingGroup.findIndex(item=>item.id===row.id)+1} 次作答`;
   return <section className="attempt-feedback" aria-label={attempt.title+'反馈'}>
     <div className="af-heading"><strong>{attempt.title} · {rows.length?'教练批改':'已保存'}</strong><span className={'af-badge '+((rows.length||task?.state==='completed')?'af-ready':'')}>{rows.length?'批改已返回':taskBadge(task,linked)}</span></div>

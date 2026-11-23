@@ -311,6 +311,22 @@ test("the wake lock is requested inside the start gesture when available",async(
   await stopRecording();
 });
 
+test("the take summary survives parent clip adoption and a second take (browser regression)",async()=>{
+  localStorage.setItem("bandroom-mic-device","default");
+  window.AudioContext=audioContext(0.2);
+  await mount();await beginRecording();await stopRecording();
+  assert.equal(clips.length,1);
+  // The parent adopts the take as the current clip, as SessionTask.keep does.
+  await act(async()=>root.render(createElement(SessionRecorder,{...props,clip:clips[0].blob})));
+  await flush();
+  assert.match(text(),/检测到语音：设备电平估算，非校准指标/);
+  // A second take must not be cleared by the previous clip's clipSeen flag.
+  await beginRecording();await stopRecording();
+  assert.equal(clips.length,2);
+  assert.match(text(),/本次录音/);
+  assert.match(text(),/检测到语音：设备电平估算，非校准指标/);
+});
+
 test("microphone status is announced and the button exposes its state",async()=>{
   localStorage.setItem("bandroom-mic-device","default");
   await mount();

@@ -566,7 +566,7 @@ function SessionIntro({day,prompt,followup,entry,save,existing,onSession}:{
       </label>)}
     </div>
     {active==='mock'&&<p className="sp-note">模考按题限时，结束前不显示逐题反馈；结束后在报告中统一查看。可随时使用无障碍暂停，本场会标记为计时不完整。</p>}
-    {active!=='mock'&&<p className="sp-note">练习模式可以暂停，暂停时间不计入本题。录音只在点击保存后上传。</p>}
+    {active!=='mock'&&<p className="sp-note">练习模式可以暂停，暂停时间不计入本题。录音停止后自动上传，提交前可试听或重录。</p>}
     {previous&&previous.phase!=='done'&&<p className="sp-note" role="status">已找到一场未完成的{MODE_LABEL[previous.mode]}，重新打开本页会继续该场次。</p>}
     {error&&<p className="sp-message" role="status">{error}</p>}
     <div className="actions sp-actions">

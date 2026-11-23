@@ -21,6 +21,11 @@ function hash(value:string){
 }
 export function normalizePrompt(prompt:string){return prompt.trim().replace(/\s+/g,' ').toLowerCase()}
 export function legacyQuestionKey(day:number,prompt:string){return `lesson:${day}:${hash(normalizePrompt(prompt))}`}
+// Legacy attempt titles embed the ordinal ("口语 Part 3 · 首次回答" vs
+// "… · 重答 1"). The ordinal is not part of the question: strip it so two
+// answers to the same legacy question share one comparison key. Session-era
+// titles ("… · 第 N 题") keep their question number and stay distinct.
+export function legacyPromptTitle(title:string){return title.replace(/ · (?:首次回答|重答 \d+)$/,'')}
 export type QuestionRef={day:number;prompt:string;questionId?:string};
 export function comparisonKey(ref:QuestionRef){
   if(ref.questionId?.trim())return {key:`q:${ref.questionId.trim()}`,scheme:'v2' as const};

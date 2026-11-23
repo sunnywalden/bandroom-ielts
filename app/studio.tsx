@@ -18,7 +18,7 @@ import {requestJSON} from './request-json'
 import {newClientId} from './client-id'
 import {clearLocalClips} from './speaking-draft'
 import {clearUploadQueue} from './speaking-queue'
-import type {AutomationStatus,CoachFeedback,ReviewLink,ReviewTaskStatus} from './feedback-model'
+import {addsReviewableAnswer,type AutomationStatus,type CoachFeedback,type ReviewLink,type ReviewTaskStatus} from './feedback-model'
 import {useDraft} from './use-draft'
 
 const tabs=[['home','今日练习',LayoutDashboard],['history','学习档案',BookOpen],['notes','错题手记',NotebookPen],['report','阶段评估',Activity]] as const
@@ -278,7 +278,7 @@ export default function Studio(){
    const doneKey=stage==='speak'?'speakingComplete':stage+'Done'
    if(p[doneKey]&&!e[doneKey])p['_date_'+labels[stage]]=dayStamp()
    return {...prev,entries:{...prev.entries,[d]:{...e,...p}}}
-  },reviewFields.some(field=>patch[field]!==undefined&&patch[field]!==entry[field]))
+  },reviewFields.some(field=>patch[field]!==undefined&&patch[field]!==entry[field]&&addsReviewableAnswer(field,patch[field])))
  }
  const advance=async()=>{const prev=live.current, current=prev.entries[prev.day]||{};if(!stageDone(prev.stage,current))return;const to=order[order.indexOf(prev.stage)+1];if(to)await persist(p=>({...p,stage:to}))}
  async function start(){const next=s.day+1;if(!s.finished||next>62||!hasLesson(next))return

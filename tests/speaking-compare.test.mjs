@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   COMPARE_DISCLOSURE, DRILL_TAKE_SESSION_CAP, addDrillTake, compareAttempts, comparisonKey,
-  drillKey, drillTakes, feedbackByAttempt, latestTakeFor, legacyQuestionKey, rateDrillTake, sameQuestion,
+  drillKey, drillTakes, feedbackByAttempt, latestTakeFor, legacyPromptTitle, legacyQuestionKey, rateDrillTake, sameQuestion,
   sideFromFeedback, splitSameQuestion,
 } from '../app/speaking-compare.ts';
 
@@ -75,6 +75,23 @@ test('legacy and question-id schemes never mix',()=>{
   const rejected=splitSameQuestion({left:legacy,right:v2a,leftSide:{attemptId:'a'},rightSide:{attemptId:'b'}});
   assert.equal(rejected.matched,false);
   assert.match(rejected.reason,/不是同一道题/);
+});
+
+test('legacy attempt ordinals never split one question into two (prod day-14 regression)',()=>{
+  // Production archive: "口语 Part 3 · 首次回答" and "口语 Part 3 · 重答 1"
+  // answered the same follow-up question but hashed to different keys.
+  const first={day:14,prompt:legacyPromptTitle('口语 Part 3 · 首次回答')};
+  const redo={day:14,prompt:legacyPromptTitle('口语 Part 3 · 重答 1')};
+  assert.equal(sameQuestion(first,redo),true);
+  const part2First={day:14,prompt:legacyPromptTitle('口语 Part 2 · 首次回答')};
+  const part2Redo={day:14,prompt:legacyPromptTitle('口语 Part 2 · 重答 2')};
+  assert.equal(sameQuestion(part2First,part2Redo),true);
+  assert.equal(sameQuestion(first,part2First),false,'different parts stay apart');
+  // Session-era numbered titles keep their question number: two different
+  // Part 3 questions must not compare even without a questionId.
+  const q1={day:14,prompt:legacyPromptTitle('口语 Part 3 · 第 1 题')};
+  const q2={day:14,prompt:legacyPromptTitle('口语 Part 3 · 第 2 题')};
+  assert.equal(sameQuestion(q1,q2),false);
 });
 
 test('drill takes cap per drill and per session, evicting the oldest',()=>{
