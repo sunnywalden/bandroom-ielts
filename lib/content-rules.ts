@@ -1,13 +1,21 @@
 // Shared coaching content rules (design rev2 §4.5, MJ-3). Extracted verbatim
 // from the add_coach_feedback path so complete_review_task cannot bypass them.
+//
+// Realtime upgrade Phase 1 (doc §4.3-1, D2): the rules now apply to EVERY
+// stage on the server, not only speaking. Text reviews additionally may not
+// carry an IELTS band number (writing bands are not calibrated), and runner
+// completions of text tasks must cite the learner's own wording.
 export type ContentRuleViolation = {
-  code: "overall_speaking_band" | "unstructured_pronunciation";
+  code: "overall_speaking_band" | "unstructured_pronunciation" | "uncalibrated_band" | "uncited_evidence";
   message: string;
 };
 
 const BAND_NUMBER = "(?:[0-8](?:[.]5|[.]0)?|9(?:[.]0)?)(?![.0-9])";
 const OVERALL_SPEAKING = "(?:overall speaking|speaking band|口语总分|口语综合分|口语单科分)";
 const PRONUNCIATION = "(?:pronunciation|发音)";
+// Any IELTS-style band claim in a text review (writing, reading evidence,
+// reflections). Descriptor wording without a number stays allowed.
+const TEXT_BAND = "(?:overall|writing|task\\s*[12]|ielts|band|写作|作文|雅思|总分|分数)";
 
 function explicitClaim(claim: string, term: string): boolean {
   return new RegExp(
@@ -22,6 +30,8 @@ export function coachingContentViolation(input: {
   evidence: string;
   attempt?: string;
   hasStructuredPronunciation?: boolean;
+  /** Attempt stage. Omitted = legacy speaking-only call (no text-band rule). */
+  stage?: string;
 }): ContentRuleViolation | null {
   const claim = [input.feedback, input.evidence, input.attempt ?? ""].join(" ");
   if (explicitClaim(claim, OVERALL_SPEAKING)) {
@@ -36,5 +46,32 @@ export function coachingContentViolation(input: {
       message: "Record a pronunciation estimate in the structured pronunciation field only after listening to its submitted clip.",
     };
   }
+  if (input.stage !== undefined && input.stage !== "speak" && explicitClaim(claim, TEXT_BAND)) {
+    return {
+      code: "uncalibrated_band",
+      message: "Text reviews may not state an IELTS band number: writing bands are not calibrated. Describe the criterion instead.",
+    };
+  }
   return null;
+}
+
+// Mirrors runner/content_rules.py `_CITATION_WORD`: an English word of 3+
+// characters or 2+ CJK characters.
+const CITATION_WORD = /[A-Za-z0-9][A-Za-z0-9'_-]{2,}|[一-鿿]{2,}/g;
+
+/** Evidence must quote at least one concrete token from the learner's answer
+ * (an empty or token-free answer cannot be cited and passes). */
+export function citesLearnerText(evidence: string, response: string): boolean {
+  const tokens = new Set((response.match(CITATION_WORD) ?? []).map(token => token.toLowerCase()));
+  if (!tokens.size) return true;
+  const lowered = evidence.toLowerCase();
+  for (const token of tokens) if (lowered.includes(token)) return true;
+  return false;
+}
+
+export function citationViolation(evidence: string, response: string): ContentRuleViolation | null {
+  return citesLearnerText(evidence, response) ? null : {
+    code: "uncited_evidence",
+    message: "Evidence must quote the learner's own wording so the review is auditable.",
+  };
 }

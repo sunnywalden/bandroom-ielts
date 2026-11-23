@@ -4,7 +4,9 @@ import { useDraft } from "./use-draft";
 import { getExercises, sourceUrl, type Item, type Lesson } from "./curriculum";
 import ListeningPlayer from "./listening-player";
 import VocabularyReview, { learnedWords } from "./vocabulary-review";
-import AttemptFeedback from "./attempt-feedback";
+import AttemptFeedback, { useAttemptReview } from "./attempt-feedback";
+import { WritingStepper, ReviewPanel, RevisionChecklist, ReflectPanel } from "./writing-loop";
+import { defaultSelection, draftStats, isCards, isDelta, loopStep, parseList, parseWhy, revisionGate } from "./writing-loop-model";
 import Pronunciation from "./pronunciation";
 import "./exercise.css";
 
@@ -17,7 +19,7 @@ const names: Record<Stage,[string,string,string]> = {
   vocab:["Word lab","词汇与表达","进入听力"],
   listen:["Listening room","C1 听力","进入阅读"],
   read:["Reading room","阅读与证据","进入写作"],
-  write:["Writing desk","写作与修订","进入复盘"],
+  write:["Writing desk","写作：首稿与二稿","进入复盘"],
 };
 const modes = ["首听一遍","有额外重播","作答前参考了原文"];
 
@@ -116,47 +118,116 @@ function ChoicePractice({lesson,entry,save,advance,day,account,busy,stage}:{stag
 }
 const count = (s:string) => (s.match(/\S+/g)||[]).length;
 function Writing({lesson,entry,save,advance,day,account,busy}:Common) {
-  const original=entry.writeOriginal, revised=entry.writeRevision, isRevision=original!==undefined;
+  const original=entry.writeOriginal, revised=entry.writeRevision;
   const [first,setFirst]=useDraft(account,"fieldnotes."+day+".write.original",entry.writeDraft||"");
   const [second,setSecond]=useDraft(account,"fieldnotes."+day+".write.revision",entry.writeRevisionDraft||original||"");
   const [condition,setCondition]=useDraft(account,"fieldnotes."+day+".write.condition","独立 · 未计时");
+  const [focus,setFocus]=useDraft(account,"fieldnotes."+day+".write.focus","");
+  const [revisingRaw,setRevising]=useDraft(account,"fieldnotes."+day+".write.revising","");
+  const [selectionRaw,setSelection]=useDraft(account,"fieldnotes."+day+".write.selection","");
+  const [whyRaw,setWhyRaw]=useDraft(account,"fieldnotes."+day+".write.why","{}");
   const [shortOk,setShortOk]=useState(false);
   const [submitting,setSubmitting]=useState(false);
   const submittingRef=useRef(false);
-  const [focus,setFocus]=useDraft(account,"fieldnotes."+day+".write.focus","");
-  const min=lesson.fullEssay?250:90;
-  const current=isRevision?second:first;
-  const under=count(current)<min;
-  const changed=second.trim()!==(original||"").trim();
-  const ready=current.trim().length>0 && (!under||shortOk) && (!isRevision||changed&&Boolean(focus.trim()));
-  const draftKey=isRevision?"writeRevisionDraft":"writeDraft";
-  async function submit() {
-    if (!ready||busy||submittingRef.current) return;
-    submittingRef.current=true;setSubmitting(true);
-    try {
-      const ok=await save(isRevision?{writeRevision:second.trim(),writeFocus:focus.trim(),writeDone:"1"}:
-        {writeOriginal:first.trim(),writeCondition:condition});
-      if(ok)setShortOk(false);
-    }finally{submittingRef.current=false;setSubmitting(false);}
+  const firstReview=useAttemptReview("writeOriginal"), secondReview=useAttemptReview("writeRevision");
+  const cardsRow=firstReview.rows.find(row=>isCards(row.writing));
+  const cards=cardsRow&&isCards(cardsRow.writing)?cardsRow.writing:undefined;
+  const myRechecks=cardsRow?firstReview.rechecks.filter(row=>row.baseFeedbackId===cardsRow.id):[];
+  const [recheckStatus,setRecheckStatus]=useState("");
+  async function requestRecheck(issueId:string){
+    setRecheckStatus("");
+    try{
+      const res=await fetch("/api/writing/recheck",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({issueId,revised:second,why:why[issueId]??""})});
+      const data=await res.json().catch(()=>({})) as {error?:string};
+      if(!res.ok)setRecheckStatus(data.error==="recheck_limit"?"本稿的 5 次快检已用完。":data.error==="issue_untouched"?"这一处还没有改动。":"暂时无法快检，请稍后再试。");
+      firstReview.refresh();
+    }catch{setRecheckStatus("暂时无法快检，请稍后再试。")}
   }
+  const delta=secondReview.rows.map(row=>row.writing).find(isDelta);
+  const step=loopStep({original,revised,revising:revisingRaw==="1"});
+  const selected=selectionRaw?parseList(selectionRaw):cards?defaultSelection(cards):[];
+  const why=parseWhy(whyRaw);
+  const revealed=parseList(entry.writeHintReveals);
+  const min=lesson.fullEssay?250:90;
+  const current=step==="draft"?first:second;
+  const under=count(current)<min;
+  const gate=revisionGate({original:original??"",revised:second,issues:cards?.issues??[],selected,why,note:focus});
+  const ready=current.trim().length>0&&(!under||shortOk)&&(step==="draft"||gate.ready);
+  const stats=draftStats(current);
+  async function run(patch:Record<string,string>){
+    if(busy||submittingRef.current)return false;
+    submittingRef.current=true;setSubmitting(true);
+    try{const ok=await save(patch);if(ok)setShortOk(false);return ok}
+    finally{submittingRef.current=false;setSubmitting(false)}
+  }
+  async function submit(){
+    if(!ready)return;
+    if(step==="draft"){await run({writeOriginal:first.trim(),writeCondition:condition,writeLoop:"v1"});return}
+    await run({writeRevision:second.trim(),writeFocus:gate.focus,writeDone:"1",
+      ...(cards?{writeRevisionIssues:JSON.stringify(gate.issues)}:{})});
+  }
+  function reveal(id:string){
+    if(revealed.includes(id))return;
+    void save({writeHintReveals:JSON.stringify([...revealed,id])});
+  }
+  const toggle=(id:string)=>setSelection(JSON.stringify(selected.includes(id)?selected.filter(x=>x!==id):[...selected,id]));
   return <>
-    <p className="ex-meta">{lesson.fullEssay?"TASK 2 · FULL ESSAY":"WRITING WORKSHOP"} <span>·</span> {isRevision?"REVISION":"FIRST DRAFT"}</p>
-    <h2>{revised!==undefined?"对照两次表达":isRevision?"带着一个目标修订":"完成独立首稿"}</h2>
+    <p className="ex-meta">{lesson.fullEssay?"TASK 2 · FULL ESSAY":"WRITING WORKSHOP"} <span>·</span> {step==="draft"?"FIRST DRAFT":step==="review"?"REVIEW":step==="revise"?"SECOND DRAFT":"REFLECT"}</p>
+    <WritingStepper step={step}/>
+    <h2>{step==="draft"?"完成独立首稿":step==="review"?"读批改":step==="revise"?"改二稿":"复盘：改好了没有"}</h2>
     <p className="ex-question" lang="en">{lesson.writing}</p>
     {!lesson.fullEssay&&<details className="ex-details"><summary>查看写作依据 · {lesson.readingTitle}</summary><p lang="en">{lesson.passage}</p></details>}
-    {isRevision&&<><SavedText title={"独立首稿 · "+count(original)+" 词 · "+(entry.writeCondition||"条件未记录")} text={original}/><AttemptFeedback field="writeOriginal"/></>}
-    {revised!==undefined?<><SavedText title={"修订稿 · "+count(revised)+" 词"} text={revised}/><AttemptFeedback field="writeRevision"/><div className="ex-feedback"><strong>本次修改意图</strong><p>{entry.writeFocus}</p></div><Submit disabled={busy} onClick={advance}>进入复盘 →</Submit></>:<>
-      {isRevision?<div className="ex-feedback"><strong>课程修订提示（非本篇批改）</strong><p>{lesson.edit}</p></div>:
-        <p className="ex-hint">{lesson.fullEssay?"本次完整 Task 2 建议独立限时 40 分钟。请按实际情况选择作答条件。":"先用自己的语言写首稿。提交后可查看定向修订提示。"}</p>}
-      <ResponseBox label={isRevision?"修订稿":"首稿"} value={current} onChange={isRevision?setSecond:setFirst} large readOnly={submitting}/>
-      <div className="ex-count">{count(current)} 词 · {lesson.fullEssay?"目标 ≥ 250 词":"建议 90–130 词"}</div>
-      {isRevision?<label className="ex-label">我改了哪一处，为什么？<input value={focus} readOnly={submitting} onChange={e=>setFocus(e.target.value)} maxLength={400} placeholder="中文或英文均可"/></label>:
-        <label className="ex-label">实际写作条件<select value={condition} disabled={submitting} onChange={e=>setCondition(e.target.value)}>
-          <option>独立 · 未计时</option><option>独立 · 我已自行计时</option><option>有参考或获得提示</option></select></label>}
+
+    {step==="draft"&&<>
+      <p className="ex-hint">{lesson.fullEssay?"本次完整 Task 2 建议独立限时 40 分钟。首稿阶段不提供任何 AI 提示，这样记录的是你的真实水平。":"先用自己的语言写首稿。首稿阶段不提供 AI 提示；提交后会自动批改。"}</p>
+      <ResponseBox label="首稿" value={first} onChange={setFirst} large readOnly={submitting}/>
+      <div className="wl-stats" aria-live="off"><span>{stats.words} 词 · {lesson.fullEssay?"目标 ≥ 250 词":"建议 90–130 词"}</span><span>{stats.paragraphs} 段</span><span>平均句长 {stats.avgSentence} 词</span><span>已保存在本机</span></div>
+      <div className="wl-selfcheck" aria-label="自查清单（自我陈述，不作为批改结论）">
+        <label><input type="checkbox"/>回应了题目的每一部分</label><label><input type="checkbox"/>有明确立场</label><label><input type="checkbox"/>有结论段</label>
+      </div>
+      <label className="ex-label">实际写作条件<select value={condition} disabled={submitting} onChange={e=>setCondition(e.target.value)}>
+        <option>独立 · 未计时</option><option>独立 · 我已自行计时</option><option>有参考或获得提示</option></select></label>
+    </>}
+
+    {step==="review"&&<>
+      {cards
+        ?<ReviewPanel draft={original!} cards={cards} selected={selected} onToggle={toggle} revealed={revealed} onReveal={reveal}/>
+        :<><SavedText title={"首稿 · "+count(original??"")+" 词 · "+(entry.writeCondition||"条件未记录")} text={original??""}/>
+          {!firstReview.rows.length&&<div className="ex-feedback"><strong>批改还没到</strong><p>可以先按这条通用提示自主修改：{lesson.edit}</p></div>}</>}
+      <AttemptFeedback field="writeOriginal" structured/>
+      <div className="actions"><Submit disabled={busy} onClick={()=>{setRevising("1");if(!entry.writeRevisionDraft&&second===original)setSecond(original??"")}}>
+        {cards?`开始改二稿（已选 ${selected.length} 项）`:firstReview.rows.length?"按批改改二稿":"先自主修改二稿"}</Submit></div>
+    </>}
+
+    {step==="revise"&&<>
+      {cards?<details className="ex-details"><summary>回看首稿批注</summary><ReviewPanel draft={original!} cards={cards} selected={selected} onToggle={toggle} revealed={revealed} onReveal={reveal}/></details>
+        :<><SavedText title={"首稿 · "+count(original??"")+" 词"} text={original??""}/><AttemptFeedback field="writeOriginal"/>
+          {!firstReview.rows.length&&<div className="ex-feedback"><strong>自主修订</strong><p>批改还没到，可以先按这条通用提示修改：{lesson.edit}</p></div>}</>}
+      <ResponseBox label="二稿（以首稿为底稿）" value={second} onChange={setSecond} large readOnly={submitting}/>
+      <div className="wl-stats"><span>{stats.words} 词</span><span>已保存在本机</span></div>
+      {cards&&<RevisionChecklist original={original!} revised={second} cards={cards} selected={selected} why={why}
+        onWhy={(id,value)=>setWhyRaw(JSON.stringify({...why,[id]:value}))} revealed={revealed} onReveal={reveal}
+        rechecks={myRechecks} onRecheck={id=>void requestRecheck(id)} recheckStatus={recheckStatus}/>}
+      <label className="ex-label">补充说明{cards?"（选填）":"（这次改了什么、为什么）"}<input value={focus} readOnly={submitting} onChange={e=>setFocus(e.target.value)} maxLength={300} placeholder="中文或英文均可"/></label>
+      {!gate.ready&&<p className="ex-hint" role="status">{gate.reason}</p>}
+      <button type="button" className="sp-link" onClick={()=>setRevising("")}>← 回到批改</button>
+    </>}
+
+    {step==="reflect"&&<>
+      <details className="ex-details"><summary>首稿与首稿批改</summary>
+        <SavedText title={"首稿 · "+count(original??"")+" 词"} text={original??""}/>
+        <AttemptFeedback field="writeOriginal" structured={Boolean(cards)}/></details>
+      <ReflectPanel original={original??""} revised={revised??""} delta={delta} firstCards={cards} revealed={revealed} focus={entry.writeFocus} rechecksUsed={myRechecks.length}/>
+      <AttemptFeedback field="writeRevision" structured={Boolean(delta)}/>
+      <Submit disabled={busy} onClick={advance}>进入复盘 →</Submit>
+    </>}
+
+    {(step==="draft"||step==="revise")&&<>
       {under&&current.trim()&&<label className="ex-check"><input type="checkbox" disabled={submitting} checked={shortOk} onChange={e=>setShortOk(e.target.checked)}/>按当前字数提交，并保留篇幅不足的记录</label>}
-      <div className="actions"><Submit disabled={busy||!ready} onClick={submit}>{isRevision?"提交修订稿":"提交并锁定首稿"}</Submit>
-        <button type="button" className="secondary" disabled={busy||!current.trim()} onClick={()=>void save({[draftKey]:current})}>保存草稿</button></div>
-      <p className="ex-hint">{isRevision?"提交后会自动复核这份二稿，结果会显示在稿件旁。":"提交后会自动开始批改，结果会显示在首稿旁。建议看到批改后再动笔改二稿。"}</p>
+      <div className="actions"><Submit disabled={busy||!ready} onClick={()=>void submit()}>{step==="draft"?"提交首稿并开始批改":"提交二稿并复核"}</Submit>
+        <button type="button" className="secondary" disabled={busy||!current.trim()} onClick={()=>void save({[step==="draft"?"writeDraft":"writeRevisionDraft"]:current})}>保存到云端（换设备可继续）</button></div>
+      <p className="ex-hint">{step==="draft"?"提交后会自动开始批改，问题卡会出现在首稿旁边。":"提交后会自动复核：逐条告诉你改好了没有。"}</p>
     </>}
   </>;
 }

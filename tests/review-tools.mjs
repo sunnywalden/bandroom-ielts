@@ -50,6 +50,8 @@ registerHooks({resolve(specifier,context,next){
 const {callReviewTool,reviewTools}=await import('../lib/review-tools.ts');
 const {POST:takeoverPost}=await import('../app/api/review-tasks/takeover/route.ts');
 const {POST:renderedPost}=await import('../app/api/review-tasks/rendered/route.ts');
+const {POST:recheckPost}=await import('../app/api/writing/recheck/route.ts');
+const {reviewAttempts}=await import('../app/feedback-model.ts');
 const {GET:bundleGet}=await import('../app/api/analysis-bundle/route.ts');
 const {GET:transferGet,PUT:transferPut}=await import('../app/api/review-transfer/route.ts');
 const owner='tool-owner',other='tool-other';
@@ -57,9 +59,9 @@ let checks=0;
 function eq(actual,expected,label){assert.deepEqual(actual,expected,label);checks++}
 function text(result){return JSON.parse(result.content[0].text)}
 function reset(){sql.exec('DELETE FROM analysis_artifacts; DELETE FROM review_tasks; DELETE FROM review_jobs; DELETE FROM review_receipts; DELETE FROM teacher_feedback; DELETE FROM analysis_events; DELETE FROM scheduler_heartbeats; DELETE FROM automation_heartbeats; DELETE FROM learner_states;')}
-function insertJob({taskId=randomUUID(),kind='text',recordingId=null,recording,analysisVersion=null,stage='write'}={}){
+function insertJob({taskId=randomUUID(),kind='text',recordingId=null,recording,analysisVersion=null,stage='write',field='writeOriginal',response='Fixture answer',context={prompt:'Fixture prompt'},sourceId='v1:fixture'}={}){
   const jobId='v2:'+randomUUID();
-  const snapshot={sourceId:'v1:fixture',attempt:{id:jobId,day:12,field:'writeOriginal',index:0,stage,title:'Fixture',kind:'subjective',response:'Fixture answer',conditions:'',evidence:''},context:{prompt:'Fixture prompt'}};
+  const snapshot={sourceId,attempt:{id:jobId,day:12,field,index:0,stage,title:'Fixture',kind:'subjective',response,conditions:'',evidence:''},context};
   if(recording) snapshot.recording=recording;
   sql.prepare('INSERT INTO review_jobs(id,user_id,day,submission_key,request_hash,revision,snapshot,created_at) VALUES (?,?,?,?,?,?,?,?)')
     .run(jobId,owner,12,randomUUID(),'a'.repeat(64),22,JSON.stringify(snapshot),new Date().toISOString());
@@ -109,12 +111,12 @@ eq(text(badText).code ?? text(badText).error,'analysis_not_allowed','text analys
 // complete, replay, receipt, one feedback, learner state untouched
 sql.prepare('INSERT INTO learner_states(user_id,revision,state) VALUES (?,?,?)').run(owner,21,JSON.stringify({day:12,stage:'write',finished:false,completed:[1]}));
 const completed=text(await callReviewTool(owner,'complete_review_task',{
-  taskId:textJob.taskId,fence:1,feedback:'Text correction',evidence:'Text evidence',
+  taskId:textJob.taskId,fence:1,feedback:'Text correction',evidence:'Text evidence: “Fixture answer”',
 }));
 eq(typeof completed.receiptId,'string','receipt id');
 eq(completed.duplicate,false,'first completion');
 const replay=text(await callReviewTool(owner,'complete_review_task',{
-  taskId:textJob.taskId,fence:1,feedback:'Text correction',evidence:'Text evidence',
+  taskId:textJob.taskId,fence:1,feedback:'Text correction',evidence:'Text evidence: “Fixture answer”',
 }));
 eq([replay.receiptId,replay.duplicate],[completed.receiptId,true],'replay same receipt');
 const receipt=text(await callReviewTool(owner,'read_review_receipt',{taskId:textJob.taskId,clientRunId:'readback-run'}));
@@ -503,6 +505,102 @@ const takeoverBody=await takeover.json();
 eq([takeoverBody.claimed,takeoverBody.state],[true,'running'],'takeover claims the task');
 eq(sql.prepare('SELECT claim_kind FROM review_tasks WHERE id=?').get(takeoverJob.taskId).claim_kind,'manual','takeover records a manual claim');
 eq(await callReviewTool(owner,'claim_review_tasks',{limit:1,clientRunId:'auto-after-takeover'}).then(text).then(v=>v.tasks.length),0,'automatic claim cannot follow takeover');
+// Phase 1 writing loop through the real completion path.
+reset();
+const DRAFT='Nowadays many people believes that cities are crowded. It is good for society.';
+const cards={mode:'cards',issues:[
+  {id:'i1',category:'GRA',priority:'must',quote:'people believes',prompt_zh:'主语是复数，谓语要怎么变？',why_zh:'people 为复数。',suggestion:'people believe'},
+  {id:'i2',category:'TR',priority:'should',quote:'It is good for society.',prompt_zh:'“好”体现在哪里？',why_zh:'缺少例子。',suggestion:'rewrite'},
+],summary:{priorities:['i1','i2'],next_step_zh:'每个论点后补一个具体例子。'}};
+const claimOne=async(job,run)=>text(await callReviewTool(owner,'claim_review_tasks',{limit:3,clientRunId:run})).tasks.find(t=>t.id===job.taskId);
+const firstJob=insertJob({response:DRAFT});
+const firstTask=await claimOne(firstJob,'run-w1');
+const cardsBad=await callReviewTool(owner,'complete_review_task',{taskId:firstJob.taskId,fence:firstTask.fence,
+  feedback:'x',evidence:'“people believes”',writing:{...cards,summary:{priorities:[],next_step_zh:'这篇作文 band 6.5'}}});
+eq(text(cardsBad).error,'content_rule_violation','a band number inside a card is rejected');
+eq(text(await callReviewTool(owner,'complete_review_task',{taskId:firstJob.taskId,fence:firstTask.fence,
+  feedback:'x',evidence:'“people believes”',writing:{mode:'cards',issues:[]}})).error,'invalid_writing','schema enforced');
+eq(text(await callReviewTool(owner,'complete_review_task',{taskId:firstJob.taskId,fence:firstTask.fence,
+  feedback:'x',evidence:'“people believes”',writing:{...cards,mode:'delta',verdicts:[],summary:{carry_forward_zh:'x'}}})).error,
+  'writing_not_allowed','a first draft cannot receive an incremental review');
+const uncited=await callReviewTool(owner,'complete_review_task',{taskId:firstJob.taskId,fence:firstTask.fence,
+  feedback:'Good work overall.',evidence:'Looks fine.',writing:cards});
+eq(text(uncited).error,'content_rule_violation','automatic text reviews must cite the learner');
+const firstDone=text(await callReviewTool(owner,'complete_review_task',{taskId:firstJob.taskId,fence:firstTask.fence,
+  feedback:'cards',evidence:'原文 “people believes”',writing:cards}));
+eq(firstDone.duplicate,false,'writing cards complete');
+const storedCards=JSON.parse(sql.prepare('SELECT analysis_json FROM teacher_feedback WHERE review_task_id=?').get(firstJob.taskId).analysis_json);
+eq([storedCards.schema,storedCards.mode],['bandroom-writing-feedback-v1','cards'],'schema-tagged payload stored');
+eq(DRAFT.slice(storedCards.issues[0].anchor.start,storedCards.issues[0].anchor.end),'people believes','server-resolved anchor');
+eq(storedCards.issues[1].suggestion,null,'argument cards never carry a rewrite');
+eq(text(await callReviewTool(owner,'complete_review_task',{taskId:firstJob.taskId,fence:firstTask.fence,
+  feedback:'cards',evidence:'原文 “people believes”',writing:cards})).duplicate,true,'writing replay is idempotent');
+eq(text(await callReviewTool(owner,'complete_review_task',{taskId:firstJob.taskId,fence:firstTask.fence,
+  feedback:'cards',evidence:'原文 “people believes”',writing:{...cards,summary:{...cards.summary,next_step_zh:'改了'}}})).error,
+  'receipt_conflict','different writing output conflicts with the committed receipt');
+const speakJob=insertJob({field:'speakingPart2',stage:'speak'});
+const speakTask=await claimOne(speakJob,'run-w2');
+eq(text(await callReviewTool(owner,'complete_review_task',{taskId:speakJob.taskId,fence:speakTask.fence,
+  feedback:'x',evidence:'“Fixture answer”',writing:cards})).error,'writing_not_allowed','writing cards only on writing drafts');
+// Second draft with a frozen first review: deterministic verdict rules apply.
+const REVISION=DRAFT.replace('people believes','people believe');
+const secondJob=insertJob({field:'writeRevision',response:REVISION,context:{prompt:'p',firstDraft:DRAFT,
+  firstReview:{feedbackId:'rt:'+firstJob.taskId,issues:storedCards.issues}}});
+const secondTask=await claimOne(secondJob,'run-w3');
+const delta={mode:'delta',verdicts:[
+  {issue:'i1',result:'resolved',evidence_quote:'people believe that',why_zh:'已改正。'},
+  {issue:'i2',result:'resolved',evidence_quote:'It is good for society.',why_zh:'已补充。'},
+],issues:[],summary:{carry_forward_zh:'检查主谓一致。'}};
+eq(text(await callReviewTool(owner,'complete_review_task',{taskId:secondJob.taskId,fence:secondTask.fence,
+  feedback:'delta',evidence:'二稿 “people believe”',writing:delta})).duplicate,false,'incremental review completes');
+const storedDelta=JSON.parse(sql.prepare('SELECT analysis_json FROM teacher_feedback WHERE review_task_id=?').get(secondJob.taskId).analysis_json);
+eq(storedDelta.verdicts.map(v=>[v.issue,v.result,v.adjusted]),[['i1','resolved',false],['i2','untouched',true]],
+  'an unchanged anchor can never be reported as resolved');
+const plainSecond=insertJob({field:'writeRevision',response:REVISION,context:{prompt:'p',firstDraft:DRAFT}});
+const plainTask=await claimOne(plainSecond,'run-w4');
+eq(text(await callReviewTool(owner,'complete_review_task',{taskId:plainSecond.taskId,fence:plainTask.fence,
+  feedback:'delta',evidence:'二稿 “people believe”',writing:delta})).error,'writing_not_allowed','no frozen first review → no incremental review');
+eq(text(await callReviewTool(owner,'complete_review_task',{taskId:plainSecond.taskId,fence:plainTask.fence,
+  feedback:'cards',evidence:'二稿 “people believe”',writing:{...cards,issues:[cards.issues[1]],summary:{priorities:[],next_step_zh:'x'}}})).duplicate,
+  false,'a self-directed second draft gets a normal card review');
+
+// Phase 1 quick check ("我改好了吗？"): advisory side task on the review queue.
+reset();
+const rcEntry={writeOriginal:DRAFT,writeCondition:'独立 · 未计时',writeLoop:'v1'};
+sql.prepare('INSERT INTO learner_states(user_id,revision,state) VALUES (?,?,?)').run(owner,30,JSON.stringify({version:1,day:12,stage:'write',finished:false,completed:[1],entries:{12:rcEntry}}));
+const rcSource=(await reviewAttempts(12,rcEntry)).find(a=>a.field==='writeOriginal').id;
+const rcFirst=insertJob({response:DRAFT,sourceId:rcSource});
+const rcClaim=await claimOne(rcFirst,'run-rc1');
+text(await callReviewTool(owner,'complete_review_task',{taskId:rcFirst.taskId,fence:rcClaim.fence,feedback:'cards',evidence:'原文 “people believes”',writing:cards}));
+const recheckRequest=(body,origin='https://fixture.example')=>new Request('https://fixture.example/api/writing/recheck',{method:'POST',
+  headers:{origin,'content-type':'application/json'},body:JSON.stringify(body)});
+globalThis.testUser=null;
+eq((await recheckPost(recheckRequest({issueId:'i1',revised:REVISION}))).status,401,'quick check requires sign-in');
+globalThis.testUser={userId:owner};
+eq((await recheckPost(recheckRequest({issueId:'i1',revised:REVISION},'https://evil.test'))).status,403,'quick check rejects foreign origin');
+eq((await recheckPost(recheckRequest({issueId:'../x',revised:REVISION}))).status,400,'issue id validated');
+eq(await (await recheckPost(recheckRequest({issueId:'i1',revised:DRAFT}))).json(),{error:'issue_untouched'},'nothing to check on an untouched anchor');
+eq(await (await recheckPost(recheckRequest({issueId:'i9',revised:REVISION}))).json(),{error:'issue_not_checkable'},'unknown issue');
+const rc1=await (await recheckPost(recheckRequest({issueId:'i1',revised:REVISION,why:'people 是复数'}))).json();
+eq([rc1.used,rc1.limit,rc1.issueId],[1,5,'i1'],'first quick check queued');
+const rcJob=JSON.parse(sql.prepare('SELECT snapshot FROM review_jobs WHERE id=?').get(rc1.jobId).snapshot);
+eq([rcJob.attempt.field,rcJob.context.issue.id,rcJob.context.learnerWhy],['writeRecheck','i1','people 是复数'],'frozen quick-check snapshot');
+eq(rcJob.attempt.response,'Nowadays many people believe that cities are crowded.','checker sees the edited sentence in context');
+eq({...sql.prepare("SELECT kind,state FROM review_tasks WHERE attempt_id=?").get(rc1.jobId)},{kind:'text',state:'queued'},'runs on the normal queue');
+globalThis.testUser={userId:other};
+eq(await (await recheckPost(recheckRequest({issueId:'i1',revised:REVISION}))).json(),{error:'not_revising'},'another tenant has no draft to check');
+globalThis.testUser={userId:owner};
+const rcTask=await claimOne({taskId:sql.prepare('SELECT id FROM review_tasks WHERE attempt_id=?').get(rc1.jobId).id},'run-rc2');
+eq(text(await callReviewTool(owner,'complete_review_task',{taskId:rcTask.id,fence:rcTask.fence,feedback:'x',evidence:'二稿片段：“people believe that”'})).error,
+  'writing_required','a quick check cannot be completed as prose');
+eq(text(await callReviewTool(owner,'complete_review_task',{taskId:rcTask.id,fence:rcTask.fence,feedback:'quick',evidence:'二稿片段：“people believe that”',
+  writing:{mode:'recheck',result:'resolved',evidence_quote:'not in snippet',why_zh:'已改正。'}})).duplicate,false,'quick check completes');
+const rcStored=JSON.parse(sql.prepare('SELECT analysis_json FROM teacher_feedback WHERE attempt=?').get(rc1.jobId).analysis_json);
+eq([rcStored.mode,rcStored.issue,rcStored.result,rcStored.adjusted,rcStored.baseFeedbackId],['recheck','i1','unresolved',true,'rt:'+rcFirst.taskId],
+  'a non-verbatim quote downgrades the advisory verdict');
+for(let i=2;i<=5;i++)eq((await (await recheckPost(recheckRequest({issueId:'i1',revised:REVISION+' x'.repeat(i)}))).json()).used,i,'quick check '+i);
+eq(await (await recheckPost(recheckRequest({issueId:'i1',revised:REVISION}))).json(),{error:'recheck_limit'},'five quick checks per first-draft review');
+
 // Phase 0 telemetry: first render of a completed review, tenant-scoped and idempotent.
 reset();
 const renderedJob=insertJob();

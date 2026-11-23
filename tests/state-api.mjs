@@ -161,7 +161,16 @@ for(let day=12;day<=62;day++){
   await mark({writeDraft:'Scratch.'});await mark({writeDraft:'Updated scratch.'});
   await mark({writeOriginal:'First draft.',writeCondition:'独立 · 未计时'});
   if(day===12)await reject(withEntry({writeOriginal:'Replaced.'}));
-  await mark({writeRevision:'Revised draft.',writeFocus:'Evidence',writeDone:'1'});
+  if(day===12){
+    // Phase 1 loop metadata: bounded, well-formed JSON arrays and a v1 marker only.
+    await reject(withEntry({writeLoop:'v2'}));
+    await reject(withEntry({writeRevisionIssues:'not json'}));
+    await reject(withEntry({writeHintReveals:'{"a":1}'}));
+    await reject(withEntry({writeRevisionIssues:JSON.stringify(['x'.repeat(8000)])}));
+    await mark({writeLoop:'v1',writeHintReveals:JSON.stringify(['i1'])});
+    await mark({writeRevision:'Revised draft.',writeFocus:'people 是复数',writeDone:'1',
+      writeRevisionIssues:JSON.stringify([{id:'i1',state:'changed',why:'people 是复数'}])});
+  }else await mark({writeRevision:'Revised draft.',writeFocus:'Evidence',writeDone:'1'});
   await advance('review');await finish();
 }
 eq(state.completed.length,62);eq((await get())[1].state,state);eq((await get(other))[1].state,null);

@@ -70,7 +70,7 @@ function makeDigest(s:State,comments:Feedback[],from:string,to:string):Digest {
       }
     }
     if(e.writeOriginal&&add("write",`首稿 ${e.writeOriginal.trim().split(/\s+/).length} 词 · ${e.writeCondition||"条件未记录"}`,e._date_writeOriginal))writingPresent=true;
-    if(e.writeRevision)add("write",`修订稿 ${e.writeRevision.trim().split(/\s+/).length} 词 · ${e.writeFocus||"已提交"}`,e._date_writeRevision);
+    if(e.writeRevision)add("write",`二稿 ${e.writeRevision.trim().split(/\s+/).length} 词 · ${e.writeFocus||"已提交"}`,e._date_writeRevision);
     for(const k of ["speakingPart2","speakingFollowup"]){
       let a:Array<{at:string;audio?:string;local?:string;spoken?:boolean}>=[];
       try {const v=JSON.parse(e[k]||"[]");if(Array.isArray(v))a=v;}catch{/* Incomplete older records have no attempt date. */}
@@ -78,7 +78,7 @@ function makeDigest(s:State,comments:Feedback[],from:string,to:string):Digest {
     }
   }
   const priorities:string[]=[];
-  if(writingPresent) priorities.push("用新材料独立写一段。标出主张、依据和限定条件，再检查每个谓语。保留首稿与修订稿作下次对照。");
+  if(writingPresent) priorities.push("用新材料独立写一段。标出主张、依据和限定条件，再检查每个谓语。保留首稿与二稿作下次对照。");
   if(recallMiss)priorities.push("隔至少一个学习日再测试本期未命中的词。先回忆词形，再换一个工作场景独立造句。");
   if(priorities.length<2&&listenMiss)priorities.push("选择一段新录音，首听后分别记下说话人的决定和限制条件，再用原文定位漏听处。");
   if(priorities.length<2&&readMiss)priorities.push("给下一篇阅读的每个推断标记原句，单独核对样本范围与因果关系。");

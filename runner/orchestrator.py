@@ -119,6 +119,8 @@ TRANSIENT_TOOL_MESSAGES = (
 # Error details are persisted (state) and written to logs, so redact common
 # secret shapes before either sink. Shared with grounded_audio (no import cycle).
 from .redaction import redact_error_detail
+from . import writing_cards
+from .writing_cards import is_writing_attempt
 
 
 # Queue-path speaking completion contract gap (iteration-30, owner decision A).
@@ -544,6 +546,8 @@ class Produced:
     # sends it (server validates via validateGroundedAnalysis); the owner path
     # ignores it and uses validated.analysis (feedbackSpec.groundedAnalysis shape).
     queue_analysis: Mapping[str, Any] | None = None
+    # Phase 1 writing issue cards / second-draft verdicts (queue path only).
+    writing: Mapping[str, Any] | None = None
 
     def owner_args(self) -> dict[str, Any]:
         return feedback_to_tool_args(
@@ -565,6 +569,8 @@ class Produced:
         }
         if self.recording_sha256:
             args["recordingSha256"] = self.recording_sha256
+        if self.writing is not None:
+            args["writing"] = dict(self.writing)
         analysis = self.queue_analysis if self.queue_analysis is not None else self.validated.analysis
         if analysis is not None:
             args["analysis"] = dict(analysis)
@@ -983,6 +989,61 @@ class CoachRunner:
             response=str(attempt.get("response") or ""),
         )
         return Produced(validated=validated, day=day, stage=stage)
+
+    def _complete_writing(self, system: str, user: str) -> str:
+        """Raw structured-writing completion. `complete_writing` is an optional
+        capability (not part of the CoachModel protocol), so it is looked up
+        explicitly; a non-string answer is treated as malformed, never coerced."""
+        complete = getattr(self.model, "complete_writing", None)
+        if not callable(complete):
+            raise PermanentTaskError("writing_unsupported", "model cannot produce structured writing reviews")
+        raw = complete(system, user)
+        return raw if isinstance(raw, str) else ""
+
+    def _produce_writing(self, attempt: Mapping[str, Any], day: int) -> Produced:
+        """Writing issue cards (first draft) or an incremental verdict review
+        (second draft with a frozen first review). A locally invalid answer
+        falls back to the established prose review within the same task, so a
+        learner is never left without feedback because of a format slip."""
+        mode, system, user = writing_cards.build_messages(attempt)
+        try:
+            raw = self._complete_writing(system, user)
+            review = writing_cards.parse_review(raw, attempt, mode)
+        except writing_cards.WritingCardError as exc:
+            self._log("writing_fallback_prose", attempt=str(attempt.get("id")), code=exc.code)
+            return self._produce_text(attempt, day)
+        stage = str(attempt.get("stage"))
+        validated = validate_feedback(
+            review.feedback,
+            review.evidence,
+            str(attempt["id"]),
+            expected_attempt=str(attempt["id"]),
+            stage=stage,
+            recording_id=None,
+            pronunciation=None,
+            audio_used=False,
+            response=str(attempt.get("response") or ""),
+        )
+        self._log("writing_review_produced", attempt=str(attempt.get("id")), mode=mode,
+                  issues=len(review.writing.get("issues") or []),
+                  promptVersion=writing_cards.WRITING_PROMPT_VERSION)
+        return Produced(validated=validated, day=day, stage=stage, writing=review.writing)
+
+    def _produce_recheck(self, attempt: Mapping[str, Any], day: int) -> Produced:
+        """"我改好了吗？" quick check: a structured single-issue verdict only.
+        There is no prose fallback (a prose answer cannot be shown as a
+        verdict); a malformed answer is a retryable failure."""
+        system, user = writing_cards.build_recheck_messages(attempt)
+        review = writing_cards.parse_recheck(self._complete_writing(system, user), attempt)
+        self._log("writing_recheck_produced", attempt=str(attempt.get("id")),
+                  promptVersion=writing_cards.WRITING_PROMPT_VERSION)
+        stage = str(attempt.get("stage"))
+        validated = validate_feedback(
+            review.feedback, review.evidence, str(attempt["id"]),
+            expected_attempt=str(attempt["id"]), stage=stage, recording_id=None,
+            pronunciation=None, audio_used=False, response=str(attempt.get("response") or ""),
+        )
+        return Produced(validated=validated, day=day, stage=stage, writing=review.writing)
 
     def _review_text(
         self, attempt: Mapping[str, Any], day: int, run_id: str
@@ -1405,7 +1466,12 @@ class CoachRunner:
             cost = self.config.text_cost_cny
             if not budget.reserve(user_id, cost, task_id=task_id):
                 return False
-            produced = self._produce_text(attempt, day)
+            if writing_cards.is_recheck_attempt(attempt):
+                produced = self._produce_recheck(attempt, day)
+            elif is_writing_attempt(attempt) and callable(getattr(self.model, "complete_writing", None)):
+                produced = self._produce_writing(attempt, day)
+            else:
+                produced = self._produce_text(attempt, day)
             arguments = produced.complete_args(
                 task_id, fence, analysis_version=task.get("analysisVersion")
             )

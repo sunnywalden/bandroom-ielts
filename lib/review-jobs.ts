@@ -2,15 +2,54 @@ import { and, eq } from "drizzle-orm";
 import type { ReviewAttempt } from "@/app/feedback-model";
 import { getTenantDb } from "@/db";
 import { reviewJobs } from "@/db/schema";
+import { isWritingCards, type WritingIssue } from "./writing-feedback";
 import type { reviewContext } from "./review-context";
 import { createReviewTaskStatement, type ReviewTaskDb } from "./review-tasks";
 
 export type FrozenReview = {
   sourceId: string;
   attempt: ReviewAttempt;
-  context: ReturnType<typeof reviewContext>;
+  context: ReturnType<typeof reviewContext> & WritingRevisionContext;
   recording?: { sha256: string; bytes: number };
 };
+
+/** Frozen into a second-draft (writeRevision) snapshot at submission time
+ * (doc §4.8): the first draft text always; the first review's issue cards when
+ * they exist (incremental review), or its prose when it is a legacy review. */
+export type WritingRevisionContext = {
+  firstDraft?: string;
+  firstReview?: { feedbackId: string; issues: WritingIssue[] };
+  firstFeedback?: string;
+  /** Quick checks the learner ran against this first review (doc §4.5). */
+  rechecksUsed?: number;
+};
+
+export async function writingRevisionContext(userId: string, day: number, firstDraftSourceId: string,
+  firstDraft: string): Promise<WritingRevisionContext> {
+  // Raw tenant-scoped SQL (same client as submitReview) so the lookup runs
+  // inside the tripwire and in every test harness.
+  const db = getTenantDb(userId).$client as unknown as ReviewTaskDb;
+  const jobs = await db.prepare("SELECT id, snapshot FROM review_jobs WHERE user_id=? AND day=?")
+    .bind(userId, day).all<{ id: string; snapshot: string }>();
+  const job = (jobs.results ?? []).find(row => {
+    try { return (JSON.parse(row.snapshot) as { sourceId?: unknown })?.sourceId === firstDraftSourceId; }
+    catch { return false; }
+  });
+  if (!job) return { firstDraft };
+  const row = await db.prepare(`SELECT id, feedback, analysis_json AS analysisJson FROM teacher_feedback
+    WHERE user_id=? AND attempt=? ORDER BY created_at DESC, id DESC LIMIT 1`)
+    .bind(userId, job.id).first<{ id: string; feedback: string; analysisJson: string | null }>();
+  if (!row) return { firstDraft };
+  let analysis: unknown = null;
+  try { analysis = row.analysisJson ? JSON.parse(row.analysisJson) : null; } catch { analysis = null; }
+  if (isWritingCards(analysis)) {
+    const prefix = `recheck:${row.id}:`;
+    const used = await db.prepare("SELECT COUNT(*) AS n FROM review_jobs WHERE user_id=? AND substr(submission_key,1,?)=?")
+      .bind(userId, prefix.length, prefix).first<{ n: number }>();
+    return { firstDraft, firstReview: { feedbackId: row.id, issues: analysis.issues }, rechecksUsed: Number(used?.n ?? 0) };
+  }
+  return { firstDraft, firstFeedback: String(row.feedback).slice(0, 6000) };
+}
 
 export async function findSubmission(userId: string, submissionKey: string) {
   return getTenantDb(userId).select({

@@ -43,7 +43,9 @@ export type CoachAnalysis = {
   scorecard?: SpeakingScorecardData;
   items?: Array<{candidateId?:string;word?:string;atMs?:number;priorVerdict?:string;answeredVerdict?:string;verdict?:string;isCatchTrial?:boolean}>;
 };
-export type CoachFeedback = {id:string;day:number;stage:string;attempt:string;evidence:string;feedback:string;createdAt:string;analysis?:CoachAnalysis};
+export type CoachFeedback = {id:string;day:number;stage:string;attempt:string;evidence:string;feedback:string;createdAt:string;analysis?:CoachAnalysis;
+  // Phase 1 writing issue cards / second-draft verdicts (lib/writing-feedback.ts).
+  writing?:import('@/lib/writing-feedback').WritingFeedback};
 export type ReviewAttempt = {
   id:string; day:number; field:string; index:number; stage:'speak'|'vocab'|'listen'|'read'|'write'|'review';
   title:string; kind:'objective'|'subjective'; response:string; conditions:string;
@@ -54,6 +56,9 @@ export type ReviewAttempt = {
   questionId?:string; part?:1|2|3; seq?:number; mode?:'daily'|'full'|'mock';
 };
 export type ReviewLink = { id: string; sourceId: string; day: number };
+/** "我改好了吗？" quick check status (lib/coach.ts `rechecks`). Advisory only. */
+export type WritingRecheckStatus = { id: string; day: number; baseFeedbackId: string; issue: string; state: string;
+  result?: 'resolved'|'partial'|'unresolved'; why_zh?: string; adjusted?: boolean; createdAt?: string };
 export type ReviewTaskStatus = {
   id: string; attemptId: string; kind: 'text'|'speaking'; state: string; stage: string;
   nextAt: number; lastError: string|null; updatedAt: number;
@@ -138,7 +143,7 @@ export async function reviewAttempts(day:number, entry:Record<string,string>):Pr
   for(const stage of ['listen','read'] as const)for(const index of [0,1])
     add(stage+'Q'+index,stage,(stage==='listen'?'听力':'阅读')+'第 '+(index+1)+' 题',stage==='listen'?'objective':'subjective',entry[stage+'Mode'+index]||'',entry[stage+'Evidence'+index]||'');
   add('writeOriginal','write','写作首稿','subjective',entry.writeCondition||'');
-  add('writeRevision','write','写作修订稿','subjective','',entry.writeFocus||'');
+  add('writeRevision','write','写作二稿','subjective','',entry.writeFocus||'');
   add('reviewMemo','review','本课复盘');
   return Promise.all(candidates.map(async candidate=>{
     // Presentation labels may change without invalidating saved feedback.

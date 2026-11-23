@@ -72,7 +72,7 @@ class ValidatedFeedback:
 @lru_cache(maxsize=8)
 def load_prompt(name: str) -> str:
     """Load a versioned prompt file from ``runner/prompts``."""
-    if name not in {"text_rubric", "speaking_rubric", "grounded_audio"}:
+    if name not in {"text_rubric", "speaking_rubric", "grounded_audio", "writing_cards", "writing_delta", "writing_recheck"}:
         raise KeyError(f"unknown prompt: {name}")
     return (PROMPTS_DIR / f"{name}.txt").read_text(encoding="utf-8").strip()
 

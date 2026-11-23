@@ -1,0 +1,52 @@
+/* Writing loop (首稿 → 批改 → 二稿 → 复盘). Priority is encoded by colour AND
+   line style so it stays readable for colour-blind learners (doc §5.2). */
+.wl-steps{display:flex;gap:6px;list-style:none;padding:0;margin:0 0 1.1em;flex-wrap:wrap;font-size:12px}
+.wl-steps li{display:flex;align-items:center;gap:6px;padding:4px 10px 4px 4px;border-radius:999px;background:#eef1ea;color:#5b6a63}
+.wl-steps li span{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:#fff;font-weight:700}
+.wl-steps li.current{background:#2f5f50;color:#fff}.wl-steps li.current span{color:#2f5f50}
+.wl-steps li.done{background:#dfe9e2;color:#2f5f50}
+.wl-stats{font-size:12px;color:#596662;margin:-.6em 0 .8em;display:flex;gap:1em;flex-wrap:wrap}
+.wl-selfcheck{display:flex;gap:1em;flex-wrap:wrap;font-size:12px;color:#40514a;margin:.4em 0}
+.wl-selfcheck label{display:flex;gap:.35em;align-items:center}
+.wl-review{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:18px;align-items:start}
+@media (max-width:820px){.wl-review{grid-template-columns:1fr}}
+.wl-draft{white-space:pre-wrap;background:#f7f8f4;border-radius:10px;padding:14px 17px;line-height:1.8}
+.wl-mark{background:none;color:inherit;cursor:pointer;padding:0 1px;border-radius:3px;text-decoration-thickness:2px;text-underline-offset:3px;text-decoration-line:underline}
+.wl-mark sup{font:700 9px/1 ui-monospace,monospace;margin-left:1px;color:#2f5f50}
+.wl-mark.wl-must{text-decoration-style:solid;text-decoration-color:#b5452f}
+.wl-mark.wl-should{text-decoration-style:dashed;text-decoration-color:#b07a16}
+.wl-mark.wl-nice{text-decoration-style:dotted;text-decoration-color:#4b6f9e}
+.wl-mark.active,.wl-mark:focus{background:#fff2c7;outline:2px solid #387562;outline-offset:1px}
+.wl-cards{display:grid;gap:10px;max-height:70vh;overflow:auto;padding-right:2px}
+/* Single column: the cards flow with the page. A nested 70vh scroll pane is a
+   scroll trap on touch screens and clipped the last card in the phone check.
+   Must come AFTER the base rule: same specificity, last one wins. */
+@media (max-width:820px){.wl-cards{max-height:none;overflow:visible}}
+.wl-card{border:1px solid #d9ded4;border-left-width:4px;border-radius:10px;padding:10px 13px;background:#fff;font-size:14px}
+.wl-card.wl-must{border-left-color:#b5452f;border-left-style:solid}
+.wl-card.wl-should{border-left-color:#b07a16;border-left-style:dashed}
+.wl-card.wl-nice{border-left-color:#4b6f9e;border-left-style:dotted}
+.wl-card.active{box-shadow:0 0 0 2px #387562}
+.wl-card header{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.wl-n{display:inline-grid;place-items:center;min-width:20px;height:20px;border-radius:50%;background:#2f5f50;color:#fff;font:700 11px/1 ui-monospace,monospace}
+.wl-badge{font-size:11px;padding:1px 7px;border-radius:999px;background:#eef1ea}
+.wl-badge.wl-must{background:#f8e1db;color:#8d2f1c}.wl-badge.wl-should{background:#f6ecd5;color:#7a520a}.wl-badge.wl-nice{background:#e2eaf5;color:#2f4f78}
+.wl-pick{margin-left:auto;font-size:12px;display:flex;gap:4px;align-items:center}
+.wl-state{font-size:11px;padding:1px 7px;border-radius:999px;background:#eef1ea}
+.wl-state.wl-changed{background:#dfeee6;color:#24553f}.wl-state.wl-untouched{background:#f3f0e8;color:#6a5d3c}
+.wl-quote{font-style:italic;color:#34443e}.wl-prompt{font-weight:600}
+.wl-why summary{cursor:pointer;font-size:12px;color:#40514a;padding:6px 0}
+.wl-suggestion{background:#f1f4ec;border-radius:6px;padding:6px 9px}
+.wl-hint{font-size:12px;color:#596662}
+.wl-next{background:#f1f4ec;border-radius:10px;padding:10px 13px}.wl-next strong{display:block;font-size:12px;color:#2f5f50}
+.wl-checklist{display:grid;gap:10px;margin:.6em 0}.wl-why-input{margin:.4em 0 0}
+.wl-diff{line-height:1.9}.wl-diff del{color:#8d2f1c;text-decoration-thickness:2px}.wl-diff ins{color:#1f5a3f;background:#e3f1e8;text-decoration:none;border-bottom:2px solid #2f7a55}
+.wl-verdicts{list-style:none;padding:0;display:grid;gap:8px}
+.wl-verdicts li{border:1px solid #d9ded4;border-radius:10px;padding:9px 12px;font-size:14px}
+.wl-verdicts li strong{margin-right:8px}
+.wl-v-resolved{border-left:4px solid #2f7a55!important}.wl-v-partial{border-left:4px dashed #b07a16!important}
+.wl-v-unresolved{border-left:4px solid #b5452f!important}.wl-v-untouched{border-left:4px dotted #8a8f86!important}
+.wl-v-new{border-left:4px solid #4b6f9e!important}
+.wl-v-label{font-size:12px;color:#40514a}
+.wl-own{font-size:11px;padding:1px 7px;border-radius:999px;background:#dfeee6;color:#24553f;margin-right:6px}
+.wl-recheck{margin:.3em 0 0;font-size:13px}.wl-recheck p{margin:.2em 0}

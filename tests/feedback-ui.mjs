@@ -51,6 +51,7 @@ const flush=async()=>act(async()=>{await sleep(15)});
 const click=async target=>{assert.ok(target);assert.equal(target.disabled,false);await act(async()=>target.click());await flush()};
 const puts=()=>calls.filter(([url,init])=>url==='/api/state'&&init.method==='PUT');
 async function mount(){root=createRoot(document.getElementById('root'));await act(async()=>root.render(createElement(Studio)));await flush();await click(button(state.stage==='speak'?'继续口语练习':'继续当前练习'));}
+async function startRevision(){await click(button('先自主修改二稿'))}
 async function unmount(){if(root){await act(async()=>root.unmount());root=null}}
 async function write(value){const el=document.querySelector('textarea');assert.ok(el);await act(async()=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(el,value);el.dispatchEvent(new Event('input',{bubbles:true}))});await flush();}
 async function tick(){
@@ -85,6 +86,8 @@ beforeEach(()=>{
 afterEach(async()=>{await unmount()});
 test('delayed coach review arrives by polling at the original and preserves the revision draft',async()=>{
  await mount();assert.match(text(),/交给教练批改/);
+ assert.equal(document.querySelector('textarea'),null,'no revision box before the learner chooses to start the second draft');
+ await startRevision();
  await write('Unsaved revision that must survive feedback refresh.');
  feedback=[await row('writeOriginal','Return fixture correction for the original.')];
  await tick();
@@ -95,6 +98,50 @@ test('delayed coach review arrives by polling at the original and preserves the 
  assert.match(text(),/Return fixture correction/);
  assert.equal(document.querySelector('textarea').value,'Unsaved revision that must survive feedback refresh.');
  assert.equal(puts().length,0);
+});
+test('writing loop: anchored cards, recorded hint reveal, why-gated second draft and honest verdicts',async()=>{
+ const draft=state.entries[12].writeOriginal;
+ const at=q=>({start:draft.indexOf(q),end:draft.indexOf(q)+q.length});
+ const cards={schema:'bandroom-writing-feedback-v1',mode:'cards',issues:[
+  {id:'i1',category:'GRA',priority:'must',quote:'original answer.',anchor:at('original answer.'),prompt_zh:'这里需要冠词吗？',why_zh:'可数名词单数前需要冠词。',suggestion:'an original answer.'},
+  {id:'i2',category:'TR',priority:'should',quote:'Independent',anchor:at('Independent'),prompt_zh:'你的立场是什么？',why_zh:'缺少立场。',suggestion:null},
+  {id:'i3',category:'LR',priority:'nice',quote:'not in the draft',anchor:null,prompt_zh:'换个词？',why_zh:'重复。',suggestion:'fresh'}],
+  summary:{priorities:['i1'],next_step_zh:'写完检查冠词。'}};
+ feedback=[{...await row('writeOriginal','composed cards text'),writing:cards}];
+ await mount();
+ const marks=[...document.querySelectorAll('.wl-mark')];
+ assert.equal(marks.length,2,'only server-resolved anchors are highlighted');
+ assert.match(text(),/整体建议/);
+ assert.match(text(),/结构化批改已到达/);
+ assert.ok(!text().includes('参考改法：an original answer'),'the reference fix stays hidden until requested');
+ assert.ok(!text().includes('composed cards text'),'cards replace the prose rendering');
+ await click(button(/查看参考改法/));
+ assert.match(text(),/参考改法：an original answer/);
+ assert.deepEqual(JSON.parse(state.entries[12].writeHintReveals),['i1'],'the reveal is recorded');
+ await click(button('开始改二稿（已选 1 项）'));
+ const box=document.querySelector('textarea');assert.equal(box.value,draft,'the second draft starts from the first draft');
+ const submit=()=>button('提交二稿并复核');
+ assert.equal(submit().disabled,true);assert.match(text(),/二稿还和首稿一样/);
+ await write('Independent and an original answer here.');
+ assert.match(text(),/已改动 · 待复核/);
+ assert.match(text(),/为必改项 #1 写一句/);assert.equal(submit().disabled,true);
+ const why=document.querySelector('input[placeholder^="例如"]');assert.ok(why);
+ await act(async()=>{Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(why,'单数可数名词要加冠词');why.dispatchEvent(new Event('input',{bubbles:true}))});await flush();
+ const short=document.querySelector('.ex-check input');if(short&&!short.checked)await click(short);
+ assert.equal(submit().disabled,false);
+ await click(submit());
+ assert.match(state.entries[12].writeFocus,/^改了：#1 语法：单数可数名词要加冠词/);
+ assert.deepEqual(JSON.parse(state.entries[12].writeRevisionIssues),[{id:'i1',state:'changed',why:'单数可数名词要加冠词'}]);
+ assert.equal(state.entries[12].writeDone,'1');
+ feedback.push({...await row('writeRevision','composed delta text'),writing:{schema:'bandroom-writing-feedback-v1',mode:'delta',baseFeedbackId:'x',
+  verdicts:[{issue:'i1',result:'resolved',evidence_quote:'an original answer',why_zh:'已补冠词。',local:'changed',adjusted:false},
+   {issue:'i2',result:'untouched',evidence_quote:null,why_zh:'这一处没有改动。',local:'untouched',adjusted:true}],
+  issues:[],summary:{carry_forward_zh:'写完检查冠词。'}}});
+ await tick();
+ assert.match(text(),/改好了没有/);assert.match(text(),/已解决/);assert.match(text(),/未改动/);
+ assert.match(text(),/按原文核对后的结论/);
+ assert.ok(!text().includes('未看参考'),'a fix made after viewing the reference is not credited as independent');
+ assert.ok(document.querySelector('.wl-diff ins'),'word-level diff is shown');
 });
 test('failed sync retains prior review and retries; a slow request cannot overlap',async()=>{
  feedback=[await row('writeOriginal','Previously received feedback')];await mount();
@@ -107,7 +154,7 @@ test('failed sync retains prior review and retries; a slow request cannot overla
  assert.ok(!text().includes('反馈同步暂时失败'));assert.equal(puts().length,0);
 });
 test('login expiry locks the page without erasing a draft; reconnect restores the same answer',async()=>{
- await mount();await write('Retain this draft through sign-in.');
+ await mount();await startRevision();await write('Retain this draft through sign-in.');
  coachFault=()=>response(401,{error:'sign_in_required'});await tick();
  assert.match(text(),/登录学习空间/);assert.equal(poll,undefined);
  assert.equal(document.querySelector('.app-shell').hidden,true);
@@ -121,7 +168,7 @@ test('old or other-attempt feedback never attaches to the current original or re
  feedback.push({...feedback[0],id:'legacy',attempt:'old descriptive label',feedback:'Historic review kept separately'});
  await mount();
  const original=document.querySelector('[aria-label="写作首稿反馈"]').textContent;
- const revision=document.querySelector('[aria-label="写作修订稿反馈"]').textContent;
+ const revision=document.querySelector('[aria-label="写作二稿反馈"]').textContent;
  assert.match(original,/Original-only/);assert.ok(!original.includes('Revision-only'));
  assert.match(revision,/Revision-only/);assert.ok(!revision.includes('Original-only'));
  assert.ok(!original.includes('Historic review'));
@@ -131,10 +178,10 @@ test('old or other-attempt feedback never attaches to the current original or re
 test('first-draft failure retains text; delayed duplicate clicks create only one save and no advance',async()=>{
  delete state.entries[12].writeOriginal;delete state.entries[12].writeCondition;
  await mount();const draft=Array.from({length:100},(_,i)=>'word'+i).join(' ');await write(draft);
- stateFault=()=>response(422,{error:'invalid_review_submission'});await click(button('提交并锁定首稿'));
+ stateFault=()=>response(422,{error:'invalid_review_submission'});await click(button('提交首稿并开始批改'));
  assert.equal(state.entries[12].writeOriginal,undefined);assert.equal(document.querySelector('textarea').value,draft);
  let resolve,payload;stateFault=init=>{payload=JSON.parse(init.body);return new Promise(r=>{resolve=r})};
- const submit=button('提交并锁定首稿'),before=puts().length;
+ const submit=button('提交首稿并开始批改'),before=puts().length;
  await act(async()=>{submit.click();submit.click()});await flush();
  assert.equal(puts().length,before+1);assert.equal(state.entries[12].writeOriginal,undefined);
  assert.equal(document.querySelector('textarea').readOnly,true);
@@ -151,7 +198,7 @@ test('typing during a delayed draft save survives its acknowledgement and a page
  delete state.entries[12].writeOriginal;delete state.entries[12].writeCondition;
  await mount();await write('The draft sent to the server.');
  let resolve,payload;stateFault=init=>{payload=JSON.parse(init.body);return new Promise(r=>{resolve=r})};
- await click(button('保存草稿'));
+ await click(button('保存到云端（换设备可继续）'));
  assert.equal(document.querySelector('textarea').readOnly,false);
  await write('New edits made while the save is pending.');
  state=payload.state;revision++;
@@ -160,7 +207,7 @@ test('typing during a delayed draft save survives its acknowledgement and a page
  assert.equal(document.querySelector('textarea').value,'New edits made while the save is pending.');
  await unmount();await mount();
  assert.equal(document.querySelector('textarea').value,'New edits made while the save is pending.');
- stateFault=null;await click(button('保存草稿'));
+ stateFault=null;await click(button('保存到云端（换设备可继续）'));
  assert.equal(state.entries[12].writeDraft,'New edits made while the save is pending.');
  // With no remaining local edits, an explicit refresh follows the saved cloud draft.
  state.entries[12].writeDraft='A newer cloud draft.';revision++;
@@ -168,7 +215,7 @@ test('typing during a delayed draft save survives its acknowledgement and a page
  assert.equal(document.querySelector('textarea').value,'A newer cloud draft.');
 });
 test('coach response from another account locks the page without displaying that feedback',async()=>{
- await mount();await write('Private draft from the original account.');
+ await mount();await startRevision();await write('Private draft from the original account.');
  const foreign=await row('writeOriginal','Other account secret');
  coachFault=()=>response(200,{account:'another-account',extras:{},feedback:[foreign]});
  await tick();
@@ -181,16 +228,16 @@ test('coach response from another account locks the page without displaying that
  assert.equal(document.querySelector('textarea').value,'Private draft from the original account.');
 });
 test('a late successful save cannot unlock an expired session',async()=>{
- await mount();await write('Draft saved just before session expiry.');
+ await mount();await startRevision();await write('Draft saved just before session expiry.');
  let resolve,payload;stateFault=init=>{payload=JSON.parse(init.body);return new Promise(r=>{resolve=r})};
- await click(button('保存草稿'));
+ await click(button('保存到云端（换设备可继续）'));
  coachFault=()=>response(401,{error:'sign_in_required'});await tick();
  state=payload.state;revision++;
  await act(async()=>resolve(await receipt(payload)));await flush();
  assert.match(text(),/登录学习空间/);
  assert.equal(document.querySelector('.app-shell').hidden,true);
  const before=puts().length;
- await click(button('保存草稿'));assert.equal(puts().length,before);
+ await click(button('保存到云端（换设备可继续）'));assert.equal(puts().length,before);
  stateFault=coachFault=null;await click(button('重新读取进度'));
  assert.equal(document.querySelector('textarea').value,'Draft saved just before session expiry.');
  assert.equal(document.querySelector('.app-shell').hidden,false);

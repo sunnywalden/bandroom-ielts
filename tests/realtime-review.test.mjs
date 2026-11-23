@@ -69,3 +69,52 @@ test("latency report: percentiles, 30-minute visible window, indicative label", 
   assert.equal(report.text.visible.p50Seconds, 32);
   assert.equal(report.speaking.ready.n, 0);
 });
+
+test("writing anchor hit rate: pure summary labels target, floor and indicative sample size", async () => {
+  const { summarizeAnchors, ANCHOR_TARGET, ANCHOR_FLOOR } = await import("../scripts/review-latency-report.mjs");
+  assert.equal(ANCHOR_TARGET, 0.9);
+  assert.equal(ANCHOR_FLOOR, 0.8);
+  const empty = summarizeAnchors([]).all;
+  assert.deepEqual([empty.issues, empty.rate, empty.meetsTarget, empty.belowFloor, empty.label], [0, null, null, null, "indicative"]);
+  const good = summarizeAnchors([{ mode: "cards", issues: 18, anchored: 17 }, { mode: "delta", issues: 4, anchored: 4 }]);
+  assert.deepEqual(good.cards, { issues: 18, anchored: 17, rate: 0.944 });
+  assert.deepEqual(good.all, { issues: 22, anchored: 21, rate: 0.955, label: "measured", meetsTarget: true, belowFloor: false });
+  const low = summarizeAnchors([{ mode: "cards", issues: 10, anchored: 7 }]).all;
+  assert.deepEqual([low.rate, low.meetsTarget, low.belowFloor, low.label], [0.7, false, true, "indicative"]);
+  // Impossible rows (anchored > issues, negatives, NaN) are dropped, never counted.
+  const bad = summarizeAnchors([{ mode: "cards", issues: 2, anchored: 3 }, { mode: "cards", issues: -1, anchored: 0 }, { mode: "x", issues: "n/a", anchored: 1 }]);
+  assert.equal(bad.all.issues, 0);
+});
+
+test("writing anchor hit rate: ANCHOR_SQL counts only v1 writing cards/delta inside the window", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const { ANCHOR_SQL, summarizeAnchors } = await import("../scripts/review-latency-report.mjs");
+  const db = new DatabaseSync(":memory:");
+  for (const file of readdirSync("drizzle").filter(f => f.endsWith(".sql")).sort()) db.exec(readFileSync("drizzle/" + file, "utf8"));
+  const insert = db.prepare(`INSERT INTO teacher_feedback (id,user_id,day,stage,attempt,evidence,feedback,created_at,analysis_json)
+    VALUES (?,?,?,?,?,?,?,?,?)`);
+  const recent = "2026-11-22T10:00:00.000Z", old = "2026-11-01T10:00:00.000Z";
+  const span = { start: 0, end: 4 };
+  const card = (mode, anchors) => JSON.stringify({ schema: "bandroom-writing-feedback-v1", mode,
+    issues: anchors.map((anchor, i) => ({ id: "i" + i, anchor, quote: "q", category: "GRA", priority: "must" })) });
+  let n = 0;
+  const add = (createdAt, json) => insert.run("f" + ++n, "u1", 12, "write", "a" + n, "e", "f", createdAt, json);
+  add(recent, card("cards", [span, span, null]));            // 3 issues, 2 anchored
+  add(recent, card("cards", [span]));                        // 1 / 1
+  add(recent, card("delta", [null]));                        // 1 / 0
+  add(old, card("cards", [null, null, null, null]));         // outside the window
+  add(recent, card("recheck", [span]));                      // wrong mode: not an issue list
+  add(recent, null);                                         // legacy prose feedback
+  add(recent, JSON.stringify({ items: [{ candidateId: "c1" }] })); // speaking analysis, no schema
+  add(recent, "not json at all");                            // json_valid must guard this row
+  add(recent, JSON.stringify({ schema: "other-schema", mode: "cards", issues: [{ anchor: null }] }));
+  const sql = ANCHOR_SQL.replace("?SINCE_ISO?", "2026-11-20T00:00:00.000Z");
+  const rows = db.prepare(sql).all().map(row => ({ ...row }));
+  const report = summarizeAnchors(rows);
+  assert.deepEqual(report.cards, { issues: 4, anchored: 3, rate: 0.75 });
+  assert.deepEqual(report.delta, { issues: 1, anchored: 0, rate: 0 });
+  assert.deepEqual([report.all.issues, report.all.anchored, report.all.rate], [5, 3, 0.6]);
+  assert.equal(report.all.belowFloor, true);
+  assert.equal(report.all.label, "indicative");
+});
