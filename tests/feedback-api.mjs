@@ -216,6 +216,29 @@ const scoredPronunciation={...scorecard,criteria:scorecard.criteria.map(c=>c.key
 const rejectedScorecard=await call('add_coach_feedback',{...speakFeedback,attempt:v2TaskId,
   groundedAnalysis:{...groundedAnalysis,scorecard:scoredPronunciation}});
 assert.equal(rejectedScorecard.isError,true,'a pronunciation band is rejected while gates are unmet');check();
+// Evidence-gated bands (owner deviation report 2026-11-23): a report must never
+// show a numeric band for a criterion without measured evidence, and the
+// overall may only aggregate disclosed scored criteria.
+const withScorecard=card=>call('add_coach_feedback',{...speakFeedback,attempt:v2TaskId,groundedAnalysis:{...groundedAnalysis,scorecard:card}});
+const fcNoEvidence={...scorecard,criteria:scorecard.criteria.map(c=>c.key==='fluency_coherence'?{key:c.key,label_zh:c.label_zh,band:6,status:'reference',disclosure_zh:'参考估计'}:c)};
+assert.equal((await withScorecard(fcNoEvidence)).isError,true,'fluency band without measured speech evidence is rejected');check();
+const fcZeroSpeech={...scorecard,criteria:scorecard.criteria.map(c=>c.key==='fluency_coherence'?{...c,band:6,evidence:{speech_ratio:0,speech_duration_seconds:0,total_duration_seconds:11}}:c)};
+assert.equal((await withScorecard(fcZeroSpeech)).isError,true,'zero-speech measurement must stay unscored, never a low band');check();
+const allNull={...scorecard,overall:{...scorecard.overall,band:6},criteria:scorecard.criteria.map(c=>({...c,band:null}))};
+assert.equal((await withScorecard(allNull)).isError,true,'overall band with no scored criteria is rejected');check();
+const overallHigh={...scorecard,overall:{...scorecard.overall,band:8}};
+assert.equal((await withScorecard(overallHigh)).isError,true,'overall outside the scored criteria min-max is rejected');check();
+const overallNull={...scorecard,overall:{...scorecard.overall,band:null}};
+assert.equal((await withScorecard(overallNull)).isError,true,'overall null while criteria are scored is rejected');check();
+const fcRefused={...scorecard,overall:{...scorecard.overall,band:6,basis_zh:'词汇、语法参考估计均值'},
+ criteria:scorecard.criteria.map(c=>c.key==='fluency_coherence'?{...c,band:null,evidence:{speech_ratio:0,speech_duration_seconds:0,total_duration_seconds:0}}:c)};
+const v2KeyB='11111111-1111-4111-8111-111111111116',v2TaskIdB='v2:'+v2KeyB;
+const v2SnapshotB={sourceId:revisionAttempt.id,attempt:{...revisionAttempt,id:v2TaskIdB,stage:'speak',recordingId:speakRecording,response:'Spoken fixture response'},context:{prompt:'Spoken prompt'}};
+db.prepare('INSERT INTO review_jobs VALUES (?,?,?,?,?,?,?,?)').run(v2TaskIdB,user.userId,12,v2KeyB,'f'.repeat(64),21,JSON.stringify(v2SnapshotB),'2026-11-09T01:00:00Z');
+db.prepare(`INSERT INTO review_tasks(id,review_job_id,user_id,kind,attempt_id,day,attempt_revision,stage,state,fence,attempts,next_at,created_at,updated_at,recording_id)
+ VALUES (?,?,?,?,?,?,?,'speak','queued',0,0,?,?,?,?)`).run('scorecard-task-b',v2TaskIdB,user.userId,'speaking',v2TaskIdB,12,21,Date.now(),Date.now(),Date.now(),speakRecording);
+const fcRefusedRes=await call('add_coach_feedback',{...speakFeedback,attempt:v2TaskIdB,groundedAnalysis:{...groundedAnalysis,scorecard:fcRefused}});
+assert.notEqual(fcRefusedRes.isError,true,'refused fluency (band null) with zero speech is accepted');check();
 // The learner answers the self-listen card; the coach read path must decorate
 // the stored items with the verdict so transcript colors survive a reload.
 const scorecardCandidate=v2Stored.items[0].candidateId;
@@ -258,5 +281,5 @@ globalThis.user=null;
 assert.equal((await http.GET()).status,401);assert.equal((await rpc('add_coach_feedback',feedback)).status,401);check();
 const unchanged=db.prepare('SELECT revision,state FROM learner_states WHERE user_id=?').get('feedback-fixture');
 assert.equal(unchanged.revision,21);assert.equal(unchanged.state,snapshot);
-assert.equal(db.prepare('SELECT COUNT(*) n FROM teacher_feedback').get().n,6,'one extra row: scorecard v2 save');check();
+assert.equal(db.prepare('SELECT COUNT(*) n FROM teacher_feedback').get().n,7,'two extra rows: scorecard v2 save + refused-fluency positive case');check();
 console.log(JSON.stringify({suite:'feedback-api',checks:assertions,passed:true,learnerStateUnchanged:true}));
